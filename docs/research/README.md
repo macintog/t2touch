@@ -28,18 +28,13 @@ survivor after reboot. A continuous second-finger session checked for a duplicat
 completed enrollment, saved the resulting state, reconciled two identities, and
 matched the newly added finger.
 
-The machine had previously undergone macOS provisioning of its embedded storage.
-The research established creation of Linux-owned account and fingerprint state;
-creation of the underlying embedded xART storage on an entirely unprovisioned T2
-remains a separate problem. The Mac continues to run Apple's bridgeOS and SEP
-firmware. Desktop authentication through fprintd/PAM, packaging, and broader
-hardware coverage remain integration work.
+The Mac continues to run Apple's bridgeOS and SEP firmware. Desktop authentication
+through fprintd/PAM, packaging, and broader hardware coverage remain integration work.
 
 ## Reuse
 
 This directory is available under the [MIT license](LICENSE) in both t2touch and
-t2touch-mini. The notes are original explanations of the research findings;
-Apple firmware and disassembly are not included. Each reference names the tested
-or analyzed build where that affects the result. Protocol identifiers belong to
-their stated interface: an AKS operation number, a BiometricKit command, and an
+t2touch-mini. The notes are original explanations of the research findings.
+Each reference names the tested or analyzed build where that affects the result.
+Protocol identifiers belong to their stated interface: an AKS operation number, a BiometricKit command, and an
 internal SEP service handle can have the same value without naming the same thing.
