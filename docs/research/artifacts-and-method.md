@@ -73,9 +73,3 @@ Artifact acquisition and analysis used these open-source tools:
 | [ipsw](https://github.com/blacktop/ipsw) | Apple image inspection and extraction | `cdbc3a57114b5b240d23b00aa29cfad4d1f1d3fd` |
 | [DyldExtractor](https://github.com/arandomdev/DyldExtractor) | Shared-cache image recovery | `0e1b35a5f60e7041c51b57a54cc36d815fe7adf2` |
 | [sepsplit-rs](https://github.com/justtryingthingsout/sepsplit-rs) | SEP application reconstruction with split-data support | `ff45f9d1013cfd54413ec6c57b616b4e89187b7f` |
-
-The older [sepsplit](https://github.com/matteyeux/sepsplit) at
-`721c5bb3d7730af0bf39b9083b7ddeab3f718ee1` was a comparison tool. Its output did
-not resolve this firmware's split-data layout and was not used for the final
-application analysis. The hashes above identify analyzed artifacts; this
-documentation bundle contains neither those binaries nor tool source.
