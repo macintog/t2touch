@@ -11,6 +11,12 @@ reference for the native adoption research. Its top-level
 [license](https://github.com/standardagents/t1bridge/blob/7003b8d9f791/LICENSE)
 is MIT. The native implementation has not yet been imported into this checkout.
 
+The original [research documentation](research/README.md) is available under its
+own [MIT license](research/LICENSE), also in t2touch-mini. Its
+[artifact and tool credits](research/artifacts-and-method.md) identify the analyzed
+firmware and the open-source tools used. This documentation license does not
+change the license of the inherited implementation.
+
 ## Dependencies in the upstream implementation
 
 | Dependency | Pinned revision | License |
