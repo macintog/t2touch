@@ -31,16 +31,14 @@
 - [x] The installed doctor reports no unexpected failure on the reference Mac.
 - [x] The README commands and support limits match the shipped behavior.
 
-## Outstanding distribution gate
+## Outstanding acceptance gate
 
-The reference system's running `linux-t2` kernel carries the required typed
-`applesmc` SEP boot-state publisher. The ordinary package has not been shown to
-carry that patch, and this repository deliberately refuses before mutation when
-the publisher is absent. Before calling the four-command flow reproducible on a
-stock fresh Omarchy install, publish or upstream the patched kernel prerequisite
-and repeat the exact public quick start from a clean supported volume. This is a
-distribution/acceptance gate, not a reason to weaken the installer check or add
-manual service sequencing.
+The repository now supplies a package-managed DKMS replacement when the
+ordinary `linux-t2` package lacks the required typed `applesmc` SEP boot-state
+publisher. The remaining release gate is to repeat the exact public quick start
+from a clean, fully updated supported Omarchy volume. This is an acceptance
+gate, not a reason to weaken the live-driver check or add manual service
+sequencing.
 
 ## Publication
 

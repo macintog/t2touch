@@ -11,12 +11,6 @@ command -v omarchy >/dev/null || {
   exit 1
 }
 
-if ! modinfo -p applesmc 2>/dev/null | grep -q '^t2_sep_boot_state:'; then
-  echo "The running T2 kernel lacks t2touch's required typed SEP boot-state publisher." >&2
-  echo "Install a kernel carrying linux_native/patches/applesmc-t2-sep-boot-state.patch before running this installer." >&2
-  exit 2
-fi
-
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 running_kernel=$(uname -r)
 mapfile -t kernel_packages < <(

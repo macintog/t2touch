@@ -12,6 +12,64 @@ if [[ -z ${SUDO_USER:-} || $SUDO_USER == root ]]; then
 fi
 
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
+
+stage_applesmc_prerequisite() {
+  local package_name=applesmc-t2touch
+  local package_version=0.1.0
+  local running_kernel dkms_source dkms_stamp source_hash
+  local disk_module
+
+  for command in dkms depmod mkinitcpio modinfo; do
+    command -v "$command" >/dev/null 2>&1 || {
+      echo "Cannot stage the T2 boot prerequisite: $command is unavailable." >&2
+      return 1
+    }
+  done
+  running_kernel=$(uname -r)
+  if [[ ! -d /usr/lib/modules/$running_kernel/build ]]; then
+    echo "Cannot stage the T2 boot prerequisite: headers for $running_kernel are unavailable." >&2
+    return 1
+  fi
+  for file in applesmc.c Makefile dkms.conf; do
+    if [[ ! -f $source_dir/packaging/applesmc-t2touch/$file ]]; then
+      echo "Cannot stage the T2 boot prerequisite: packaged $file is missing." >&2
+      return 1
+    fi
+  done
+
+  dkms_source=/usr/src/$package_name-$package_version
+  dkms_stamp=$dkms_source/.source.sha256
+  source_hash=$(
+    sha256sum "$source_dir/packaging/applesmc-t2touch/"{applesmc.c,Makefile,dkms.conf} |
+      awk '{print $1}' | sha256sum | awk '{print $1}'
+  )
+  install -d -o root -g root -m 0755 "$dkms_source"
+  install -o root -g root -m 0644 \
+    "$source_dir/packaging/applesmc-t2touch/"{applesmc.c,Makefile,dkms.conf} \
+    "$dkms_source/"
+  dkms add --force -m "$package_name" -v "$package_version"
+  dkms build --force -m "$package_name" -v "$package_version" \
+    -k "$running_kernel"
+  dkms install --force -m "$package_name" -v "$package_version" \
+    -k "$running_kernel"
+  printf '%s\n' "$source_hash" >"$dkms_stamp"
+  chmod 0644 "$dkms_stamp"
+  cat >/etc/modprobe.d/t2-sep-boot-state.conf <<'EOF'
+options applesmc t2_sep_boot_state=1 t2_sep_epoch_major=1 t2_sep_epoch_minor=0
+softdep t2_sep_transport pre: applesmc
+EOF
+  chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf
+  depmod -a "$running_kernel"
+  disk_module=$(modinfo -k "$running_kernel" -n applesmc 2>/dev/null || true)
+  if [[ $disk_module != /lib/modules/$running_kernel/updates/dkms/applesmc.ko* ]] ||
+    ! modinfo -k "$running_kernel" -p applesmc 2>/dev/null |
+      grep -q '^t2_sep_boot_state:'; then
+    echo "The staged applesmc replacement did not become the selected on-disk module." >&2
+    return 1
+  fi
+  mkinitcpio -P
+}
+
 # Build and compare against the running module before changing installed
 # files, configuration, DKMS stamps, or service state. A disk source stamp
 # describes the next load, not the module already resident in this kernel.
@@ -27,10 +85,15 @@ if [[ -d /sys/module/t2_sep_transport ]]; then
   fi
   live_transport_matches=1
 fi
-if ! modinfo -p applesmc 2>/dev/null | grep -q '^t2_sep_boot_state:'; then
-  echo "The running kernel lacks the required typed T2 SEP boot-state publisher; installation stopped before changing installed state." >&2
-  echo "Use a T2 kernel carrying linux_native/patches/applesmc-t2-sep-boot-state.patch, then retry." >&2
-  exit 2
+if [[ ! -r /sys/module/applesmc/parameters/t2_sep_boot_state ]] ||
+  [[ $(cat /sys/module/applesmc/parameters/t2_sep_boot_state 2>/dev/null || true) != Y ]]; then
+  echo "The running applesmc driver has not published the required typed T2 SEP boot state." >&2
+  echo "Staging the package-managed prerequisite without changing biometric, PAM, or service state." >&2
+  stage_applesmc_prerequisite || exit 2
+  echo >&2
+  echo "The prerequisite is staged for the next ordinary kernel start." >&2
+  echo "Restart when convenient, then rerun ./install-omarchy.sh; the product installation itself remains reboot-free." >&2
+  exit 3
 fi
 
 target_dir=/opt/t2-touchid

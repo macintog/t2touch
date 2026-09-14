@@ -10,6 +10,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallerTests(unittest.TestCase):
+    def test_live_applesmc_gate_stages_owned_dkms_before_product_mutation(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        wrapper = (ROOT / "install-omarchy.sh").read_text(encoding="utf-8")
+        uninstaller = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
+        live_gate = "/sys/module/applesmc/parameters/t2_sep_boot_state"
+        stage_call = "stage_applesmc_prerequisite || exit 2"
+        first_product_write = "target_dir=/opt/t2-touchid"
+
+        self.assertIn(live_gate, installer)
+        self.assertNotIn("modinfo -p applesmc", wrapper)
+        self.assertIn(stage_call, installer)
+        self.assertLess(installer.index(stage_call), installer.index(first_product_write))
+        self.assertIn("/usr/src/$package_name-$package_version", installer)
+        self.assertIn("mkinitcpio -P", installer)
+        self.assertIn(
+            "dkms remove -m applesmc-t2touch -v 0.1.0 --all",
+            uninstaller,
+        )
+
     def test_dbus_policy_directory_is_created_before_policy_write(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         directory = (

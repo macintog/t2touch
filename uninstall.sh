@@ -41,6 +41,16 @@ if [[ -d $dkms_state ]]; then
   dkms remove -m t2-sep-transport -v 0.1.0 --all
 fi
 rm -rf -- "$dkms_source"
+applesmc_dkms_source=/usr/src/applesmc-t2touch-0.1.0
+applesmc_dkms_state=/var/lib/dkms/applesmc-t2touch/0.1.0
+if [[ -d $applesmc_dkms_state ]]; then
+  command -v dkms >/dev/null 2>&1 || {
+    echo "DKMS is required to unregister the installed applesmc prerequisite." >&2
+    exit 1
+  }
+  dkms remove -m applesmc-t2touch -v 0.1.0 --all
+fi
+rm -rf -- "$applesmc_dkms_source"
 pam_backup_present=0
 for marker in /var/lib/t2-touchid/pam-backups/*.original \
   /var/lib/t2-touchid/pam-backups/*.absent; do
@@ -87,5 +97,11 @@ if [[ -n $target_home && -d $target_home/.config/systemd/user ]]; then
 fi
 systemctl daemon-reload
 systemctl reload dbus.service 2>/dev/null || true
+if command -v depmod >/dev/null 2>&1; then
+  depmod -a "$(uname -r)"
+fi
+if command -v mkinitcpio >/dev/null 2>&1; then
+  mkinitcpio -P
+fi
 
 echo "Removed installed files. Preserved config, credentials, and biometric data."

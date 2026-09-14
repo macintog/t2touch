@@ -20,6 +20,10 @@ cd t2touch
 t2touch enroll
 ```
 
+On a kernel whose stock `applesmc` lacks the required publisher, the first
+installer run will stage the included DKMS prerequisite and stop safely. After
+one ordinary restart, rerun `./install-omarchy.sh`, then `t2touch enroll`.
+
 The enrollment command opens the Touch ID terminal interface. Briefly touch and
 lift the same finger as prompted. SEP reports real, non-linear progress; the
 fingerprint graphic fills to match that percentage. Enrollment returns success
@@ -69,10 +73,11 @@ fprintd starts.
 
 - An Intel Mac with an Apple T2 chip
 - Omarchy with the T2 Linux kernel and matching headers
-- A T2 kernel carrying the typed `applesmc` SEP boot-state publisher in
+- A T2 kernel and matching headers. The installer supplies a DKMS build of the
+  typed `applesmc` SEP boot-state publisher from
   [`linux_native/patches/applesmc-t2-sep-boot-state.patch`](linux_native/patches/applesmc-t2-sep-boot-state.patch).
-  The reference Mac uses that patch; do not assume an unmodified `linux-t2`
-  package contains it.
+  It is used only when the running kernel does not already provide that
+  capability.
 - An active local desktop session for the account that will use Touch ID
 - Secure Boot configuration that permits the locally built DKMS module
 
@@ -81,6 +86,12 @@ the headers matching the running kernel through `omarchy pkg add`. It detects
 the Apple T2 network interface, creates an encrypted Linux-owned identity
 credential, builds the transport with DKMS, starts the complete service chain,
 and installs reversible PAM integration.
+
+If the running `applesmc` driver lacks the boot-state publisher, the first
+installer run stages the included `applesmc-t2touch` DKMS prerequisite and
+stops before changing biometric, PAM, or service state. Restart once at a
+convenient time and rerun `./install-omarchy.sh`; it then completes the product
+installation in that session. The installer never reboots the machine itself.
 
 Run the installer as your desktop account, not as root. It invokes `sudo` only
 for the system changes it owns.
