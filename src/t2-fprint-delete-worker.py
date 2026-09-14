@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -24,8 +25,9 @@ def main() -> int:
             arguments.endpoint
         ) as connection:
             t2_fprint_delete_worker.serve_once(connection)
-    except Exception:
-        print("t2-fprint-delete-worker: deletion stopped", file=sys.stderr)
+    except Exception as error:
+        print(json.dumps(t2_fprint_delete_worker.failure_diagnostic(error),
+                         sort_keys=True), file=sys.stderr)
         return 1
     return 0
 
