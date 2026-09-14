@@ -19,6 +19,7 @@ STAGES = frozenset(
         "final-authority-readback",
         "native-owner",
         "terminal-proof-validation",
+        "external-deletion-reconciliation",
     }
 )
 
