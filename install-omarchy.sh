@@ -11,6 +11,12 @@ command -v omarchy >/dev/null || {
   exit 1
 }
 
+case "${1:-}" in
+  '') [[ $# -eq 0 ]] || exit 2 ;;
+  --prepare-transport-update) [[ $# -eq 1 ]] || exit 2 ;;
+  *) echo "Usage: ./install-omarchy.sh [--prepare-transport-update]" >&2; exit 2 ;;
+esac
+
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 running_kernel=$(uname -r)
 mapfile -t kernel_packages < <(
@@ -29,4 +35,4 @@ if ! pacman -Si "$headers_package" >/dev/null 2>&1 &&
 fi
 
 omarchy pkg add base-devel dkms fprintd python "$headers_package"
-sudo "$source_dir/install.sh"
+sudo "$source_dir/install.sh" "$@"
