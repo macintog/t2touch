@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Protocol
 
 import t2_bridge_wire
+import t2_enrollment_protocol
 
 
 class IdentityDeleteBridgeError(RuntimeError):
@@ -101,15 +102,29 @@ class IdentityDeleteBridge:
                 or isinstance(reply[0], bool)
                 or not -(2**31) <= reply[0] < 2**32
                 or type(events) is not list
-                or events
             ):
                 raise IdentityDeleteBridgeError("identity delete reply is malformed")
+            # The wire layer acknowledges callbacks before returning the reply.
+            # A well-formed service notification is not a failed delete: the
+            # operation owner still proves target absence and exact survivors.
+            for event in events:
+                if (
+                    type(event) is not list
+                    or len(event) != 5
+                    or event[0] != 9
+                    or event[1] != t2_enrollment_protocol.BRIDGE_SERVICE_STATUS
+                    or type(event[2]) is not bytes
+                    or not t2_enrollment_protocol.SERVICE_HEADER.size
+                    <= len(event[2])
+                    <= t2_enrollment_protocol.SERVICE_HEADER.size + t2_enrollment_protocol.MAX_EVENT_PAYLOAD
+                ):
+                    raise IdentityDeleteBridgeError("identity delete service event is malformed")
             output = reply[1]
             if t2_bridge_wire.is_biometric_nil_output(output):
                 output = b""
             if type(output) is not bytes or output:
                 raise IdentityDeleteBridgeError("identity delete returned unexpected data")
-            return IdentityDeleteCommandResult(reply[0])
+            return IdentityDeleteCommandResult(reply[0], service_event_count=len(events))
         except BaseException as error:
             self._poison()
             if isinstance(error, IdentityDeleteBridgeError):

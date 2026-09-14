@@ -15,6 +15,7 @@ from collections.abc import Callable
 import t2_post_reboot_reconciler
 import t2_post_reboot_diagnostic
 import t2_enrollment_journal
+import t2_identity_delete_journal
 import t2_mutation_journal
 import t2_mutation_registry
 import t2_user_authority
@@ -120,6 +121,7 @@ def _pending_native_candidate() -> object | None:
     try:
         registry = t2_mutation_registry.scan(MUTATION_ROOT)
         candidates = []
+        interrupted_deletes = []
         later_mutation = False
         for path in sorted(MUTATION_ROOT.iterdir(), key=lambda item: item.name):
             records = t2_mutation_journal.read(path)
@@ -129,6 +131,22 @@ def _pending_native_candidate() -> object | None:
                 if isinstance(evidence, dict)
                 else None
             )
+            if kind == "delete-one":
+                deletion = t2_identity_delete_journal.validate_history(records)
+                if deletion.phase in {
+                    t2_identity_delete_journal.IdentityDeletePhase.INTENT,
+                    t2_identity_delete_journal.IdentityDeletePhase.DISPATCH_INTENT,
+                    t2_identity_delete_journal.IdentityDeletePhase.COMMAND_OBSERVED,
+                    t2_identity_delete_journal.IdentityDeletePhase.SEP_DELETED,
+                    t2_identity_delete_journal.IdentityDeletePhase.PERSISTING,
+                    t2_identity_delete_journal.IdentityDeletePhase.PERSISTENCE_READY,
+                    t2_identity_delete_journal.IdentityDeletePhase.OUTCOME_UNKNOWN,
+                }:
+                    interrupted_deletes.append(
+                        t2_post_reboot_reconciler.PendingMutation(
+                            "delete-recovery", "identity-management", path, deletion
+                        )
+                    )
             if kind != "enroll":
                 later_mutation = True
                 continue
@@ -147,6 +165,14 @@ def _pending_native_candidate() -> object | None:
                 }
             ):
                 later_mutation = True
+        if interrupted_deletes:
+            if len(interrupted_deletes) != 1 or sum(
+                entry.blocks_new_mutation for entry in registry
+            ) != 1:
+                raise NativePostRebootReconcilerError(
+                    "interrupted deletion is not the sole pending mutation"
+                )
+            return interrupted_deletes[0]
         if not candidates:
             return None
         if len(candidates) != 1:
@@ -213,11 +239,15 @@ def _verify_management(
         sys.executable,
         str(SOURCE_ROOT / "t2-touchid-manage.py"),
         (
-            "verify-post-reboot"
-            if kind == "rename"
+            "recover-delete" if kind == "delete-recovery"
+            else "verify-post-reboot" if kind == "rename"
             else "verify-delete-post-reboot"
         ),
     ]
+    if kind == "delete-recovery":
+        # This owner compares a fresh connection with the recorded intent and
+        # repairs persistence. It never sends the deletion command again.
+        command.append("--acknowledge-interrupted-delete-recovery")
     completed = runner(
         command,
         env={**os.environ, "SUDO_UID": str(trusted_linux_uid)},
@@ -398,17 +428,19 @@ def run(
         )
         state = "enroll-authority-published"
         journal_updated = False
-    elif kind in {"rename", "delete-one"}:
+    elif kind in {"rename", "delete-one", "delete-recovery"}:
         document = _verify_management(
             kind, trusted_linux_uid, runner=management_runner
         )
         field = (
-            "post_reboot_verified"
-            if kind == "rename"
+            "delete_recovery_succeeded" if kind == "delete-recovery"
+            else "post_reboot_verified" if kind == "rename"
             else "delete_post_reboot_verified"
         )
         expected = document.get(field) is True
-        state = f"{kind}-post-reboot-verified"
+        if kind == "delete-recovery":
+            expected = expected and document.get("post_reboot_verification_required") is False
+        state = "delete-recovered" if kind == "delete-recovery" else f"{kind}-post-reboot-verified"
         journal_updated = True
     else:
         raise NativePostRebootReconcilerError(

@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import t2_bridge_wire
+import t2_enrollment_protocol
 import t2_identity_delete_bridge as bridge
 
 
@@ -31,6 +32,17 @@ class Lease:
 
 
 class IdentityDeleteBridgeTests(unittest.TestCase):
+    def test_service_notification_does_not_discard_delete_reply(self):
+        event = [9, t2_enrollment_protocol.BRIDGE_SERVICE_STATUS,
+                 bytes(t2_enrollment_protocol.SERVICE_HEADER.size), 0, 0]
+        lease = Lease(events=[event])
+        adapter = bridge.IdentityDeleteBridge(lease, connection_generation=lease.connection_generation)
+        result = adapter.delete(b"x" * 20)
+        self.assertEqual(result.status, 0)
+        self.assertEqual(result.service_event_count, 1)
+        self.assertFalse(lease.invalidated)
+        self.assertEqual(len(lease.calls), 1)
+
     def test_exact_command_version_and_target_are_dispatched_once(self):
         lease = Lease(reply=[-7, t2_bridge_wire.BIOMETRIC_NIL_OUTPUT_SENTINEL])
         adapter = bridge.IdentityDeleteBridge(

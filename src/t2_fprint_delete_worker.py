@@ -163,6 +163,19 @@ def serve_once(
                 pass
 
 
+def failure_diagnostic(error: BaseException) -> dict[str, object]:
+    """Keep the bounded exception chain, never private exception messages."""
+    causes = []
+    seen = set()
+    while error is not None and id(error) not in seen and len(causes) < 8:
+        seen.add(id(error))
+        name = type(error).__name__
+        causes.append(name if name.isascii() and name.isidentifier() and len(name) <= 80 else "Exception")
+        error = error.__cause__ or error.__context__
+    return {"event": "delete-worker-stopped", "exception_chain": causes,
+            "identifiers_redacted": True}
+
+
 def connect_endpoint(path: Path) -> socket.socket:
     """Connect only to the facade's operation-scoped private seqpacket path."""
 
