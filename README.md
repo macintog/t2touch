@@ -14,7 +14,7 @@ enrollment flow runs entirely in the current Linux session. It does not require
 a reboot.
 
 ```bash
-git clone https://github.com/jmurth1234/t2touch.git
+git clone https://github.com/macintog/t2touch.git
 cd t2touch
 ./install-omarchy.sh
 t2touch enroll
@@ -159,7 +159,7 @@ remains a single-model proof of concept until other T2 Macs reproduce it.
 Architecture, protocol provenance, and security boundaries are documented in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The small reusable protocol
 reference is published separately as
-[`t2touch-mini`](https://github.com/jmurth1234/t2touch-mini).
+[`t2touch-mini`](https://github.com/macintog/t2touch-mini).
 
 ## License
 
