@@ -1,0 +1,3 @@
+# Patch artifacts preserve the exact upstream context they were captured from.
+linux_native/patches/*.patch -whitespace
+linux_native/patches/**/*.patch -whitespace

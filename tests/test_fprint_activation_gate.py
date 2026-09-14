@@ -22,7 +22,7 @@ def health():
 
 def projected():
     return projection.FprintProjection(
-        ("left-thumb", "right-index-finger"), 2, 0, 0, True
+        ("finger-2", "finger-1"), 2, 0, 0, True
     )
 
 

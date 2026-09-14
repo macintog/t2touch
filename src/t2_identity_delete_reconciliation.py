@@ -33,6 +33,45 @@ class IdentityDeletePostRebootVerification:
     identity_count: int
 
 
+def _clean_catacomb_after_delete(
+    catacomb: dict[str, Any],
+    states: list[object],
+    *,
+    apple_user_id: int,
+    identity_count: int,
+) -> bool:
+    selected = [
+        state
+        for state in states
+        if isinstance(state, dict)
+        and state.get("kind") == "user"
+        and state.get("user_id") == apple_user_id
+    ]
+    masters = [
+        state
+        for state in states
+        if isinstance(state, dict) and state.get("kind") == "master"
+    ]
+    clean_absent = (
+        identity_count == 0
+        and catacomb.get("present") is False
+        and len(selected) == 1
+        and len(masters) == 1
+        and selected[0].get("state") == 3
+        and masters[0].get("state") == 3
+        and selected[0].get("needs_save") is False
+        and masters[0].get("needs_save") is False
+    )
+    clean_present = (
+        catacomb.get("present") is True
+        and len(selected) == 1
+        and len(masters) == 1
+        and selected[0].get("needs_save") is False
+        and masters[0].get("needs_save") is False
+    )
+    return clean_present or clean_absent
+
+
 def _component_map(value: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(value, list):
         raise IdentityDeleteReconciliationError("host component inventory is absent")
@@ -93,7 +132,7 @@ def classify(
         host.get("account_uuid") != baseline["account_uuid"]
         or host.get("bag_uuid") != baseline["bag_uuid"]
         or host.get("master_enrollment_count")
-        != baseline["master_enrollment_count"]
+        != baseline["master_enrollment_count"] - 1
     ):
         raise IdentityDeleteReconciliationError(
             "delete changed account, keybag, or master enrollment count"
@@ -148,25 +187,38 @@ def classify(
             raise IdentityDeleteReconciliationError(
                 "delete changed component ownership or mode"
             )
-        if name != user_name and before[name]["sha256"] != after[name]["sha256"]:
+        if (
+            name not in {user_name, "master.cat"}
+            and before[name]["sha256"] != after[name]["sha256"]
+        ):
             raise IdentityDeleteReconciliationError(
                 "delete changed an unrelated Catacomb component"
             )
     staged = dict(history.persistence.staged_files)
-    if (
-        set(staged) != {user_name}
-        or staged[user_name] != after[user_name]["sha256"]
-        or before[user_name]["sha256"] == after[user_name]["sha256"]
+    if history.recovery_user_file_sha256 is None:
+        expected_staged = {
+            user_name: after[user_name]["sha256"],
+            "master.cat": after["master.cat"]["sha256"],
+        }
+    else:
+        expected_staged = {"master.cat": after["master.cat"]["sha256"]}
+        if after[user_name]["sha256"] != history.recovery_user_file_sha256:
+            raise IdentityDeleteReconciliationError(
+                "recovered user Catacomb differs from the prior commit"
+            )
+    if staged != expected_staged or any(
+        before[name]["sha256"] == after[name]["sha256"]
+        for name in (user_name, "master.cat")
     ):
         raise IdentityDeleteReconciliationError(
-            "committed user Catacomb differs from the journaled deletion"
+            "committed Catacomb pair differs from the journaled deletion"
         )
 
     catacomb = live.get("catacomb")
     states = catacomb.get("user_states") if isinstance(catacomb, dict) else None
     if (
         not isinstance(catacomb, dict)
-        or catacomb.get("present") is not True
+        or catacomb.get("present") not in (True, False)
         or catacomb.get("uuid") != baseline["sep_catacomb"]["uuid"]
         or not isinstance(states, list)
     ):
@@ -175,23 +227,11 @@ def classify(
         t2_mutation_journal.require_sha256(catacomb.get("hash"), "SEP Catacomb hash")
     except t2_mutation_journal.JournalError as error:
         raise IdentityDeleteReconciliationError(str(error)) from error
-    selected = [
-        state
-        for state in states
-        if isinstance(state, dict)
-        and state.get("kind") == "user"
-        and state.get("user_id") == plan.apple_user_id
-    ]
-    masters = [
-        state
-        for state in states
-        if isinstance(state, dict) and state.get("kind") == "master"
-    ]
-    if (
-        len(selected) != 1
-        or len(masters) != 1
-        or selected[0].get("needs_save") is not False
-        or masters[0].get("needs_save") is not False
+    if not _clean_catacomb_after_delete(
+        catacomb,
+        states,
+        apple_user_id=plan.apple_user_id,
+        identity_count=len(local.identities),
     ):
         raise IdentityDeleteReconciliationError(
             "SEP Catacomb is not clean after deletion"
@@ -276,7 +316,7 @@ def verify_post_reboot(
         host.get("account_uuid") != baseline["account_uuid"]
         or host.get("bag_uuid") != baseline["bag_uuid"]
         or host.get("master_enrollment_count")
-        != baseline["master_enrollment_count"]
+        != baseline["master_enrollment_count"] - 1
     ):
         raise IdentityDeleteReconciliationError(
             "delete binding changed after reboot"
@@ -306,16 +346,35 @@ def verify_post_reboot(
         )
     user_name = f'user_{baseline["apple_uid"]:08x}.cat'
     staged = dict(history.persistence.staged_files)
-    if set(staged) != {user_name}:
+    if history.recovery_user_file_sha256 is None:
+        expected_hashes = staged
+        if set(staged) != {user_name, "master.cat"}:
+            raise IdentityDeleteReconciliationError(
+                "delete journal has no committed Catacomb pair"
+            )
+    else:
+        if set(staged) != {"master.cat"}:
+            raise IdentityDeleteReconciliationError(
+                "delete recovery has no committed master component"
+            )
+        expected_hashes = {
+            user_name: history.recovery_user_file_sha256,
+            "master.cat": staged["master.cat"],
+        }
+    if not {user_name, "master.cat"} <= set(expected_hashes):
         raise IdentityDeleteReconciliationError(
-            "delete journal has no unique committed user component"
+            "delete journal has no committed Catacomb pair"
         )
     for name in before:
         if any(before[name][field] != after[name][field] for field in ("mode", "uid", "gid")):
             raise IdentityDeleteReconciliationError(
                 "delete component metadata changed after reboot"
             )
-        expected_hash = staged[user_name] if name == user_name else before[name]["sha256"]
+        expected_hash = (
+            expected_hashes[name]
+            if name in {user_name, "master.cat"}
+            else before[name]["sha256"]
+        )
         if after[name]["sha256"] != expected_hash:
             raise IdentityDeleteReconciliationError(
                 "delete component contents changed after reboot"

@@ -19,6 +19,8 @@ import t2_fprint_worker_launcher as common
 
 SYSTEMD_RUN = common.SYSTEMD_RUN
 WORKER = Path("/usr/local/sbin/t2-fprint-delete-worker")
+VENV_PYTHON = Path("/opt/t2-touchid/.venv/bin/python")
+INSTALLED_SOURCE = Path("/opt/t2-touchid/src")
 ROOT_UID = 0
 PEERCRED = struct.Struct("3i")
 Runner = Callable[..., object]
@@ -75,6 +77,13 @@ def _systemd_unit_for_pid(pid: int) -> str:
 
 
 def _command(unit: str, endpoint: Path) -> list[str]:
+    authority_mode = os.environ.get(
+        "T2_TOUCHID_AUTHORITY_MODE", "macos-control-oracle"
+    )
+    if authority_mode not in {"linux-native", "macos-control-oracle"}:
+        raise FprintDeleteWorkerLauncherError(
+            "delete worker authority mode is invalid"
+        )
     return [
         str(SYSTEMD_RUN),
         "--system",
@@ -82,6 +91,8 @@ def _command(unit: str, endpoint: Path) -> list[str]:
         "--collect",
         "--service-type=exec",
         f"--unit={unit}",
+        f"--setenv=T2_TOUCHID_AUTHORITY_MODE={authority_mode}",
+        f"--setenv=PYTHONPATH={INSTALLED_SOURCE}",
         "--property=UMask=0077",
         "--property=NoNewPrivileges=yes",
         "--property=PrivateTmp=yes",
@@ -100,17 +111,19 @@ def _command(unit: str, endpoint: Path) -> list[str]:
         "--property=RestrictSUIDSGID=yes",
         "--property=LockPersonality=yes",
         "--property=SystemCallArchitectures=native",
-        "--property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
-        "--property=AmbientCapabilities=CAP_DAC_READ_SEARCH",
+        "--property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN",
+        "--property=AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN",
         "--property=MemoryDenyWriteExecute=yes",
         "--property=ProtectHostname=yes",
         "--property=RestrictAddressFamilies=AF_UNIX AF_INET6",
         "--property=DevicePolicy=closed",
         "--property=DeviceAllow=/dev/t2-aks rw",
+        "--property=DeviceAllow=/dev/t2-acm rw",
         "--property=ReadWritePaths=/run/t2-touchid /var/lib/t2-touchid",
         "--property=SystemCallFilter=@system-service",
         "--property=TimeoutStartSec=45s",
         "--property=TimeoutStopSec=15s",
+        str(VENV_PYTHON),
         str(WORKER),
         "--endpoint",
         str(endpoint),
@@ -175,6 +188,13 @@ def launch(
     _require_private_root()
     _require_executable(SYSTEMD_RUN)
     _require_executable(WORKER)
+    try:
+        interpreter = VENV_PYTHON.resolve(strict=True)
+    except OSError as error:
+        raise FprintDeleteWorkerLauncherError(
+            "delete worker Python interpreter is unavailable"
+        ) from error
+    _require_executable(interpreter)
     operation_id = str(uuid.uuid4())
     unit = f"t2-fprint-delete-{operation_id}.service"
     endpoint = t2_fprint_delete_worker.WORKER_ROOT / f"{operation_id}.sock"

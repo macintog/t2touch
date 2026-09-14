@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -52,11 +53,12 @@ def _private_root_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _configuration() -> tuple[str, str, int, int]:
+def _configuration() -> tuple[str, str, int, int, str]:
     values: dict[str, list[str]] = {
         "T2_TOUCHID_HOST": [],
         "T2_TOUCHID_INTERFACE": [],
         "T2_TOUCHID_MACOS_USER_ID": [],
+        "T2_TOUCHID_AUTHORITY_MODE": [],
     }
     for line in _private_root_file(CONFIG).splitlines():
         match = re.fullmatch(r"([A-Z0-9_]+)=(.*)", line)
@@ -75,9 +77,31 @@ def _configuration() -> tuple[str, str, int, int]:
         or not 0 <= int(user_text) <= 0xFFFFFFFF
         or not port_text.isdecimal()
         or not 49152 <= int(port_text) <= 65535
+        or values["T2_TOUCHID_AUTHORITY_MODE"][0]
+        not in {"linux-native", "macos-control-oracle"}
     ):
         raise IdentityCommandError("runtime configuration is invalid")
-    return host, interface, int(user_text), int(port_text)
+    return (
+        host,
+        interface,
+        int(user_text),
+        int(port_text),
+        values["T2_TOUCHID_AUTHORITY_MODE"][0],
+    )
+
+
+def _native_management():
+    path = LOCAL_SOURCE / "t2-touchid-manage.py"
+    if not path.is_file():
+        path = INSTALLED_SOURCE / "t2-touchid-manage.py"
+    specification = importlib.util.spec_from_file_location(
+        "t2_touchid_native_identity_management", path
+    )
+    if specification is None or specification.loader is None:
+        raise IdentityCommandError("native identity manager is unavailable")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
 
 
 @contextmanager
@@ -107,8 +131,15 @@ def _operation_lock() -> Iterator[None]:
 def collect() -> dict[str, object]:
     if os.geteuid() != 0:
         raise IdentityCommandError("run through sudo")
-    host, interface, apple_user_id, port = _configuration()
+    host, interface, apple_user_id, port, authority_mode = _configuration()
     with _operation_lock():
+        if authority_mode == "linux-native":
+            native = _native_management()
+            configuration = native.runtime_configuration()
+            with native._native_management_lease(
+                configuration, operation="inventory"
+            ) as (_authority, _store, _host, local, _lease, live):
+                return t2_identity_inventory.summarize(local, live)
         store = t2_catacomb_store.CatacombStore(STORE_ROOT, apple_user_id)
         components = store.read_committed_components()
         local = t2_catacomb_codec.decode_user_catacomb(
@@ -153,4 +184,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

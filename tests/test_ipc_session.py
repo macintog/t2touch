@@ -83,6 +83,20 @@ class IPCSessionTests(unittest.TestCase):
         with self.assertRaises(OSError):
             fcntl.fcntl(descriptor, fcntl.F_GETFD)
 
+    def test_transferred_process_fd_detects_exit_without_signal_authority(self):
+        process = subprocess.Popen(("/usr/bin/sleep", "10"))
+        descriptor = os.pidfd_open(process.pid)
+        peer = ipc.PinnedPeer.from_process_fd(
+            descriptor, process.pid, os.getuid()
+        )
+        process.terminate()
+        process.wait(timeout=2)
+        try:
+            with self.assertRaisesRegex(ipc.IPCSessionError, "no longer alive"):
+                peer.verify()
+        finally:
+            peer.close()
+
     def test_process_fd_rejects_wrong_pid_and_non_pidfd(self):
         descriptor = os.pidfd_open(os.getpid())
         with self.assertRaises(ipc.IPCSessionError):

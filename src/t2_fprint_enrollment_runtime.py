@@ -19,6 +19,7 @@ class EnrollmentUpdate:
     done: bool
     finger_present: bool
     finger_needed: bool
+    progress_percent: int | None = None
 
 
 class EnrollmentRuntime:
@@ -36,6 +37,7 @@ class EnrollmentRuntime:
             False,
             self.finger_present,
             self.finger_needed,
+            self.last_progress if self.last_progress >= 0 else None,
         )
 
     def initial(self) -> EnrollmentUpdate:
@@ -70,15 +72,22 @@ class EnrollmentRuntime:
             if (
                 type(progress) is not int
                 or not 0 <= progress <= 100
-                or progress < self.last_progress
             ):
                 raise FprintEnrollmentRuntimeError(
-                    "enrollment progress is invalid or regressed"
+                    "enrollment progress is invalid"
                 )
-            if progress == self.last_progress:
+            # BiometricKit may revise its internal coverage estimate downward
+            # after a weak touch.  This percentage is presentation only; the
+            # journaled protocol and final identity readback own correctness.
+            # Preserve the last visible high-water instead of allowing a UI
+            # regression to poison the active enrollment transaction.
+            if progress <= self.last_progress:
                 return self._update()
             self.last_progress = progress
-            self.finger_needed = False
+            # Progress can be delivered after the paired removal callback.
+            # Preserve presence as the source of truth so a completed sample
+            # cannot strand the UI in a non-actionable preparing state.
+            self.finger_needed = not self.finger_present
             return self._update("enroll-stage-passed")
         statuses = {
             t2_enrollment_protocol.EnrollmentAction.REMOVE_AND_RETRY: (
@@ -95,9 +104,12 @@ class EnrollmentRuntime:
             ),
         }
         if action in statuses:
-            self.finger_needed = action is not (
-                t2_enrollment_protocol.EnrollmentAction.REMOVE_AND_RETRY
-            )
+            # Retry may be reported before the paired finger-removed event.
+            # Never project the impossible state "finger present" and
+            # "finger needed" simultaneously; the later removal callback
+            # re-arms the touch cue while the retained retry status tells the
+            # UI to reposition.
+            self.finger_needed = not self.finger_present
             return self._update(statuses[action])
         if action in {
             t2_enrollment_protocol.EnrollmentAction.CONTINUE,
@@ -109,6 +121,50 @@ class EnrollmentRuntime:
         raise FprintEnrollmentRuntimeError(
             "terminal or identity feedback bypassed final reconciliation"
         )
+
+    def begin_identity_verification(self) -> EnrollmentUpdate:
+        """Keep additional enrollment live until its new identity matches."""
+
+        if self.finished or self.last_progress != 100:
+            raise FprintEnrollmentRuntimeError(
+                "identity verification requires completed capture"
+            )
+        self.finger_present = False
+        self.finger_needed = False
+        return self._update()
+
+    def accept_identity_verification_event(
+        self, event: object
+    ) -> EnrollmentUpdate | None:
+        """Project only placement state from the untrusted live match stream."""
+
+        if self.finished or not isinstance(event, dict):
+            raise FprintEnrollmentRuntimeError(
+                "identity verification feedback is invalid"
+            )
+        if event.get("event_kind") == "match_armed":
+            self.finger_present = False
+            self.finger_needed = True
+            return self._update()
+        semantics = event.get("status_semantics")
+        if semantics == "finger-present":
+            self.finger_present = True
+            self.finger_needed = False
+            return self._update()
+        if semantics == "finger-removed":
+            self.finger_present = False
+            self.finger_needed = True
+            return self._update()
+        if (
+            event.get("event_kind") == "match_result"
+            and event.get("result_valid") is True
+            and event.get("no_match") is True
+            and event.get("no_match_image_quality") is True
+        ):
+            self.finger_present = False
+            self.finger_needed = True
+            return self._update("enroll-retry-scan")
+        return None
 
     def finish(self, result: object) -> EnrollmentUpdate:
         if self.finished:
@@ -142,7 +198,14 @@ class EnrollmentRuntime:
         self.finished = True
         self.finger_present = False
         self.finger_needed = False
-        return EnrollmentUpdate(status, True, False, False)
+        progress = (
+            100
+            if successful
+            else self.last_progress
+            if self.last_progress >= 0
+            else None
+        )
+        return EnrollmentUpdate(status, True, False, False, progress)
 
     def refuse_pre_dispatch(self, reason: object) -> EnrollmentUpdate:
         """Translate only a typed refusal proven before enrollment dispatch."""
@@ -172,4 +235,7 @@ class EnrollmentRuntime:
         self.finished = True
         self.finger_present = False
         self.finger_needed = False
-        return EnrollmentUpdate("enroll-unknown-error", True, False, False)
+        progress = self.last_progress if self.last_progress >= 0 else None
+        return EnrollmentUpdate(
+            "enroll-unknown-error", True, False, False, progress
+        )

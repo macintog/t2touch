@@ -62,9 +62,9 @@ class EnrollmentController:
             raise FprintEnrollmentControllerError(
                 "an enrollment transaction is already active"
             )
-        if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_projection.is_finger_name(finger_name):
             raise FprintEnrollmentControllerError(
-                "enrollment requires one canonical finger name"
+                "enrollment requires one canonical finger handle"
             )
         if not callable(worker) or not callable(on_update):
             raise FprintEnrollmentControllerError(

@@ -5,9 +5,12 @@ Touch ID enrollment, identity management, multi-user mapping, Catacomb
 persistence, and recovery on Intel Macs with an Apple T2.
 
 - [FINDINGS.md](FINDINGS.md) is a sanitized snapshot of the detailed research
-  ledger, last updated 2026-08-31.
+  ledger, last updated 2026-09-13.
 - [EVIDENCE_COLLECTION.md](EVIDENCE_COLLECTION.md) explains the remaining
   evidence gaps and how to collect data for each one later.
+- [MACOS_ENROLLMENT_UX_REFERENCE.md](MACOS_ENROLLMENT_UX_REFERENCE.md)
+  documents the preserved macOS enrollment recording and the user-interaction
+  semantics it should contribute to a future Linux frontend.
 - [`scripts/`](scripts/) contains collection and preflight helpers. They do not
   enroll, delete, load, confirm, or repair biometric state.
 
@@ -178,7 +181,7 @@ transactions cannot manufacture E4, and the repository does not trigger the
 required reboot. A successful E3 awaiting E4 blocks another enrollment so its
 exact snapshot cannot be displaced before verification.
 
-## Current boundary
+## Historical construction boundary
 
 Existing, already-provisioned Apple users appear protocol-feasible for
 serialized Linux enrollment and identity management. The host authorization

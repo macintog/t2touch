@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=Apple T2 native user activation request
+Documentation=file:/opt/t2-touchid/README.md
+Requires=t2-sep-transport.service
+After=t2-sep-transport.service
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/t2-touchid.conf
+ExecStart=/opt/t2-touchid/.venv/bin/python /opt/t2-touchid/src/t2-user-activation-broker.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutStartSec=180
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/t2-touchid/activation
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX AF_LOCAL
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service

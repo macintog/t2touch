@@ -49,7 +49,7 @@ SESSION_KEYS = frozenset(
         "active_local_session",
     }
 )
-UPDATE_KEYS = frozenset(
+UPDATE_V1_KEYS = frozenset(
     {
         "schema_version",
         "message",
@@ -59,6 +59,7 @@ UPDATE_KEYS = frozenset(
         "finger_needed",
     }
 )
+UPDATE_V2_KEYS = UPDATE_V1_KEYS | {"progress_percent"}
 CANCEL_PACKET = b'{"message":"cancel","schema_version":1}'
 ALLOWED_STATUSES = frozenset(
     {
@@ -220,7 +221,7 @@ def _validate_request(request: StartRequest) -> None:
         or not 1 <= caller.uid < (1 << 32) - 1
         or type(caller.start_time_ticks) is not int
         or not 1 <= caller.start_time_ticks < 1 << 64
-        or request.finger_name not in t2_fprint_projection.FINGER_NAME_SET
+        or not t2_fprint_projection.is_finger_name(request.finger_name)
         or account.linux_uid != caller.uid
         or account.source != "local-files-v2"
         or account.protected_password_record is not True
@@ -413,6 +414,8 @@ def receive_cancel(connection: socket.socket) -> None:
 
 def _validate_update(
     update: t2_fprint_enrollment_runtime.EnrollmentUpdate,
+    *,
+    legacy: bool = False,
 ) -> None:
     if not isinstance(
         update, t2_fprint_enrollment_runtime.EnrollmentUpdate
@@ -430,6 +433,23 @@ def _validate_update(
         or update.finger_present and update.finger_needed
         or update.done != (update.status in TERMINAL_STATUSES)
         or update.done and (update.finger_present or update.finger_needed)
+        or (
+            update.progress_percent is not None
+            and (
+                type(update.progress_percent) is not int
+                or not 0 <= update.progress_percent <= 100
+            )
+        )
+        or (
+            update.status == "enroll-stage-passed"
+            and update.progress_percent is None
+            and not legacy
+        )
+        or (
+            update.status == "enroll-completed"
+            and update.progress_percent != 100
+            and not legacy
+        )
     ):
         raise FprintWorkerProtocolError("worker update state is inconsistent")
 
@@ -440,21 +460,24 @@ def encode_update(
     _validate_update(update)
     return _encode(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "message": "update",
             "status": update.status,
             "done": update.done,
             "finger_present": update.finger_present,
             "finger_needed": update.finger_needed,
+            "progress_percent": update.progress_percent,
         }
     )
 
 
 def decode_update(data: bytes) -> t2_fprint_enrollment_runtime.EnrollmentUpdate:
     value = _decode(data)
+    version = value.get("schema_version")
     if (
-        set(value) != UPDATE_KEYS
-        or value.get("schema_version") != 1
+        (version == 1 and set(value) != UPDATE_V1_KEYS)
+        or (version == 2 and set(value) != UPDATE_V2_KEYS)
+        or version not in {1, 2}
         or type(value.get("schema_version")) is not int
         or value.get("message") != "update"
     ):
@@ -464,9 +487,10 @@ def decode_update(data: bytes) -> t2_fprint_enrollment_runtime.EnrollmentUpdate:
         value.get("done"),
         value.get("finger_present"),
         value.get("finger_needed"),
+        value.get("progress_percent") if version == 2 else None,
     )
-    _validate_update(update)
-    if encode_update(update) != data:
+    _validate_update(update, legacy=version == 1)
+    if _encode(value) != data:
         raise FprintWorkerProtocolError("worker update is not canonical")
     return update
 

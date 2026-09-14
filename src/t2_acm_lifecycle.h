@@ -35,6 +35,25 @@ enum t2_acm_reply_action {
 	T2_ACM_REPLY_CLEAR_CONTEXT_AND_REJECT,
 };
 
+static inline bool
+t2_acm_split_target_create_allowed(t2_acm_wire_u8 opcode,
+				   bool context_active,
+				   bool identity_input_live,
+				   bool identity_input_externalized,
+				   bool identity_input_consumed,
+				   bool identity_target_created,
+				   bool runtime_handle_active,
+				   bool runtime_alias_bound,
+				   bool identity_input_is_current,
+				   bool same_user)
+{
+	return (opcode == 0x01 || opcode == 0x24) && context_active &&
+		identity_input_live && identity_input_externalized &&
+		!identity_input_consumed && !identity_target_created &&
+		runtime_handle_active &&
+		runtime_alias_bound && identity_input_is_current && same_user;
+}
+
 static inline enum t2_acm_context_preflight
 t2_acm_context_preflight(t2_acm_wire_u8 opcode, bool context_active)
 {
@@ -46,6 +65,7 @@ t2_acm_context_preflight(t2_acm_wire_u8 opcode, bool context_active)
 	case 0x02:
 	case 0x03:
 	case 0x13:
+	case 0x28:
 		return context_active ? T2_ACM_CONTEXT_MATCH_REQUIRED :
 			T2_ACM_CONTEXT_STALE;
 	default:
@@ -64,6 +84,7 @@ t2_acm_response_capacity_allowed(t2_acm_wire_u8 opcode,
 		return capacity == 21 && has_buffer;
 	case 0x02:
 	case 0x13:
+	case 0x28:
 		return capacity == 0 && !has_buffer;
 	case 0x03:
 		return capacity == T2_ACM_POLICY_RESPONSE_SIZE && has_buffer;
@@ -93,6 +114,7 @@ t2_acm_reply_action(t2_acm_wire_u8 opcode, size_t response_length,
 		return response_length == 0 ? T2_ACM_REPLY_CLEAR_CONTEXT :
 			T2_ACM_REPLY_CLEAR_CONTEXT_AND_REJECT;
 	case 0x13:
+	case 0x28:
 		return response_length == 0 ? T2_ACM_REPLY_ACCEPT :
 			T2_ACM_REPLY_REJECT;
 	case 0x03:

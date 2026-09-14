@@ -244,19 +244,43 @@ def build_baseline(
     absent_initialization = (
         isinstance(catacomb, dict)
         and catacomb.get("present") is False
-        and catacomb.get("uuid") == "00000000-0000-0000-0000-000000000000"
-        and catacomb.get("hash") == "0" * 64
         and live_identities == set()
-        and len(host_identities) == 1
-        and catacomb.get("user_states")
-        == [
-            {
-                "kind": "master",
-                "user_id": 0xFFFFFFFF,
-                "state": 3,
-                "needs_save": False,
-            }
-        ]
+        and (
+            (
+                len(host_identities) == 1
+                and catacomb.get("uuid")
+                == "00000000-0000-0000-0000-000000000000"
+                and catacomb.get("hash") == "0" * 64
+                and catacomb.get("user_states")
+                == [
+                    {
+                        "kind": "master",
+                        "user_id": 0xFFFFFFFF,
+                        "state": 3,
+                        "needs_save": False,
+                    }
+                ]
+            )
+            or (
+                not host_identities
+                and isinstance(catacomb.get("user_states"), list)
+                and len(catacomb["user_states"]) == 2
+                and {
+                    (
+                        item.get("kind"),
+                        item.get("user_id"),
+                        item.get("state"),
+                        item.get("needs_save"),
+                    )
+                    for item in catacomb["user_states"]
+                    if isinstance(item, dict)
+                }
+                == {
+                    ("master", 0xFFFFFFFF, 3, False),
+                    ("user", apple_uid, 3, False),
+                }
+            )
+        )
     )
     if live_identities != host_identities and not absent_initialization:
         raise BaselineError("live SEP and host Catacomb identities disagree")
@@ -299,3 +323,291 @@ def build_baseline(
         "double_collection_equal": True,
         "password_fallback_verified": password_fallback_verified,
     }
+
+
+def build_linux_native_empty_baseline(
+    *,
+    live: dict[str, Any],
+    caller_linux_uid: int,
+    target_linux_uid: int,
+    linux_boot_uuid: str,
+    mapping_generation: str,
+    account_uuid: str,
+    bag_uuid: str,
+    password_fallback_verified: bool,
+) -> dict[str, Any]:
+    """Build the first-enrollment baseline without an imported Catacomb."""
+    apple_uid = live.get("apple_uid")
+    if not isinstance(apple_uid, int) or isinstance(apple_uid, bool) or apple_uid < 0:
+        raise BaselineError("live inventory has an invalid Apple UID")
+    if live.get("double_collection_equal") is not True:
+        raise BaselineError("live inventory is not stable")
+    if live.get("biometric_protocol_version") != 2:
+        raise BaselineError("Linux-native baseline requires biometric protocol version 2")
+    if live.get("per_user_identity_records") != [] or live.get(
+        "global_identity_records"
+    ) != []:
+        raise BaselineError("Linux-native baseline is not an empty identity namespace")
+    maximum = live.get("maximum_capacity")
+    free = live.get("configured_user_free_capacity")
+    if (
+        not isinstance(maximum, int)
+        or isinstance(maximum, bool)
+        or maximum <= 0
+        or not isinstance(free, int)
+        or isinstance(free, bool)
+        or not 0 <= free <= maximum
+    ):
+        raise BaselineError("live identity capacity is invalid")
+
+    catacomb = live.get("catacomb")
+    if not isinstance(catacomb, dict) or catacomb.get("present") is not False:
+        raise BaselineError("Linux-native baseline requires an absent Catacomb")
+    catacomb_uuid = catacomb.get("uuid")
+    try:
+        parsed_catacomb_uuid = uuid.UUID(catacomb_uuid)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise BaselineError("live Catacomb namespace UUID is invalid") from error
+    if str(parsed_catacomb_uuid) != catacomb_uuid or parsed_catacomb_uuid.int == 0:
+        raise BaselineError("live Catacomb namespace UUID is invalid")
+    states = catacomb.get("user_states")
+    expected_states = {
+        ("master", 0xFFFFFFFF, 0, False),
+        ("user", apple_uid, 0, False),
+    }
+    valid_states = isinstance(states, list) and len(states) == 2
+    normalized_states = set()
+    for state in states if isinstance(states, list) else []:
+        if (
+            not isinstance(state, dict)
+            or set(state) != {"kind", "user_id", "state", "needs_save"}
+            or not isinstance(state["kind"], str)
+            or not isinstance(state["user_id"], int)
+            or isinstance(state["user_id"], bool)
+            or not isinstance(state["state"], int)
+            or isinstance(state["state"], bool)
+            or type(state["needs_save"]) is not bool
+        ):
+            valid_states = False
+            continue
+        normalized_states.add(
+            (
+                state["kind"],
+                state["user_id"],
+                state["state"],
+                state["needs_save"],
+            )
+        )
+    if not valid_states or normalized_states != expected_states:
+        raise BaselineError("Linux-native Catacomb state is not explicitly empty")
+
+    for value, field in ((account_uuid, "account UUID"), (bag_uuid, "bag UUID")):
+        try:
+            parsed = uuid.UUID(value)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise BaselineError(f"{field} is invalid") from error
+        if str(parsed) != value or parsed.int == 0:
+            raise BaselineError(f"{field} is invalid")
+    if password_fallback_verified is not True:
+        raise BaselineError("password fallback has not been verified")
+
+    return {
+        "baseline_version": 2,
+        "caller_linux_uid": caller_linux_uid,
+        "target_linux_uid": target_linux_uid,
+        "apple_uid": apple_uid,
+        "account_uuid": account_uuid,
+        "bag_uuid": bag_uuid,
+        "linux_boot_uuid": linux_boot_uuid,
+        "connection_generation": live["connection_generation"],
+        "bridge_boot_uuid": live.get("bridge_boot_uuid"),
+        "protocol_version": 2,
+        "policy_decision": "authorized",
+        "identity_records": [],
+        "capacity": {"used": 0, "maximum": maximum},
+        "sep_catacomb": {
+            "present": False,
+            "uuid": catacomb_uuid,
+            "hash": None,
+        },
+        "host_components": [],
+        "master_enrollment_count": 0,
+        "mapping_generation": mapping_generation,
+        "backup_references": [],
+        "double_collection_equal": True,
+        "password_fallback_verified": True,
+    }
+
+
+def build_linux_native_empty_baseline(
+    *,
+    live: dict[str, Any],
+    caller_linux_uid: int,
+    target_linux_uid: int,
+    linux_boot_uuid: str,
+    mapping_generation: str,
+    account_uuid: str,
+    bag_uuid: str,
+    password_fallback_verified: bool,
+) -> dict[str, Any]:
+    """Build the first-enrollment baseline without an imported Catacomb."""
+    apple_uid = live.get("apple_uid")
+    if not isinstance(apple_uid, int) or isinstance(apple_uid, bool) or apple_uid < 0:
+        raise BaselineError("live inventory has an invalid Apple UID")
+    if live.get("double_collection_equal") is not True:
+        raise BaselineError("live inventory is not stable")
+    if live.get("biometric_protocol_version") != 2:
+        raise BaselineError("Linux-native baseline requires biometric protocol version 2")
+    if live.get("per_user_identity_records") != [] or live.get(
+        "global_identity_records"
+    ) != []:
+        raise BaselineError("Linux-native baseline is not an empty identity namespace")
+    maximum = live.get("maximum_capacity")
+    free = live.get("configured_user_free_capacity")
+    if (
+        not isinstance(maximum, int)
+        or isinstance(maximum, bool)
+        or maximum <= 0
+        or not isinstance(free, int)
+        or isinstance(free, bool)
+        or not 0 <= free <= maximum
+    ):
+        raise BaselineError("live identity capacity is invalid")
+
+    catacomb = live.get("catacomb")
+    if not isinstance(catacomb, dict) or catacomb.get("present") is not False:
+        raise BaselineError("Linux-native baseline requires an absent Catacomb")
+    catacomb_uuid = catacomb.get("uuid")
+    try:
+        parsed_catacomb_uuid = uuid.UUID(catacomb_uuid)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise BaselineError("live Catacomb namespace UUID is invalid") from error
+    if str(parsed_catacomb_uuid) != catacomb_uuid:
+        raise BaselineError("live Catacomb namespace UUID is invalid")
+    states = catacomb.get("user_states")
+    expected_components = {
+        ("master", 0xFFFFFFFF),
+        ("user", apple_uid),
+    }
+    valid_states = isinstance(states, list) and len(states) == 2
+    normalized_components = set()
+    for state in states if isinstance(states, list) else []:
+        if (
+            not isinstance(state, dict)
+            or set(state) != {"kind", "user_id", "state", "needs_save"}
+            or not isinstance(state["kind"], str)
+            or not isinstance(state["user_id"], int)
+            or isinstance(state["user_id"], bool)
+            or not isinstance(state["state"], int)
+            or isinstance(state["state"], bool)
+            or type(state["needs_save"]) is not bool
+        ):
+            valid_states = False
+            continue
+        normalized_components.add((state["kind"], state["user_id"]))
+    if not valid_states:
+        raise BaselineError("Linux-native Catacomb state schema is invalid")
+    if normalized_components != expected_components:
+        raise BaselineError("Linux-native Catacomb component set is not exactly prepared")
+    # Exact host control flow requires bit 0 before it treats a component as
+    # admitted. Bit 1 says whether secure data is already loaded. Bit 2 is the
+    # save-dirty flag. Keep the failure classes value-free: the next hardware
+    # observation can distinguish a prepared dirty component from an unknown
+    # state or component-set problem without logging raw protocol values.
+    if any(state["state"] & ~0x07 for state in states):
+        raise BaselineError("Linux-native Catacomb state has unknown bits")
+    if any(not state["state"] & 0x01 for state in states):
+        raise BaselineError("Linux-native Catacomb component is not admitted")
+    if any(
+        state["needs_save"] is not bool(state["state"] & 0x04)
+        for state in states
+    ):
+        raise BaselineError("Linux-native Catacomb save state is inconsistent")
+    # D157 observes the exact same-generation missing-component preparation as
+    # save-dirty. That is the expected volatile input to first persistence, not
+    # evidence of a durable Catacomb: the independent absent hash, empty global
+    # and per-user identity lists, stable double collection, and exact component
+    # set remain mandatory above.
+
+    for value, field in ((account_uuid, "account UUID"), (bag_uuid, "bag UUID")):
+        try:
+            parsed = uuid.UUID(value)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise BaselineError(f"{field} is invalid") from error
+        if str(parsed) != value or parsed.int == 0:
+            raise BaselineError(f"{field} is invalid")
+    if password_fallback_verified is not True:
+        raise BaselineError("password fallback has not been verified")
+
+    return {
+        "baseline_version": 2,
+        "caller_linux_uid": caller_linux_uid,
+        "target_linux_uid": target_linux_uid,
+        "apple_uid": apple_uid,
+        "account_uuid": account_uuid,
+        "bag_uuid": bag_uuid,
+        "linux_boot_uuid": linux_boot_uuid,
+        "connection_generation": live["connection_generation"],
+        "bridge_boot_uuid": live.get("bridge_boot_uuid"),
+        "protocol_version": 2,
+        "policy_decision": "authorized",
+        "identity_records": [],
+        "capacity": {"used": 0, "maximum": maximum},
+        "sep_catacomb": {
+            "present": False,
+            "uuid": catacomb_uuid,
+            "hash": None,
+        },
+        "host_components": [],
+        "master_enrollment_count": 0,
+        "mapping_generation": mapping_generation,
+        "backup_references": [],
+        "double_collection_equal": True,
+        "password_fallback_verified": True,
+    }
+
+
+def build_linux_native_existing_baseline(
+    *,
+    host: dict[str, Any],
+    live: dict[str, Any],
+    caller_linux_uid: int,
+    target_linux_uid: int,
+    linux_boot_uuid: str,
+    mapping_generation: str,
+    account_uuid: str,
+    bag_uuid: str,
+    authority_reference: str,
+    authority_sha256: str,
+    password_fallback_verified: bool,
+) -> dict[str, Any]:
+    """Build an existing-state baseline rooted in Linux-native E4 evidence.
+
+    Baseline version 1 already represents a durable Catacomb generation and
+    drives the proven add-one reconciliation/finalization path.  The source
+    reference here is the immutable E4 enrollment journal rather than a macOS
+    archive; its protected head hash occupies the existing verified-source
+    digest field.
+    """
+    if host.get("account_uuid") != account_uuid or host.get("bag_uuid") != bag_uuid:
+        raise BaselineError("Linux-native host binding changed")
+    if not isinstance(authority_reference, str) or not authority_reference:
+        raise BaselineError("Linux-native authority reference is invalid")
+    if not isinstance(authority_sha256, str) or len(authority_sha256) != 64:
+        raise BaselineError("Linux-native authority digest is invalid")
+    try:
+        bytes.fromhex(authority_sha256)
+    except ValueError as error:
+        raise BaselineError("Linux-native authority digest is invalid") from error
+    rooted_host = dict(host)
+    rooted_host["archive_sha256"] = authority_sha256
+    return build_baseline(
+        host=rooted_host,
+        live=live,
+        caller_linux_uid=caller_linux_uid,
+        target_linux_uid=target_linux_uid,
+        linux_boot_uuid=linux_boot_uuid,
+        mapping_generation=mapping_generation,
+        backup_reference=authority_reference,
+        password_fallback_verified=password_fallback_verified,
+    )

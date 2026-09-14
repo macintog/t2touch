@@ -30,7 +30,7 @@ class FprintMatchGateTests(unittest.TestCase):
         renamed = codec.decode_user_catacomb(
             original.rename(
                 original.identities[0].uuid,
-                "right-index-finger",
+                "finger-1",
             ),
             501,
         )
@@ -38,7 +38,7 @@ class FprintMatchGateTests(unittest.TestCase):
             renamed.add(
                 identity_uuid=str(uuid.UUID(int=4)),
                 entity=1,
-                name="left-thumb",
+                name="finger-2",
             ),
             501,
         )
@@ -63,7 +63,7 @@ class FprintMatchGateTests(unittest.TestCase):
             self.global_records,
             self.user,
             self.global_records,
-            "left-thumb",
+            "finger-2",
         )
         self.assertEqual(
             result.identity_record,
@@ -82,7 +82,7 @@ class FprintMatchGateTests(unittest.TestCase):
             self.global_records,
             self.user,
             self.global_records,
-            "right-index-finger",
+            "finger-1",
         )
         report = gate.attest_unchanged(
             result,
@@ -113,7 +113,7 @@ class FprintMatchGateTests(unittest.TestCase):
                     first_global,
                     second_user,
                     second_global,
-                    "left-thumb",
+                    "finger-2",
                 )
 
     def test_bad_global_binding_fails(self):
@@ -127,7 +127,7 @@ class FprintMatchGateTests(unittest.TestCase):
                 tuple(rebound),
                 self.user,
                 tuple(rebound),
-                "left-thumb",
+                "finger-2",
             )
 
     def test_post_match_change_fails_closed(self):
@@ -138,7 +138,7 @@ class FprintMatchGateTests(unittest.TestCase):
             self.global_records,
             self.user,
             self.global_records,
-            "left-thumb",
+            "finger-2",
         )
         cases = (
             ({**self.components, "master.cat": b"changed"}, self.user, self.global_records),

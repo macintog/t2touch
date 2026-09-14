@@ -3,7 +3,7 @@ obj-m += t2_sep_transport.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all module clean
+.PHONY: all module recovery-tools clean
 
 all: module t2-aks-tool t2-pam-fingerprint-prompt
 

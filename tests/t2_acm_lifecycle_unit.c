@@ -5,6 +5,17 @@
 
 int main(void)
 {
+	assert(t2_acm_split_target_create_allowed(
+		0x24, true, true, true, false, false, true, true, true, true));
+	assert(!t2_acm_split_target_create_allowed(
+		0x24, false, true, true, false, false, true, true, true, true));
+	assert(!t2_acm_split_target_create_allowed(
+		0x24, true, true, true, true, false, true, true, true, true));
+	assert(!t2_acm_split_target_create_allowed(
+		0x24, true, true, true, false, true, true, true, true, true));
+	assert(!t2_acm_split_target_create_allowed(
+		0x24, true, true, true, false, false, true, true, true, false));
+
 	assert(t2_acm_context_preflight(0x24, false) ==
 	       T2_ACM_CONTEXT_ALLOW);
 	assert(t2_acm_context_preflight(0x24, true) ==
@@ -17,6 +28,10 @@ int main(void)
 	       T2_ACM_CONTEXT_STALE);
 	assert(t2_acm_context_preflight(0x13, true) ==
 	       T2_ACM_CONTEXT_MATCH_REQUIRED);
+	assert(t2_acm_context_preflight(0x28, false) ==
+	       T2_ACM_CONTEXT_STALE);
+	assert(t2_acm_context_preflight(0x28, true) ==
+	       T2_ACM_CONTEXT_MATCH_REQUIRED);
 	assert(t2_acm_context_preflight(0xff, false) ==
 	       T2_ACM_CONTEXT_DENY);
 
@@ -28,6 +43,8 @@ int main(void)
 	assert(!t2_acm_response_capacity_allowed(0x02, 0, true));
 	assert(t2_acm_response_capacity_allowed(0x13, 0, false));
 	assert(!t2_acm_response_capacity_allowed(0x13, 16, true));
+	assert(t2_acm_response_capacity_allowed(0x28, 0, false));
+	assert(!t2_acm_response_capacity_allowed(0x28, 1, true));
 	assert(T2_ACM_POLICY_RESPONSE_SIZE == 0x1000);
 	assert(t2_acm_response_capacity_allowed(
 		0x03, T2_ACM_POLICY_RESPONSE_SIZE, true));
@@ -48,6 +65,10 @@ int main(void)
 	assert(t2_acm_reply_action(0x13, 0, 0) ==
 	       T2_ACM_REPLY_ACCEPT);
 	assert(t2_acm_reply_action(0x13, 16, 0) ==
+	       T2_ACM_REPLY_REJECT);
+	assert(t2_acm_reply_action(0x28, 0, 0) ==
+	       T2_ACM_REPLY_ACCEPT);
+	assert(t2_acm_reply_action(0x28, 1, 0) ==
 	       T2_ACM_REPLY_REJECT);
 	assert(t2_acm_reply_action(0x03, 4, 0) ==
 	       T2_ACM_REPLY_ACCEPT);

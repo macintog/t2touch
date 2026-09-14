@@ -1,5 +1,4 @@
 __pycache__/
-.DS_Store
 *.py[cod]
 *.ko
 *.o
@@ -21,5 +20,6 @@ enrollment_research/private/
 enrollment_research/captures/
 specs.md
 summary.txt
+checksums.txt.sha1
 linux-bringup-steps.md
 macSteps.md

@@ -54,6 +54,32 @@ class ExternalDeletePlanTests(unittest.TestCase):
         self.assertNotIn(result.stale_identity_uuid, repr(result))
         reconcile.verify(result, survivor, self.live)
 
+        sole = codec.decode_user_catacomb(fixture(), 501)
+        empty_live = live_for(sole)
+        empty_live["per_user_identity_records"] = []
+        empty_live["global_identity_records"] = []
+        empty_live["catacomb"] = {
+            "present": False,
+            "user_states": [
+                {
+                    "kind": "user",
+                    "user_id": 501,
+                    "state": 3,
+                    "needs_save": False,
+                },
+                {
+                    "kind": "master",
+                    "user_id": 0xFFFFFFFF,
+                    "state": 3,
+                    "needs_save": False,
+                },
+            ],
+        }
+        empty_plan = reconcile.plan(sole, empty_live)
+        empty = codec.decode_user_catacomb(empty_plan.archive, 501)
+        self.assertEqual(empty.identities, ())
+        reconcile.verify(empty_plan, empty, empty_live)
+
     def test_rejects_any_shape_other_than_one_local_only_identity(self):
         cases = []
         no_difference = live_for(self.local)
@@ -61,11 +87,6 @@ class ExternalDeletePlanTests(unittest.TestCase):
             "user_states"
         ]
         cases.append(no_difference)
-
-        no_live = dict(self.live)
-        no_live["per_user_identity_records"] = []
-        no_live["global_identity_records"] = []
-        cases.append(no_live)
 
         live_only = dict(self.live)
         live_only["per_user_identity_records"] = [

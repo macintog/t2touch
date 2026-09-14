@@ -381,6 +381,38 @@ class EnrollmentProtocolTests(unittest.TestCase):
             )
         self.assertEqual(truncated.state, enrollment.EnrollmentState.FROZEN)
 
+    def test_sensor_recovery_reason_is_versioned_nonterminal_auxiliary(self):
+        detail = b"opaque-recovery-detail"
+        payload = enrollment.STATUS_PAYLOAD_HEADER.pack(7, len(detail)) + detail
+        raw = enrollment.SERVICE_HEADER.pack(
+            0, enrollment.SERVICE_SENSOR_RECOVERY_REASON, 1, 11
+        ) + payload
+        parsed = enrollment.parse_service_event(raw)
+        self.assertEqual(parsed.ordinal, 7)
+        transition = self.accept(self.machine(), parsed)
+        self.assertEqual(
+            transition.action, enrollment.EnrollmentAction.IGNORE_AUXILIARY
+        )
+        self.assertFalse(transition.continue_required)
+        self.assertNotIn(detail.hex(), repr(transition))
+
+        for version, declared in ((2, len(detail)), (1, len(detail) + 1)):
+            with self.subTest(version=version, declared=declared):
+                machine = self.machine()
+                malformed = enrollment.ServiceEvent(
+                    1,
+                    enrollment.SERVICE_SENSOR_RECOVERY_REASON,
+                    version,
+                    7,
+                    enrollment.STATUS_PAYLOAD_HEADER.pack(7, declared) + detail,
+                )
+                with self.assertRaisesRegex(
+                    enrollment.EnrollmentProtocolError,
+                    "invalid sensor-recovery auxiliary event",
+                ):
+                    self.accept(machine, malformed)
+                self.assertEqual(machine.state, enrollment.EnrollmentState.FROZEN)
+
     def test_sks_lock_state_auxiliary_event_is_validated_and_ignored(self):
         machine = self.machine()
         payload = enrollment.SKS_LOCK_STATE_PAYLOAD.pack(501, 0x228)
@@ -583,6 +615,21 @@ class EnrollmentProtocolTests(unittest.TestCase):
         transition = self.accept(
             machine,
             event(1, enrollment.SERVICE_ENROLLMENT_RESULT, 1, 0, wrong_user),
+        )
+        self.assertEqual(
+            transition.action, enrollment.EnrollmentAction.RESULT_WITNESSED
+        )
+        self.assertIsNone(transition.identity)
+        self.assertEqual(machine.state, enrollment.EnrollmentState.SEP_RESULT_WITNESSED)
+
+    def test_v1_result_with_opaque_tail_is_only_a_terminal_witness(self):
+        """Protect D196/D206 from freezing after a complete native capture."""
+
+        machine = self.machine()
+        payload = (501).to_bytes(4, "little") + bytes(range(1, 17)) + b"opaque-tail"
+        transition = self.accept(
+            machine,
+            event(1, enrollment.SERVICE_ENROLLMENT_RESULT, 1, 0, payload),
         )
         self.assertEqual(
             transition.action, enrollment.EnrollmentAction.RESULT_WITNESSED

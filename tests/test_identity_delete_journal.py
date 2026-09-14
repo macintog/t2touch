@@ -88,6 +88,30 @@ class IdentityDeleteJournalTests(unittest.TestCase):
             with self.assertRaises(delete_journal.IdentityDeleteJournalError):
                 delete_journal.append_checked(path, operation_id, "DELETE_INTENT", invalid)
 
+    def test_intent_allows_a_journaled_zero_survivor_plan(self):
+        value = baseline()
+        path = Path(self.temp.name) / "last.jsonl"
+        operation_id, _record = mutation.create(path, "delete-one", value)
+        target = value["identity_records"][0]
+        history = delete_journal.append_checked(
+            path,
+            operation_id,
+            "DELETE_INTENT",
+            {
+                "connection_generation": value["connection_generation"],
+                "user_id": value["apple_uid"],
+                "identity_uuid": target["uuid"],
+                "entity": target["entity"],
+                "target_name_sha256": "1" * 64,
+                "request_sha256": "2" * 64,
+                "request_length": 20,
+                "survivor_snapshot_sha256": "3" * 64,
+                "survivor_count": 0,
+                "mapping_generation": value["mapping_generation"],
+            },
+        )
+        self.assertEqual(history.phase, delete_journal.IdentityDeletePhase.INTENT)
+
     def test_command_success_requires_stable_target_absence(self):
         self.dispatch_and_result()
         history = self.append(

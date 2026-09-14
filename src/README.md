@@ -16,7 +16,7 @@ no DMA allocation and no MMIO writes.
 - [ACM authorization research](#acm-authorization-research)
 - [Verification and the fprintd facade](#verification-and-the-fprintd-facade)
   - [fprint projection and presentation](#fprint-projection-and-presentation)
-  - [Named-match authority](#named-match-authority)
+  - [Identity-resolution authority](#identity-resolution-authority)
   - [Caller ownership](#caller-ownership)
   - [Adaptive template persistence](#adaptive-template-persistence)
 - [Identity management](#identity-management)
@@ -74,8 +74,121 @@ the pinned DMA registration then requires a reboot before another attempt.
 
 ### The `/dev/t2-aks` exchange device
 
+The experimental `macos_app_version=0x100` option sends one recovered
+endpoint-0 `START_VERSIONED_APPS` command before endpoint-7 OOL registration.
+Matched BridgeOS exposes the same action as
+`seputil --launch-macos-app 100`; the command is fixed to the recovered
+eight-byte layout and is not a generic raw mailbox interface. A missing reply
+is outcome-ambiguous and requires reboot rather than retry.
+
+The optional `xart_os_uuid=UUID` option reproduces the immediately following
+matched BridgeOS boot-policy step. It allocates the vendor-sized 32 KiB xART
+send/receive buffers, registers them for fixed endpoint 16, and submits only
+xART command 8 with the canonical UUID's 16 bytes. Matching bridgeOS prefers an
+APFS volume-group UUID and otherwise supplies the boot partition UUID. The
+installer therefore uses the GPT PARTUUID of the Linux `/boot` partition; it
+does not substitute a filesystem or hardware UUID. A missing or error reply
+ends that boot generation; neither the command nor its DMA registrations are
+retried before reboot. See [`../linux_native/XART_IDENTITY.md`](../linux_native/XART_IDENTITY.md).
+
+The installed transport service blacklists PCI modalias autoload because that
+path can run this one-shot sequence before BridgeOS has brought up its xART
+master backing. Immediately before one explicit `modprobe`, the root-only
+loader dynamically discovers the BiometricKit RemoteXPC port and requires a
+BridgeXPC HELO reply. This is a userland-phase readiness discriminator, not a
+biometric request or a claim that HELO is the vendor's direct xART event.
+
+`t2-bridgeos-update-query.py` is a separate, read-only continuity tool. It
+dynamically discovers `com.apple.bridgeOSUpdated`, sends only
+`QueryUpdateState`, and prints a fixed non-identifying subset of the response.
+It intentionally has no arbitrary-command, file-transfer, preflight, prepare,
+or apply option. The recovered clean-wipe repair boundary is documented in
+[`../linux_native/BRIDGEOS_UPDATE_XART_RECOVERY.md`](../linux_native/BRIDGEOS_UPDATE_XART_RECOVERY.md).
+
+`t2-storage-inventory.py` issues only MobileStorage `CopyDevices` after it
+verifies the running bridgeOS build. It emits a redacted device summary; raw
+device nodes, mount paths, image paths, signatures, and the original response
+are never printed.
+
+`t2-bridgeos-recovery.py` is the distinct recovery-transition tool. Its default
+mode is read-only: it checks the exact live bridgeOS build and advertised
+restoreserviced endpoint. `--execute` sends only lowercase
+`{"command":"recovery"}` and is refused unless the named independent USB
+observer systemd unit is already active. A missing reply is exit status 3,
+outcome-ambiguous, and must never be retried from that result. The static
+`t2-recovery-usb-observer` records whether Apple recovery PID `1280` or `1281`
+appears and whether its sysfs ancestry is the internal BCE VHCI. No automatic
+host-reboot guard is supplied: the reference Mac disables its hardware
+watchdog and the first direct-reboot experiment did not establish recovery.
+
+Raw endpoint-0 command `0x22` is retired. D127 proves that the matching Intel
+host AppleSEPManager never sends it: the similarly numbered operation is an
+internal bridgeOS AppleSEPManager command reached through user-client selector
+`0x11`. Matching Apple EFI later corrected D127's inferred `NSMN` route:
+Linux writes the typed `EFMV` record, clears `EFMS`, commits
+`EFBS = 0x11`, and polls `EFMS` before this PCI transport starts. `NSMN`
+is a different generic platform notification. The carried applesmc research
+patch implements the exact disabled-by-default EFI transaction. A later
+successful capability reply, not a transport-owned status bit, proves that the
+versioned SEP apps are available.
+
+The installer requires an applesmc module that exposes the typed publisher,
+enables it with the configured SEP epoch, and writes a modprobe soft dependency
+so applesmc finishes the one-shot SMC boot-state handoff before
+`t2_sep_transport` can bind. The matched bridgeOS epoch defaults to `1.0` in
+the example configuration; it is explicit because other firmware may differ.
+
+Direct endpoint-16 command 8 is retired. D123's complete MMIO reply and D124's
+import-binding correction prove the x86 PCI endpoint reaches xART's AMDM
+commands 2–4, while OS-UUID command 8 belongs to the separately registered
+bridgeOS-internal `xars` service. The module therefore has no `xart_os_uuid`
+parameter, xART OOL buffers, or publication ioctl. The installer rejects the
+legacy UUID and deferred-publication settings rather than silently sending the
+wrong command. See
+[`../linux_native/XART_IDENTITY.md`](../linux_native/XART_IDENTITY.md).
+
+The installed transport service blacklists PCI modalias autoload because that
+path can run this one-shot sequence before BridgeOS has brought up its xART
+master backing. Immediately before one explicit `modprobe`, the root-only
+loader dynamically discovers the BiometricKit RemoteXPC port and requires a
+BridgeXPC HELO reply. This is a userland-phase readiness discriminator, not a
+biometric request or a claim that HELO is the vendor's direct xART event.
+
+`t2-bridgeos-update-query.py` is a separate, read-only continuity tool. It
+dynamically discovers `com.apple.bridgeOSUpdated`, sends only
+`QueryUpdateState`, and prints a fixed non-identifying subset of the response.
+It intentionally has no arbitrary-command, file-transfer, preflight, prepare,
+or apply option. The recovered clean-wipe repair boundary is documented in
+[`../linux_native/BRIDGEOS_UPDATE_XART_RECOVERY.md`](../linux_native/BRIDGEOS_UPDATE_XART_RECOVERY.md).
+
+`t2-storage-inventory.py` issues only MobileStorage `CopyDevices` after it
+verifies the running bridgeOS build. It emits a redacted device summary; raw
+device nodes, mount paths, image paths, signatures, and the original response
+are never printed.
+
+`t2-bridgeos-oslog.py` is the constrained bridgeOS unified-log collector. It
+requires an exact build, uses only the trusted sysdiagnose service, disables
+log-copy, log-generation, time-sensitive, and UI task classes, and requests
+only `system_logs.logarchive`. Output must be an unused absolute path beneath a
+root-owned directory with no group/other access. The collector removes the
+service's 24-byte stream wrapper, verifies exact size and gzip integrity, and
+prints only build, byte count, and digest. Its explicit recovery mode sends
+only the recovered `GetInProgressArchive` request and never starts a new
+diagnostic.
+
+`t2-bridgeos-recovery.py` is the distinct recovery-transition tool. Its default
+mode is read-only: it checks the exact live bridgeOS build and advertised
+restoreserviced endpoint. `--execute` sends only lowercase
+`{"command":"recovery"}` and is refused unless the named independent USB
+observer systemd unit is already active. A missing reply is exit status 3,
+outcome-ambiguous, and must never be retried from that result. The static
+`t2-recovery-usb-observer` records whether Apple recovery PID `1280` or `1281`
+appears and whether its sysfs ancestry is the internal BCE VHCI. No automatic
+host-reboot guard is supplied: the reference Mac disables its hardware
+watchdog and the first direct-reboot experiment did not establish recovery.
+
 After OOL registration the module also creates `/dev/t2-aks` as a mode-0600
-root-only exchange device. The kernel, rather than userspace, owns header
+root-only, exclusive-open exchange device. The kernel, rather than userspace, owns header
 generation, transaction matching, SHA-256 verification, size bounds, and
 request-buffer scrubbing. It accepts only the recovered AppleKeyStore opcodes
 `0x03` (load keybag), `0x04` (change lock state), `0x06` (copy one live keybag
@@ -106,6 +219,400 @@ a private Apple account UUID, is created mode `0600`, and must never be
 committed or published. Decode only a private copy, redact identifiers in
 notes, and remove the raw output when the observation is complete.
 
+`t2_aks_identity_create.py` contains hardware-free versioned codecs for the
+operation-`0x01` create body and operation-`0x02` saved-keybag export body.
+`t2_aks_provisioning.py` adds their non-retryable journal and atomic private
+saved-keybag store. Neither module has a CLI. The kernel has exact request and
+response validators and owns one create/export phase per boot: it binds export
+to the returned session/handle, blocks all intervening AKS calls, permits one
+same-owner UUID read after export, and poisons provisioning after any ambiguous
+result or premature close.
+`t2_aks_provisioning_operation.py` is the no-CLI broker core: it binds an exact
+preflight digest and connection, owns create and export once, wipes all mutable
+buffers, commits the saved object, verifies its live UUID, writes a disabled
+Linux-owned mapping through `t2_user_mapping_store.py`, and requires a
+different-boot load/UUID result before completion. The no-CLI
+`t2_aks_provisioning_transport.py` is the concrete narrow ioctl adapter. It
+holds one exclusive descriptor across bounded password binding, create,
+export, and live UUID verification; it exposes no arbitrary operation method.
+Its read-only info ioctl binds userspace to a kernel-generated connection UUID
+and attests the actual registration flags, negotiated header version, phase,
+poison state, and stable-absence count. The same descriptor must observe two
+exact operation-`0x51` absent-primary results with the create session before
+the kernel will dispatch create. It must then complete the exact bounded
+operation-`0x21` password verification against the kernel's currently active
+ACM context; create must carry that identical context.
+No installed command enables this path, and the reference system's
+`inventory_only=1` boot has not loaded or exercised it.
+
+`t2_user_activation_broker.py` composes the normal-runtime half without a CLI.
+It obtains evidence from one connected Unix peer, requires a
+separate interactive activation grant when the mapped alias is absent or
+locked, and passes the exact policy binding to the journaled operation while
+one `AKSActivationTransport` owns the exclusive descriptor. Password storage
+is caller-owned and wipeable and is cleared on every exit, including boot-ID
+and journal-root failures. A production listener must load mapping and
+Catacomb-reconciliation evidence from protected stores rather than accept them
+from an IPC request. The old command-per-step scripts are deliberately inert
+because closing the load process now unloads its positive handle.
+`t2_user_authority.py` supplies that protected input boundary. After E4 it
+copies the final immutable enrollment journal under the mapped UID, validates
+the copy, and atomically publishes a small manifest bound to the journal head,
+reconciliation snapshot, operation UUID, and exact mapping generation. Runtime
+load accepts only that root-owned mode-0600 manifest and a post-reboot-verified
+journal whose Linux UID, Apple UID, account UUID, bag UUID, and mapping all
+match. No caller-selected path or authority field crosses IPC.
+The retained, default-disabled `t2-user-activation.socket` accepts one bounded version-1
+`SOCK_SEQPACKET` message containing only an optional password. Its per-request
+service derives the target from peer credentials, returns only ready,
+already-ready, or a generic unavailable result, and wipes both receive and
+password buffers. It remains a research integration surface in the source tree;
+the product installer does not install or start it, and fprintd does not call it.
+The PAM password helper is the user-context activation client; root PAM callers
+drop supplementary groups, GID, and UID before connecting. fprintd itself does
+not proxy activation because its socket peer would be root. Instead it requires
+the activation socket to be available, reloads the protected E4 authority for
+each verification, and derives the BiometricKit numeric user from that mapping.
+It no longer trusts `T2_TOUCHID_MACOS_USER_ID`. The generic BiometricKit warm-up
+also performs no user-scoped inventory.
+
+`t2_aks_identity_create.py` contains hardware-free versioned codecs for the
+operation-`0x01` create body and operation-`0x02` saved-keybag export body.
+`t2_aks_provisioning.py` adds their non-retryable journal and atomic private
+saved-keybag store. The kernel has exact request and
+response validators and owns one create/export phase per boot: it binds export
+to the returned session/handle, blocks all intervening AKS calls, permits one
+same-owner UUID read after export, and poisons provisioning after any ambiguous
+result or premature close.
+
+`t2_aks_identity_replacement.py` contains the hardware-free exact 36-byte
+operation-`0x49` identity-delete and 32-byte operation-`0x03` UUID-open
+recovery codecs. `t2_aks_protocol.h` validates their fixed shapes and explicit
+session/UUID bindings. `t2_aks_replacement_transport.py` is the only userspace
+adapter that can arm those operations: it owns one exclusive descriptor, has
+no arbitrary dispatch method, permits one typed delete or exact UUID recovery,
+and wipes its private arm record. The kernel admits this surface only when both
+provisioning and the additional default-off `enable_identity_replacement=1`
+module parameter are present. Its write-only arm binds one session, old/new
+account UUID pair, phase, and—except for recovery—the exact 16-byte creation
+material. Delete arming additionally proves those bytes equal the live,
+externalized ACM identity-secret context. Create arming on a later boot instead
+binds the saved bytes directly and requires two stable absent-primary reads;
+this is what keeps a crash after deletion from destroying the only usable
+creation input. Each mutation is attempted at most once per module lifetime,
+even if the descriptor is closed. UUID recovery is restricted to the armed new
+account and any exported keybag remains bound to the kernel-owned recovered
+handle. `t2_aks_primary_identity.py` strictly decodes the three-field durable
+primary DER dictionary but exposes only the caller-owned `uuid`; `guid` and
+`kid` remain private SEP-owned values. The replacement adapter hashes each raw
+inventory observation before wiping it. After create, export, and live UUID
+verification, the same CREATE arm admits one operation-`0x05` only for the
+exact provisioning-owned handle. A successful unload retires that handle
+without returning the provisioning state to idle or admitting another create.
+
+`t2_activation_bundle.py` implements the plan-of-record
+pending-generation transaction: it durably stages and verifies the 16-byte
+creation external form, then publishes that secret, the exported keybag, and
+a digest-only manifest with one directory rename. Mapping schema 2 binds both
+artifact digests and their exact generation paths; schema 1 remains readable
+only as legacy authority.
+
+`t2_aks_replacement_journal.py` is the D171 write-ahead state machine. It
+accepts deletion only after the old primary exactly matches the protected D137
+account and activation material is durably staged. Delete and create each have
+one intent and no retry transition. Lost replies require fresh-boot,
+fresh-connection inventory; only the exact new UUID may be reopened. Export is
+the only repeatable operation, and only after such a reopen. The terminal
+chain binds live UUID, exported digest, complete bundle, disabled mapping, and
+owned-handle release without storing secret bytes.
+
+`t2_aks_replacement_operation.py` composes those boundaries into the only
+mutation coordinator. It completes stable old-primary inventory before the
+caller creates the live ACM context (inventory deliberately clears prior ACM
+authorization). While that context remains live, it stages and reopens the
+exact activation material before writing delete intent. It records a
+successful delete before mandatory stable-absence reconciliation, and arms
+create only on that same reconciled owner;
+and writes create/export intents before their single dispatches. A lost delete
+or create reply is never retried. On a later boot the coordinator classifies
+stable primary inventory and may open only the journaled new account UUID,
+verify its live bag UUID, and repeat only the read-only export. Bundle writes
+converge across safe partial files and a crash after the atomic rename; mapping
+commit is idempotent; and either an exact unload reply or a fresh-boot stable
+new-primary plus no-handle attestation closes the transaction. Closing a
+descriptor with an exported but still-live created handle performs one bounded
+exact unload; an already-attempted unload is never repeated before reboot.
+
+`t2_aks_provisioning_operation.py` is the no-CLI broker core: it binds an exact
+preflight digest and connection, owns create and export once, wipes all mutable
+buffers, commits the saved object, verifies its live UUID, writes a disabled
+Linux-owned mapping through `t2_user_mapping_store.py`, and requires a
+different-boot load/UUID result before completion. The no-CLI
+`t2_aks_provisioning_transport.py` is the concrete narrow ioctl adapter. It
+holds one exclusive descriptor across stable-empty inventory, create, export,
+and live UUID verification; it exposes no arbitrary operation method.
+Its read-only info ioctl binds userspace to a kernel-generated connection UUID
+and attests the actual registration flags, negotiated header version, phase,
+poison state, and stable-absence count. The same descriptor must observe two
+exact operation-`0x51` absent-primary results with the create session before
+the kernel will dispatch create. It must then complete the exact bounded
+request-10 credential transform: ACM command `0x28` type 5 must succeed on the
+currently active context, and create must carry that identical external form.
+Operation `0x21` remains the verifier for an already-existing keybag and is
+not a greenfield create prerequisite.
+
+`t2-native-provision` is the one-shot installed owner for the first
+Linux-owned identity. It reads the credential from a supplied descriptor
+without prompting, collects the two-read stable-empty gate, performs the exact
+credential-to-ACM transform, records create intent before operation `0x01`,
+exports and atomically persists the saved keybag, verifies its live UUID, and
+writes only a disabled mapping. A different boot must load the saved object
+and reproduce that UUID before the mapping can be enabled.
+`t2-native-provision-verify` owns that one-shot reload/UUID comparison and
+atomically enables only the exact disabled mapping recorded by the create
+journal.
+On the reference machine, D137 observed create/export/private persistence and
+same-boot UUID equality. D138 loaded the saved object on another boot, proved
+UUID equality again, unloaded the positive handle, and enabled only the exact
+mapping.
+
+`t2-native-enroll` is the fixed-purpose first-enrollment owner for that enabled
+mapping. It rejects the compatibility configuration hash, runtime keybag-env,
+and imported Catacomb backup as authorities. It accepts either the original
+exact nine-record Linux-native provisioning journal and schema-1 mapping, or
+the completed replacement journal, completed independent activation journal,
+published activation bundle, original provisioning lineage, and enabled
+schema-2 mapping as one fully reconciled authority chain. It then proves a
+stable empty live BiometricKit/Catacomb namespace, journal-activates the saved
+keybag and derived alias under one AKS descriptor, and retains the same Bridge
+lease through ACM policy 1007, event-driven enrollment, and creation of the
+initial Linux-owned user/master/biolockout Catacomb generation. For schema 2 it
+also reloads and UUID-verifies the keybag, retains that positive handle, and
+rebinds the alias. Because a legitimate rebind can return a previously ready
+replacement to `device-locked`, the same scope authenticates the persisted
+16-byte activation input into a distinct policy-1007 output, sends the original
+input through operation `0x18`, requires ready read-back, and supplies the
+still-live output context to Mesa. Configuration deliberately precedes ACM
+context creation and option `0x21`, matching the exact ordering that produced
+the D178 status-zero unlock. Load, bind, configuration, unlock, final
+unload, and ready read-back are hash-chain journaled; the legacy schema-1
+password binder is unchanged. The credential is accepted only through a
+supplied descriptor and all copies are wiped.
+`t2-native-enroll-tui-launch` supplies the reference machine's documented test
+credential through an inherited descriptor and presents the broker's real
+Bridge events in a persistent terminal. It starts one bounded operation
+automatically; no Enter is used before or during capture. Contact, release,
+accepted progress, and retry prompts are event-driven, and a terminal failure
+cannot be restarted in the same screen or boot.
+On the isolated reference machine it enters root through one direct
+passwordless `sudo -n` exec. It must not issue a preliminary `sudo -v`:
+validation forces PAM authentication even when the requested command is
+NOPASSWD-authorized and makes launch success depend on a cached timestamp.
+The fixed-purpose broker itself owns the volatile runtime boundary: before
+opening `/run/t2-touchid/operation.lock`, it creates `/run/t2-touchid` at mode
+`0700` when absent and rejects anything other than a private root-owned real
+directory. It does not depend on fprintd or biometric-ready service startup to
+create that directory.
+It also treats the persisted BiometricKit port as a hint, not authority. Both
+enrollment and different-boot verification perform one fresh identifier-safe
+RemoteXPC discovery under the owned operation lock, require one canonical
+dynamic service port, and connect only to that result. This avoids depending on
+the disabled biometric-ready service or on a syntactically valid cache left by
+an older bridgeOS boot.
+The D146 stale-cache failure predates this correction. The later visible
+immediate failure left no broker result or process, so the fresh-discovery
+implementation has not yet been observed.
+`t2-native-enroll-verify` is the separate different-boot owner. It reactivates
+the Linux-created keybag for verification, proves the locally persisted and
+live identity inventories still match the reconciled enrollment journal,
+appends the post-reboot milestone, and atomically publishes runtime authority.
+It sends no fingerprint mutation.
+
+D200 exercised that complete path for the first native enrollment. Schema-2
+activation reached ready from the persisted creation secret, E4 proved the
+same host/SEP identity and E3 Catacomb snapshot on a different boot, the
+journal reached `post-reboot-verified`, and runtime authority was published as
+`linux-native-e4`.
+
+The automatic native dispatcher also treats E4 proof and host authority
+publication as distinct durable states. If an interruption occurs after E4 is
+appended, it can publish only the exact unambiguous schema-2 E4 journal under
+the operation lock, without repeating activation, inventory, or any hardware
+verifier. It refuses a later mutation, a different or invalid existing
+authority, and any non-identical temporary publication artifact. Service
+failures retain the fprintd gate while reporting only a fixed redacted stage,
+exception/cause classes, and a numeric errno or child exit status.
+
+`t2-native-match` consumes only that E4 authority. It retains the schema-2
+keybag and creation-secret authorization, passes the live 16-byte ACM context
+to the Bridge child through an inherited pipe, restores native Catacomb and
+rolling BioLockout state, requires the exact per-user/global identity, and
+uses the authenticated 68-byte flags-9 request. Native version-1 results are
+accepted only at exact body length `0xc84`; imported version-2 results retain
+the `0xc88 + 4*LOTL-count` bound. Both require exact adjacent UID/UUID and a
+clear ignored-result bit. Accepted results append updated BioLockout before
+cancel and Bridge release. If SEP is ahead after an interrupted accepted
+capture, the native path exports, appends, reloads, and validates SEP's secure
+record without rolling a later host head back to the E4 seed.
+
+D204 completed the first Linux-native saved-fingerprint match: one exact D200
+identity result was accepted, generation 4 was persisted, cleanup completed,
+and immutable evidence was sealed.
+
+D206 completed additional Linux-native enrollment. The physical ceremony
+proved the D200 finger, proved the candidate distinct, and reached 100 percent.
+The version-1 terminal enrollment payload violated the still-conservative
+20-byte parser assumption, so no guessed wire identity was accepted. A fresh
+stable inventory instead proved exactly one SEP addition over the unchanged
+one-finger host baseline. The recovery owner then persisted user, master, and
+BioLockout state without recapture and reconciled a two-identity Catacomb. A
+same-boot match constrained by that addition journal returned one valid,
+host-accepted positive with `matches_required_identity=true`; cleanup, rolling
+BioLockout generation 16, and Bridge release all completed.
+
+The version-1 enrollment completion parser now follows the pinned T1Bridge
+`7003b8d9f791` minimum-prefix rule without inheriting T1 authority semantics:
+the first 20 bytes must validate, while any opaque tail is only a terminal
+witness. A fresh, stable T2 global/per-user inventory remains the authority
+for the new identity and all existing Catacomb, capacity, persistence, and E3
+gates remain mandatory.
+
+For an additional identity, the final constrained match appends
+`ADDITION_MATCH_VERIFIED` to the same enrollment journal only after one exact
+new-identity result, reconciled two-sided inventory, persisted BioLockout,
+clean match cancellation, and Bridge transaction release. This same-boot
+`addition-verified` state is terminal and does not incorrectly request the
+first-enrollment E4 reboot proof.
+
+`t2-native-match --expect-no-match` is the separate negative-control mode. It
+uses the same authority and lifecycle, retries only image-quality no-matches,
+stops on the first exact matcher verdict, and exits successfully only for one
+valid signed-`-1`, flags-zero matcher no-match. Any positive result is a hard
+control failure. D205 proved this with an unenrolled finger and persisted
+BioLockout generation 5 before clean cancellation and Bridge release.
+
+The D197 native owner also exposes an explicitly acknowledged
+`--recover-observed-identity` mode for one same-boot terminal ambiguity. It
+accepts only a fresh stable Bridge inventory containing exactly one built-in
+SEP addition over an unchanged host baseline, binds that identity durably, and
+finishes Catacomb persistence without starting enrollment again. For a
+version-2 first-enrollment baseline only, the absent all-zero Catacomb UUID must
+become one present nonzero UUID; established Catacombs retain exact UUID
+continuity. D197 used this path to reach E3 after full capture reached 100
+percent but the result envelope violated the provisional parser layout.
+
+On the Omarchy reference host, use the focused desktop helper after normal
+reconciliation and authorization:
+
+```sh
+python3 tools/tui-control.py launch
+python3 tools/tui-control.py launch-match
+python3 tools/tui-control.py launch-negative
+python3 tools/tui-control.py launch-new-finger
+```
+
+One dedicated test worker owns the applicable launch. The authorized TUI starts
+exactly one bounded child without keyboard input. Enrollment and match use
+separate private Kitty sockets; the helper uses an explicit Hyprland instance
+and bounded readiness checks.
+The launch call returns only after the backend is stably ready for physical
+interaction. Do not ask the operator for a separate readiness confirmation,
+poll the screen after handoff, or inject keyboard input; the operator follows
+the TUI and reports completion.
+See [TUI control](../docs/TUI_CONTROL.md) for installation requirements,
+read-only status, and failure handling.
+
+`t2-native-provisioning-preflight` is the one-shot read-only reachability gate
+for that path. It validates the immutable D124 routing correction, requires
+Linux-native authority and a fresh fixed journal, opens the provisioning
+transport, and performs only its two stable-empty operation-`0x51`
+observations. It closes without ACM authorization, password binding, create,
+export, enrollment, or any other mutation. Success or failure is terminal for
+that boot. Its exchange path calls libc `ioctl` directly so a signed SEP status
+mutated into the exchange structure remains visible when the syscall also
+returns `EREMOTEIO`.
+
+`t2_apple_control_discriminator.py` is the narrower imported-state gate. Before
+opening the live path, it rehashes the disabled mapping, saved keybag, raw
+captures, normalized backup, and committed Catacomb and requires their exact
+immutable import provenance. Its one-shot CLI then retains the concrete
+exclusive AKS descriptor across one saved-keybag load, the transport's two
+operation-`0x06` reads, a private Catacomb UUID comparison, and one same-owner
+unload. The fixed journal path prevents replay. Any lost reply becomes
+outcome-unknown and forbids retry before reboot. This surface contains no
+alias-bind, password, mapping enable, service, PAM, or biometric call.
+
+After that discriminator completes as an exact match, the separate
+`t2_apple_control_alias_discriminator.py` validates its full private journal
+and requires a different Linux boot and AKS runtime generation. It observes
+the derived negative Apple-UID alias first, then—only when absent—loads and
+revalidates the saved keybag, binds the alias once, reads UUID/state back,
+unloads the positive handle once, and proves the alias persists. Its fixed
+journal makes the stage non-replayable. The acknowledgement-gated
+`t2-bind-apple-control-alias.py` exposes only redacted booleans and has no
+unlock, mapping-promotion, service, PAM, or biometric path.
+
+The direct transport uses libc `ioctl` for AKS exchanges rather than Python's
+staging-buffer wrapper. This preserves the kernel-mutated signed SEP status
+when the syscall also returns `EREMOTEIO`; operation-`0x06` status `-3` can
+therefore be classified as a stable absent alias. One separately journaled
+later-boot recovery attempt is admitted only when the first journal validates
+as exactly baseline plus outcome-unknown at pre-state, with no handle and no
+mutation boundary crossed. The failed journal is retained and bound into the
+new baseline; every other prior outcome remains non-replayable.
+
+`t2_apple_control_alias_reconciliation.py` is the read-only closure for an
+ambiguous bind whose positive handle was proven released. It independently
+validates both prior journals, requires a later boot/runtime, and creates a
+third fixed journal. The acknowledgement-gated
+`t2-reconcile-apple-control-alias.py` double-reads only the derived alias UUID;
+when it matches, it captures the bounded operation-`0x19` blob to a root-only
+exclusive file, decodes it, and double-reads UUID again. The transport returns
+that diagnostic blob only in mutable storage which the coordinator wipes.
+Kernel rejection logs only envelope length, codec version, and declared blob
+length. The reconciler has no load, bind, unload, unlock, mapping, service,
+PAM, or biometric method.
+
+`t2_apple_control_alias_unlock.py` is the separate later-boot compatibility
+discriminator after that proof. It validates the complete immutable journal
+and captured state before admitting one device-locked alias observation, one
+password unlock intent/dispatch, and one independent alias UUID/state
+read-back. Its fixed journal prevents replay, password storage is wiped, and
+it cannot load, bind, enable a mapping, start services, change PAM, or request
+biometrics. The acknowledgement-gated CLI reads the test password only from
+standard input after rejecting same-boot use and an existing journal.
+
+`t2_user_activation_broker.py` composes the normal-runtime half without a CLI.
+It obtains evidence from one connected Unix peer, requires a
+separate interactive activation grant when the mapped alias is absent or
+locked, and passes the exact policy binding to the journaled operation while
+one `AKSActivationTransport` owns the exclusive descriptor. Password storage
+is caller-owned and wipeable and is cleared on every exit, including boot-ID
+and journal-root failures. A production listener must load mapping and
+Catacomb-reconciliation evidence from protected stores rather than accept them
+from an IPC request. The old command-per-step scripts are deliberately inert
+because closing the load process now unloads its positive handle.
+`t2_user_authority.py` supplies that protected input boundary. After E4 it
+copies the final immutable enrollment journal under the mapped UID, validates
+the copy, and atomically publishes a small manifest bound to the journal head,
+reconciliation snapshot, operation UUID, and exact mapping generation. Runtime
+load accepts only that root-owned mode-0600 manifest and a post-reboot-verified
+journal whose Linux UID, Apple UID, account UUID, bag UUID, and mapping all
+match. No caller-selected path or authority field crosses IPC.
+The retained, default-disabled `t2-user-activation.socket` accepts one bounded version-1
+`SOCK_SEQPACKET` message containing only an optional password. Its per-request
+service derives the target from peer credentials, returns only ready,
+already-ready, or a generic unavailable result, and wipes both receive and
+password buffers. It remains a research integration surface in the source tree;
+the product installer does not install or start it, and fprintd does not call it.
+The PAM password helper is the user-context activation client; root PAM callers
+drop supplementary groups, GID, and UID before connecting. fprintd itself does
+not proxy activation because its socket peer would be root. Instead it requires
+the activation socket to be available, reloads the protected E4 authority for
+each verification, and derives the BiometricKit numeric user from that mapping.
+It no longer trusts `T2_TOUCHID_MACOS_USER_ID`. The generic BiometricKit warm-up
+also performs no user-scoped inventory.
+
 The read-only `copy-keybag-uuid SESSION HANDLE OUTPUT` command implements the
 matching kext's exact raw endpoint operation `0x06`: a zero result placeholder,
 session `1`, and one nonzero signed handle. The kernel rejects every other
@@ -114,7 +621,25 @@ and never prints the UUID; an absent handle returns exit status 3 and creates
 no file. Output paths are no-follow/exclusive and existing files are never
 overwritten.
 
-Operation `0x21` codec v1 contains the password and 16-byte ACM
+`get-primary-identity SESSION OUTPUT_DER` implements the matching kext's
+read-only identity suboperation 0. Its 40-byte body has a nonzero generation
+session, two `-1` selectors, and three empty blobs. The kernel rejects all
+other command-`0x51` shapes because suboperations 1 and 2 transfer primary
+state. Absence returns exit status 3 without creating a file; success writes
+the private DER dictionary to a new mode-0600 file. In `inventory_only=1`
+module mode, this exact request is the only admitted endpoint-7 ioctl, and the
+module refuses xART publication, ACM registration, or capability probing.
+
+`get-primary-identity SESSION OUTPUT_DER` implements the matching kext's
+read-only identity suboperation 0. Its 36-byte body has a nonzero generation
+session, two `-1` selectors, and two empty input blobs. The kernel rejects all
+other command-`0x51` shapes because suboperations 1 and 2 transfer primary
+state. Absence returns exit status 3 without creating a file; success writes
+the private DER dictionary to a new mode-0600 file. In `inventory_only=1`
+module mode, this exact request is the only admitted endpoint-7 ioctl, and the
+module refuses xART publication, ACM registration, or capability probing.
+
+Operation `0x21` codec v1 contains the password and optional ACM
 external-context blobs followed by one 64-bit device-options value. Exact
 selector `42` supplies plaintext-secret option `0x200`; the kernel accepts only
 that canonical value. Memento and structured-credential variants are not
@@ -166,53 +691,48 @@ These modules back the installed, exposed verification path.
 ### fprint projection and presentation
 
 `t2_fprint_projection.py` defines the presentation boundary needed to replace
-the current fprintd compatibility alias. It accepts only the exact reconciled
-public inventory and projects it onto fprint's ten standard finger names only
-when every T2 identity has one unique canonical name. Legacy labels, unknown
-labels, or duplicates produce no partial list and require explicit migration.
-Finger names remain presentation metadata; future verify/delete brokers must
-resolve them to private identity authority again under a fresh operation lock.
+legacy labels with durable neutral handles. It accepts only the exact
+reconciled public inventory and projects every T2 identity onto one unique
+`finger-N` handle. Legacy labels, unknown labels, or duplicates produce no
+partial list and require explicit migration. Handles remain presentation and
+management metadata; mutation brokers must resolve them to private identity
+authority again under a fresh operation lock.
 The installed, no-argument `t2-touchid-fprint-status` command feeds it only the
 existing root-only fresh reconciled identity collector and prints the redacted
 projection. It is diagnostic-only and cannot rename, enroll, or delete.
 
-`t2_fprint_runtime.py` defines the alias-to-canonical transition without
-performing I/O. It strictly parses only the redacted projection schema. An
-incomplete projection lists exactly one compatibility alias and resolves it to
-an all-identities match; a complete projection lists all canonical names and
-resolves a named request only to the same named target. `any` remains an
-all-identities request and can never become private identity authority. The
-fprintd facade refreshes this projection for list and verify transactions. It
-keeps the compatibility alias for incomplete labels; when the projection is
-complete it advertises the canonical list, routes names through the
-single-identity gate, and resolves an `any` success to the exact canonical
-`VerifyFingerMatched` name. It emits the ABI-defined
-`VerifyFingerSelected("any")` instruction before capture so PAM does not
-present a stale anatomical prompt after authentication. Both paths require
-their pre-match gate and post-match unchanged-state attestation.
+`t2_fprint_runtime.py` defines the projection policy without performing I/O. It
+strictly parses only the redacted projection schema. A complete projection
+lists all neutral handles. `any` and an existing numbered request both become
+an all-identities match; the numbered value only proves that the client's
+presentation handle is current. The fprintd facade refreshes this projection
+for every list and verify transaction and resolves a successful match to the
+actual neutral `VerifyFingerMatched` handle. After returning the `VerifyStart`
+reply, it emits the ABI-defined `VerifyFingerSelected("any")` instruction
+before capture so PAM never claims that a particular physical finger is
+required. Pre-match reconciliation and
+post-match unchanged-state attestation remain mandatory.
 
-### Named-match authority
+### Identity-resolution authority
 
-`t2_fprint_match_selection.py` is the private authority half of the canonical
-listing above. It accepts a strictly decoded user Catacomb and one exact tuple
-of live 20-byte per-user identity records, requires complete unique canonical
-fprint names and exact UUID-set agreement, then returns exactly one opaque
-record for the requested name. Record order is not authority, `any` is not a
-target name, and no UUID, Apple user, or raw record appears in its public
-proof.
+`t2_fprint_match_selection.py` is the private identity-resolution half of the
+neutral listing. It accepts a strictly decoded user Catacomb and one exact
+tuple of live 20-byte per-user identity records, requires complete unique
+handles and exact UUID-set agreement, then returns exactly one opaque record
+for diagnostics and identity-specific mutation checks. Public fprintd
+authentication does not use this selector to narrow acceptance: any enrolled
+identity can unlock. Record order is not authority and no UUID, Apple user, or
+raw record appears in its public proof.
 
-`t2_fprint_match_gate.py` wraps that selector in the read-only match boundary.
-Before a named match it requires exact repeated per-user and global SEP
-identity records on the owned Bridge connection, exact equality with the
-validated committed local Catacomb, and one canonical target. After the match,
-the probe repeats both live inventories and rereads the local components; any
-change fails closed. Its public attestations contain only booleans and the
-fprint presentation name—never Apple user IDs, identity UUIDs, or Catacomb
-contents. `bridge-xpc-probe.py --match-finger-name` implements this targeted
-path. The probe's separate `--resolve-any-finger-name` mode retains all
-reconciled identities and reduces a successful event to exactly one canonical
-presentation name; an event containing zero identities is a normal negative
-result and more than one is ambiguous and fails closed.
+`t2_fprint_match_gate.py` wraps that selector in a read-only diagnostic match
+boundary. The public facade instead uses
+`--resolve-any-finger-name`: it retains all reconciled identities and reduces a
+successful event to exactly one neutral presentation handle. Before and after
+matching, the probe requires exact repeated per-user/global SEP inventories and
+equality with the committed local Catacomb. Zero matched identities is a normal
+negative result; more than one is ambiguous and fails closed. Public
+attestations contain only booleans and the neutral handle—never Apple user IDs,
+identity UUIDs, or Catacomb contents.
 
 ### Caller ownership
 
@@ -286,12 +806,15 @@ selected-user/master SEP state.
 
 The `t2-touchid-manage delete` path is a separately acknowledged,
 single-identity-only broker. It resolves an ephemeral slot against a stable
-reconciled inventory, durably binds the exact 20-byte UID+UUID command-`0x0d`
-request, and refuses the final remaining identity. The command's return status
+reconciled inventory and durably binds the exact 20-byte UID+UUID command-`0x0d`
+request. The command's return status
 is never sufficient evidence: a stable same-connection per-user/global
 inventory must prove either exact target absence or, after a failed command, an
 exact unchanged baseline. Proven absence is followed by a user-component only
-Catacomb save, independent read-back, and a different-boot verification. The
+Catacomb save, independent read-back, and stable local/per-user/global
+reconciliation on the owned connection. That is the terminal deletion
+boundary; an optional later cross-boot observation does not block another
+mutation. The
 companion `plan-delete --slot N` runs the same reconciled target planner but
 does not create a journal, dispatch `0x0d`, or write a Catacomb component. It
 reports only the selected label and before/after counts.
@@ -302,8 +825,9 @@ classify state as exact no-change, exact committed survivors, or an unconfirmed
 SEP deletion requiring forward persistence. The forward path can rebind either
 the exact baseline archive or an exact journaled survivor archive, resets
 persistence onto the fresh lease, and cannot claim rollback. Ambiguous states
-stay `outcome-unknown`. Delete-all, zero-identity archives, whole-user
-deletion, and cross-user mutation are not implemented.
+stay `outcome-unknown`. A verified final-identity operation admits only the
+observed dirty-absent and clean-absent zero-identity Catacomb states. Batch
+delete-all, whole-user deletion, and cross-user mutation are not implemented.
 
 ## Enrollment core
 
@@ -383,6 +907,19 @@ still triggers ACM deletion. These modules have no CLI and cannot initiate
 enrollment by themselves.
 
 ### Catacomb persistence
+
+`t2_mesa_enrollment_preparation.py` owns the final same-generation gate before
+native enrollment start. It performs the T2 readiness-gated sensor reset,
+sensor-info read, conditional bridgeOS FDR/EEPROM calibration load, and
+calibration readback. Calibration command `0x20` alone admits the exact observed
+version-1 status-80/status-94 empty notifications and status 64 with 36 detail
+bytes; every other preparation command remains limited to exact SKS-lock
+events. It invokes T2's no-Catacomb command only for a genuinely empty user;
+established users retain their loaded identity set. It then adapts the working
+T1 preparation order: bounded Catacomb refresh, exact expected identity count,
+second stable refresh, and protected system/user policy reads. It performs no
+user rebind or policy write; malformed, changing, nonsecure, count-mismatched,
+or disabled state invalidates the lease before command `0x03`.
 
 `t2_enrollment_persistence_journal.py` makes the recovered persistence ordering
 mandatory after a provisional identity. An immutable plan contains exactly a
@@ -630,16 +1167,16 @@ socket, authenticates the accepted process against its exact transient systemd
 unit, and supplies the encrypted credential only through
 `LoadCredentialEncrypted`. Its argv contains only the operation socket path.
 
-`t2_system_credential.py` validates the service-scoped credential and runtime
-keybag state, proves password fallback through `verify-password-only-stdin`,
-and binds ACM through the new `verify-password-acm-stdin` command. Mutable
-password buffers are wiped and tool output is suppressed. `t2_fprint_worker`
-reconstructs the pinned authorization session, requires an enabled
-host-encrypted-credential mapping, and runs the real broker/consumer while a
-dedicated listener converts cancellation or peer loss into cooperative
-reconciliation. `t2_fprint_worker_client.py` supplies the async facade
-lifecycle behind the daemon's explicit default-off research flag and waits for
-a terminal update.
+`t2_system_credential.py` validates the compatibility mode's service-scoped
+credential and runtime keybag state, proves password fallback through
+`verify-password-only-stdin`, and binds ACM through the new
+`verify-password-acm-stdin` command. Mutable password buffers are wiped and tool
+output is suppressed. `t2_fprint_worker` reconstructs the pinned authorization
+session; its compatibility branch requires an enabled
+host-encrypted-credential mapping, while its Linux-native branch uses E4
+activation without a credential. A dedicated listener converts cancellation or
+peer loss into cooperative reconciliation. `t2_fprint_worker_client.py`
+supplies the installed async facade lifecycle and waits for a terminal update.
 
 `t2_fprint_deletion_runtime.py` is the typed success boundary for single-name
 deletion. The source fprint facade accepts an injected deletion client only
@@ -650,10 +1187,9 @@ exact `delete-one` broker consumer, and reconciliation-only response. The
 worker repeats canonical-name resolution inside its lock-held private local/SEP
 snapshot, freezes an immutable recovery anchor, and shares the CLI's
 persistence/read-back tail. Peer loss cannot cancel or replay a handed-off
-deletion. The installed daemon still injects no deletion client. A staging-only
-`--enable-native-deletion` process flag and an uninstalled combined research
-drop-in make the exact worker reachable only after explicit administrative
-activation; both bulk-delete methods stay fail-closed.
+deletion. The installed daemon injects this client through the explicit
+`--enable-native-deletion` process flag; both bulk-delete methods stay
+fail-closed.
 
 `t2_post_reboot_reconciler.py` supplies automatic enrollment E4 plus completed
 rename and single-delete proof without loading the encrypted password
@@ -663,20 +1199,18 @@ the protected mapping and operation locks, rechecks the Linux account and
 keybag, binds both AKS handles to the mapped account/bag, reproduces stable
 local and SEP state on a fresh boot/generation, and appends only the journal's
 typed post-reboot record. There is no enrollment, rename, delete, or
-Catacomb-persistence dispatch in this process. D-Bus `EnrollStart` remains
-disabled pending installed negative controls and a live proof of this automatic
-path.
+Catacomb-persistence dispatch in this process. D-Bus `EnrollStart` is connected;
+installed negative controls and a standard-client live proof remain release
+gates.
 
-The `FprintDevice` adapter is nevertheless complete and default-inert: an
-explicitly activated enrollment client receives the exact pinned caller and
-claim, while status, finger-present/needed properties, cancellation, release,
-sender departure, operation exclusion, and terminal grace expiry follow the
-standard fprint lifecycle. The daemon process accepts a staging-only
-`--enable-native-enrollment` and `--enable-native-deletion` flags, but the
-installed systemd unit omits both, so neither code path can launch a worker
-until the remaining installed gates pass. The enrollment-only research drop-in
-enables only enrollment; the later combined drop-in enables both exact worker
-clients and replaces `ExecStart` atomically.
+The `FprintDevice` adapter is complete and connected: its enrollment client
+receives the exact pinned caller and claim, while status,
+finger-present/needed properties, cancellation, release, sender departure,
+operation exclusion, and terminal grace expiry follow the standard fprint
+lifecycle. The installed systemd unit supplies both
+`--enable-native-enrollment` and `--enable-native-deletion`; each path still
+fails closed unless its authority, worker, and journal controls pass. The old
+research drop-ins are retained only as historical staging artifacts.
 
 ## Multi-user policy and broker (non-exposed)
 

@@ -1,0 +1,110 @@
+From: t2-touchid-linux interoperability work
+Subject: [PATCH] mkapfs: allow setting the APFS volume role
+
+APFS consumers use the volume role to discover special-purpose volumes, but
+mkapfs always leaves apfs_role at zero. Add a numeric -r option and persist the
+value in the volume superblock. Numeric input keeps the interface useful for
+all current and future roles rather than baking one role into mkapfs.
+
+diff --git a/mkapfs/mkapfs.8 b/mkapfs/mkapfs.8
+index 8ce80e3..2398b77 100644
+--- a/mkapfs/mkapfs.8
++++ b/mkapfs/mkapfs.8
+@@ -14,6 +14,8 @@ mkapfs \- create an APFS filesystem
+ .IR UUID ]
+ [\-u
+ .IR UUID ]
++[\-r
++.IR role ]
+ [\-F
+ .IR tier2 ]
+ [\-B
+@@ -47,6 +49,10 @@ is chosen by /proc/sys/kernel/random/uuid.
+ Specify a UUID for the volume, in the standard format. By default the value
+ is chosen by /proc/sys/kernel/random/uuid.
+ .TP
++.BI \-r " role"
++Set the numeric APFS volume role. Decimal, octal and hexadecimal notation are
++accepted. By default the volume has no role.
++.TP
+ .B \-v
+ Print the version number of
+ .B mkapfs
+diff --git a/mkapfs/mkapfs.c b/mkapfs/mkapfs.c
+index 7e31fb4..67e591f 100644
+--- a/mkapfs/mkapfs.c
++++ b/mkapfs/mkapfs.c
+@@ -27,7 +27,7 @@ static char *progname;
+ static void usage(void)
+ {
+ 	fprintf(stderr,
+-		"usage: %s [-L label] [-U UUID] [-u UUID] [-F tier2] [-B tier2-blocks] [-sv] "
++		"usage: %s [-L label] [-U UUID] [-u UUID] [-r role] [-F tier2] [-B tier2-blocks] [-sv] "
+ 		"device [blocks]\n",
+ 		progname);
+ 	exit(EXIT_FAILURE);
+@@ -134,6 +134,21 @@ static char *get_random_uuid(void)
+ 	return uuid;
+ }
+ 
++/**
++ * parse_volume_role - Parse a numeric APFS volume role
++ * @string: role in decimal, octal or hexadecimal notation
++ */
++static u16 parse_volume_role(const char *string)
++{
++	unsigned long role;
++	char *end;
++
++	role = strtoul(string, &end, 0);
++	if (end == string || *end || role > UINT16_MAX)
++		fatal("invalid volume role");
++	return role;
++}
++
+ /**
+  * complete_parameters - Set all uninitialized parameters to their defaults
+  *
+@@ -191,7 +206,7 @@ int main(int argc, char *argv[])
+ 		system_error();
+ 
+ 	while (1) {
+-		int opt = getopt(argc, argv, "L:U:u:szvF:B:");
++		int opt = getopt(argc, argv, "L:U:u:r:szvF:B:");
+ 
+ 		if (opt == -1)
+ 			break;
+@@ -206,6 +221,9 @@ int main(int argc, char *argv[])
+ 		case 'u':
+ 			param->vol_uuid = optarg;
+ 			break;
++		case 'r':
++			param->vol_role = parse_volume_role(optarg);
++			break;
+ 		case 's':
+ 			param->case_sensitive = true;
+ 			break;
+diff --git a/mkapfs/mkapfs.h b/mkapfs/mkapfs.h
+index 5d15fca..d60b048 100644
+--- a/mkapfs/mkapfs.h
++++ b/mkapfs/mkapfs.h
+@@ -21,6 +21,7 @@ struct parameters {
+ 	char		*main_uuid;	/* Container UUID in standard format */
+ 	char		*vol_uuid;	/* Volume UUID in standard format */
+ 	char		*fusion_uuid;	/* Fusion drive UUID in standard format */
++	u16		vol_role;	/* Volume role */
+ 	bool		case_sensitive;	/* Is the filesystem case-sensitive? */
+ 	bool		norm_sensitive;	/* Is it normalization-sensitive? */
+ };
+diff --git a/mkapfs/super.c b/mkapfs/super.c
+index 285feaa..3f93212 100644
+--- a/mkapfs/super.c
++++ b/mkapfs/super.c
+@@ -165,6 +165,7 @@ static void make_volume(u64 bno, u64 oid)
+ 
+ 	set_uuid(vsb->apfs_vol_uuid, param->vol_uuid);
+ 	vsb->apfs_fs_flags = cpu_to_le64(APFS_FS_UNENCRYPTED);
++	vsb->apfs_role = cpu_to_le16(param->vol_role);
+ 
+ 	assert(strlen(MKFS_ID_STRING) < sizeof(vsb->apfs_formatted_by.id));
+ 	strcpy((char *)vsb->apfs_formatted_by.id, MKFS_ID_STRING);

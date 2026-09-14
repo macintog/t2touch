@@ -1,0 +1,281 @@
+From 7c42f87bac2874a98320e5a608d7d114ab2939b4 Mon Sep 17 00:00:00 2001
+From: Codex Research <codex@localhost>
+Date: Thu, 3 Sep 2026 18:24:04 -0400
+Subject: [PATCH] applesmc: add typed T2 SEP boot-state publisher
+
+
+diff --git a/drivers/hwmon/applesmc.c b/drivers/hwmon/applesmc.c
+index 3a0a693..bc4e1cf 100644
+--- a/drivers/hwmon/applesmc.c
++++ b/drivers/hwmon/applesmc.c
+@@ -34,6 +34,7 @@
+ #include <linux/workqueue.h>
+ #include <linux/err.h>
+ #include <linux/bits.h>
++#include <linux/unaligned.h>
+ 
+ /* data port used by Apple SMC */
+ #define APPLESMC_DATA_PORT	0
+@@ -69,6 +70,15 @@
+ #define APPLESMC_GET_KEY_BY_INDEX_CMD	0x12
+ #define APPLESMC_GET_KEY_TYPE_CMD	0x13
+ 
++#define T2_EFMV_KEY		"EFMV"
++#define T2_EFMS_KEY		"EFMS"
++#define T2_EFBS_KEY		"EFBS"
++#define T2_EFMV_LENGTH		32
++#define T2_EFM_STATE_LENGTH	1
++#define T2_EFBS_COMMIT		0x11
++#define T2_EFMS_TIMEOUT_MSECS	40000
++#define T2_EFMS_POLL_MSECS	10
++
+ #define KEY_COUNT_KEY		"#KEY" /* r-o ui32 */
+ 
+ #define LIGHT_SENSOR_LEFT_KEY	"ALV0" /* r-o {alv (6-10 bytes) */
+@@ -177,10 +187,35 @@ struct applesmc_device {
+ 	struct workqueue_struct *backlight_wq;
+ 	struct work_struct backlight_work;
+ 	struct led_classdev backlight_dev;
++
++	int t2_sep_boot_state_result;
++	u8 t2_sep_boot_policy_result;
+ };
+ 
+ static const int debug;
+ 
++static bool t2_sep_boot_state;
++module_param(t2_sep_boot_state, bool, 0444);
++MODULE_PARM_DESC(t2_sep_boot_state,
++	"Publish the typed T2 SEP versioned-app boot state once at probe");
++
++static unsigned int t2_sep_epoch_major = 1;
++module_param(t2_sep_epoch_major, uint, 0444);
++MODULE_PARM_DESC(t2_sep_epoch_major, "T2 SEP versioned-app epoch major byte");
++
++static unsigned int t2_sep_epoch_minor;
++module_param(t2_sep_epoch_minor, uint, 0444);
++MODULE_PARM_DESC(t2_sep_epoch_minor, "T2 SEP versioned-app epoch minor byte");
++
++enum applesmc_t2_sep_boot_state_result {
++	T2_SEP_BOOT_STATE_DISABLED,
++	T2_SEP_BOOT_STATE_NOT_APPLICABLE,
++	T2_SEP_BOOT_STATE_REJECTED,
++	T2_SEP_BOOT_STATE_FAILED,
++	T2_SEP_BOOT_STATE_COMMIT_UNCERTAIN,
++	T2_SEP_BOOT_STATE_RESPONSE_RECEIVED,
++};
++
+ /*
+  * Wait for specific status bits with a mask on the SMC.
+  * Used before all transactions.
+@@ -553,6 +588,147 @@ static int read_register_count(struct applesmc_device *smc,
+ 	return 0;
+ }
+ 
++static int applesmc_parse_t2_bridge_version(u32 version[6])
++{
++	const char *bios_version = dmi_get_system_info(DMI_BIOS_VERSION);
++	const char *ibridge;
++	char trailing;
++
++	if (!bios_version)
++		return -ENODEV;
++
++	ibridge = strstr(bios_version, "(iBridge: ");
++	if (!ibridge)
++		return -ENODEV;
++
++	/* Reject a partial parse and any unparsed suffix after the closing ')'. */
++	if (sscanf(ibridge, "(iBridge: %u.%u.%u.%u.%u,%u)%c",
++		   &version[0], &version[1], &version[2],
++		   &version[3], &version[4], &version[5],
++		   &trailing) != 6)
++		return -EINVAL;
++
++	return 0;
++}
++
++/*
++ * Publish the boot-state transaction used by Apple EFI for a macOS boot.
++ *
++ * A T2 non-macOS boot leaves EFMV at the explicit 0xfe sentinel.  Requiring
++ * that exact pre-state prevents this path from overwriting a valid Apple boot
++ * record or replaying after a prior attempt.  EFMU and EFRO are deliberately
++ * left untouched: EFI owns those platform identifiers.
++ */
++static int applesmc_publish_t2_sep_boot_state(struct applesmc_device *smc)
++{
++	struct applesmc_entry efmv_info = { };
++	u8 efmv[T2_EFMV_LENGTH] = { 0 };
++	u8 efms = 0;
++	const u8 efbs = T2_EFBS_COMMIT;
++	u32 version[6];
++	unsigned long deadline;
++	int ret;
++	unsigned int i;
++
++	if (!t2_sep_boot_state)
++		return 0;
++
++	if (!smc->iomem_base_set) {
++		smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_NOT_APPLICABLE;
++		return -EOPNOTSUPP;
++	}
++
++	if (t2_sep_epoch_major > U8_MAX || t2_sep_epoch_minor > U8_MAX) {
++		smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_REJECTED;
++		return -ERANGE;
++	}
++
++	ret = applesmc_parse_t2_bridge_version(version);
++	if (ret) {
++		smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_REJECTED;
++		return ret;
++	}
++
++	mutex_lock(&smc->reg.mutex);
++
++	ret = get_smc_key_info(smc, T2_EFMV_KEY, &efmv_info);
++	if (ret)
++		goto failed;
++	if (efmv_info.len != T2_EFMV_LENGTH) {
++		ret = -EPROTO;
++		goto rejected;
++	}
++
++	ret = read_smc(smc, T2_EFMV_KEY, efmv, sizeof(efmv));
++	if (ret)
++		goto failed;
++	if (efmv[0] != 0xfe || memchr_inv(&efmv[1], 0, sizeof(efmv) - 1)) {
++		ret = -EALREADY;
++		goto rejected;
++	}
++
++	efmv[0] = 1;
++	efmv[1] = t2_sep_epoch_major;
++	efmv[2] = t2_sep_epoch_minor;
++	for (i = 0; i < ARRAY_SIZE(version); i++)
++		put_unaligned_le32(version[i], &efmv[4 + i * sizeof(u32)]);
++
++	ret = write_smc(smc, T2_EFMV_KEY, efmv, sizeof(efmv));
++	if (ret)
++		goto commit_uncertain;
++
++	/* Apple EFI clears the result before committing EFBS. */
++	ret = write_smc(smc, T2_EFMS_KEY, &efms, T2_EFM_STATE_LENGTH);
++	if (ret)
++		goto commit_uncertain;
++
++	ret = write_smc(smc, T2_EFBS_KEY, &efbs, T2_EFM_STATE_LENGTH);
++	if (ret)
++		goto commit_uncertain;
++
++	deadline = jiffies + msecs_to_jiffies(T2_EFMS_TIMEOUT_MSECS);
++	for (;;) {
++		ret = read_smc(smc, T2_EFMS_KEY, &efms,
++			       T2_EFM_STATE_LENGTH);
++		if (ret)
++			goto commit_uncertain;
++		if (efms)
++			break;
++		if (time_after_eq(jiffies, deadline)) {
++			ret = -ETIMEDOUT;
++			goto commit_uncertain;
++		}
++		msleep(T2_EFMS_POLL_MSECS);
++	}
++
++	smc->t2_sep_boot_policy_result = efms;
++	smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_RESPONSE_RECEIVED;
++	mutex_unlock(&smc->reg.mutex);
++	dev_info(smc->ldev,
++		 "received T2 SEP boot-policy response %u for bridgeOS %u.%u.%u.%u.%u,%u epoch %u.%u\n",
++		 efms,
++		 version[0], version[1], version[2], version[3], version[4],
++		 version[5], t2_sep_epoch_major, t2_sep_epoch_minor);
++	return 0;
++
++commit_uncertain:
++	smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_COMMIT_UNCERTAIN;
++	mutex_unlock(&smc->reg.mutex);
++	dev_err(smc->ldev,
++		"T2 SEP boot-state transaction outcome is uncertain; do not retry before reboot\n");
++	return ret;
++
++rejected:
++	smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_REJECTED;
++	mutex_unlock(&smc->reg.mutex);
++	return ret;
++
++failed:
++	smc->t2_sep_boot_state_result = T2_SEP_BOOT_STATE_FAILED;
++	mutex_unlock(&smc->reg.mutex);
++	return ret;
++}
++
+ /*
+  * Serialized I/O
+  *
+@@ -955,6 +1131,12 @@ static int applesmc_add(struct acpi_device *dev)
+ 	if (ret)
+ 		goto out_mem;
+ 
++	ret = applesmc_publish_t2_sep_boot_state(smc);
++	if (ret && t2_sep_boot_state)
++		dev_warn(smc->ldev,
++			 "T2 SEP boot-state transaction stopped without a confirmed response: %d\n",
++			 ret);
++
+ 	ret = applesmc_init_smcreg(smc);
+ 	if (ret)
+ 		goto out_res;
+@@ -1523,6 +1705,39 @@ static ssize_t applesmc_key_count_show(struct device *dev,
+ 	return sysfs_emit(sysfsbuf, "%d\n", count);
+ }
+ 
++static ssize_t applesmc_t2_sep_boot_state_result_show(struct device *dev,
++			struct device_attribute *attr, char *sysfsbuf)
++{
++	struct applesmc_device *smc = dev_get_drvdata(dev);
++	const char *result;
++
++	switch (smc->t2_sep_boot_state_result) {
++	case T2_SEP_BOOT_STATE_DISABLED:
++		result = "disabled";
++		break;
++	case T2_SEP_BOOT_STATE_NOT_APPLICABLE:
++		result = "not-applicable";
++		break;
++	case T2_SEP_BOOT_STATE_REJECTED:
++		result = "rejected";
++		break;
++	case T2_SEP_BOOT_STATE_FAILED:
++		result = "failed";
++		break;
++	case T2_SEP_BOOT_STATE_COMMIT_UNCERTAIN:
++		result = "commit-uncertain";
++		break;
++	case T2_SEP_BOOT_STATE_RESPONSE_RECEIVED:
++		return sysfs_emit(sysfsbuf, "response-received:%u\n",
++				  smc->t2_sep_boot_policy_result);
++	default:
++		result = "invalid";
++		break;
++	}
++
++	return sysfs_emit(sysfsbuf, "%s\n", result);
++}
++
+ static ssize_t applesmc_key_at_index_read_show(struct device *dev,
+ 				struct device_attribute *attr, char *sysfsbuf)
+ {
+@@ -1604,6 +1819,7 @@ static ssize_t applesmc_key_at_index_store(struct device *dev,
+ static struct applesmc_node_group info_group[] = {
+ 	{ "name", applesmc_name_show },
+ 	{ "key_count", applesmc_key_count_show },
++	{ "t2_sep_boot_state", applesmc_t2_sep_boot_state_result_show },
+ 	{ "key_at_index", applesmc_key_at_index_show, applesmc_key_at_index_store },
+ 	{ "key_at_index_name", applesmc_key_at_index_name_show },
+ 	{ "key_at_index_type", applesmc_key_at_index_type_show },
+-- 
+2.55.0

@@ -9,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import t2_bridge_inventory as inventory
 import t2_bridge_wire as wire
+import t2_baseline as baseline
+import t2_enrollment_protocol as enrollment_protocol
+import t2_mutation_journal as mutation_journal
 
 
 GENERATION = str(uuid.UUID(int=41))
@@ -68,6 +71,43 @@ def snapshot(hash_byte: bytes = b"h") -> dict[int, list[object]]:
 
 
 class BridgeInventoryTests(unittest.TestCase):
+    def test_ambient_closed_operation_statuses_do_not_strand_inventory(self):
+        """Delayed no-op and removal callbacks must not strand inventory."""
+
+        def status_event(sequence: int, status: int) -> bytes:
+            payload = enrollment_protocol.STATUS_PAYLOAD_HEADER.pack(status, 0)
+            return enrollment_protocol.SERVICE_HEADER.pack(
+                0,
+                enrollment_protocol.SERVICE_STATUS,
+                1,
+                sequence,
+            ) + payload
+
+        events = iter((status_event(1, 64), status_event(2, 55)))
+
+        class RemovedLease(FakeLease):
+            def __init__(self, snapshots):
+                super().__init__(snapshots)
+            def biometric_command(self, *args, **kwargs):
+                reply, _events = super().biometric_command(*args, **kwargs)
+                event = next(events, None)
+                if event is not None:
+                    return reply, [[
+                        9,
+                        enrollment_protocol.BRIDGE_SERVICE_STATUS,
+                        event,
+                        0,
+                        0,
+                    ]]
+                return reply, []
+
+        lease = RemovedLease([snapshot(), snapshot()])
+        result = inventory.collect_stable_private_inventory(lease, 501)
+
+        self.assertTrue(result["double_collection_equal"])
+        self.assertEqual(len(result["per_user_identity_records"]), 1)
+        self.assertFalse(lease.invalidated)
+
     def test_stable_double_collection_returns_private_inventory(self):
         lease = FakeLease([snapshot(), snapshot()])
         result = inventory.collect_stable_private_inventory(lease, 501)

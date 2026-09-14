@@ -1,0 +1,71 @@
+24G830 service-match branch and Catacomb-state reconciliation
+=============================================================
+
+This record closes two misleading linear-disassembly interpretations before
+another enrolled-finger control.
+
+serviceMatchCommon branch graph
+-------------------------------
+
+The normal non-ephemeral, Class-C-accessible path is:
+
+  0x10003c3f3  restoreAndSyncTemplates
+  0x10003c410  success branch to 0x10003c66b
+  0x10003c66b  loadBioLockoutRecord
+  0x10003c68c  success branch backward to 0x10003c2ed
+  0x10003c2ed  displayStateChanged
+  0x10003c320  branch to 0x10003c5a5
+  0x10003c5a5  systemSleepStateChanged:false
+
+The templatesExistAtBoot/command-0x1e block at 0x10003c4a9-0x10003c4f9
+belongs only to the Class-C-inaccessible branch from 0x10003c3d5. It skips
+restoreAndSyncTemplates and BioLockout. The accessible Linux control must not
+send command 0x1e.
+
+Catacomb component state
+------------------------
+
+BiometricSupport loadCatacombForComponent: reads stateOfComponent: at
+0x7ffa016b2e04-0x7ffa016b2e1b. Bit 0 admits archive handling at
+0x7ffa016b2e55. After unarchive, bit 1 is tested at 0x7ffa016b32e2.
+When bit 1 is set, control jumps to 0x7ffa016b33db and bypasses
+performLoadCatacombCommand:inData: at 0x7ffa016b3357-0x7ffa016b3369.
+It then restores the decoded host identity objects with addIdentityObjects:.
+
+Therefore component state 3 means eligible and already loaded. Only state 1
+issues biometric command 0x40. When command 0x40 is needed, the complete
+CatacombSecureData object, including its 32-byte LTFC wrapper, is passed
+unchanged. Mesa uses [NSData bytes] and [NSData length] unchanged at
+0x100044e2f-0x100044e7d.
+
+The preserved live state is master=(-1,3), user=(501,3), one user identity,
+and zero group components. Its exact sensor sequence is consequently:
+
+  0x3c, 0x50, 0x3c, 0x50, 0x42(user 501)
+
+It sends no 0x40, 0x31, 0x0d, or 0x1e. The second state pass and final
+user-scoped identity refresh are required even though both secure loads are
+skipped.
+
+Linux reconciliation and live no-finger gate
+---------------------------------------------
+
+The probe now gates command 0x40 on (state & 1) && !(state & 2), performs the
+second state pass, and refreshes selected identities from post-restore command
+0x42. Command 0x28 now precedes readiness. Commands 0x53 and 0x35 require
+status zero and exact output lengths. Both the persistent TUI and disabled
+fprint service supply the retained Catacomb archive; fprint no longer performs
+the stale pre-restore identity query.
+
+No-finger gate:
+
+  /var/lib/t2-touchid/research-artifact-snapshots/
+    24G830-state3-service-preflight-20260903T025333Z
+
+All preflight, two state passes, user identity refresh, BioLockout, display,
+awake, match start, and cleanup completed. Both command-0x40 loads were
+explicitly skipped as already loaded. The public JSON SHA-256 is
+bd4563dea58a91dd045f3b04a9055f617ab86f6b13ead85e6fb0a7e4b35b1e7e.
+The root-private event JSON SHA-256 is
+affa745435b2dfc10e0dcf7c7fe8c5bea9e091eacd1a2bf31830873a8c593021.
+Services remained disabled and inactive. No finger input was requested.

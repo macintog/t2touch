@@ -1,0 +1,70 @@
+24G830 match-flags and capture-queue boundary — 2026-09-03
+
+Scope
+-----
+
+This note compares the exact retained 24G830 AppleMesaSEPDriver with the
+preserved successful native bridgeOS log and the complete retained Linux TUI
+corpus. It contains no private identity material.
+
+Exact driver findings
+---------------------
+
+* commandStartMatch begins at 0xfffffff0069be46c.
+* At 0xfffffff0069be584 it loads the first 64 bits of the command-4 request;
+  at 0xfffffff0069be588 it stores those words at driver offset +0x1da8.
+  Therefore command 4 word 0 is _matchFlags and word 1 is userID.
+* handleCaptureData begins at 0xfffffff0069cdd64. Its valid-source path emits
+  public status 55 at 0xfffffff0069cdf4c and retains/enqueues captureData at
+  0xfffffff0069ce364..0xfffffff0069ce384.
+* asyncCaptureHandler begins at 0xfffffff0069b5eb4, dequeues the captureData,
+  emits public status 72 near 0xfffffff0069b62b8..0xfffffff0069b62d8, and
+  calls handleMatch at 0xfffffff0069b7350.
+* checkAutoMatchLockoutConditions begins near 0xfffffff0069bef58 and can emit
+  public status 81. The exact host maps 81 to presenceDetectedInLockout and
+  sends no follow-up command.
+
+Native/Linux comparison
+-----------------------
+
+The preserved successful native window at 2026-09-01 23:53:33 reports
+_commandMode 2 and _matchFlags 9, then handleCaptureData type 1,
+asyncCaptureHandler initialization with matchFlags 9, image processing success,
+imagePassedIQ 1, Image matched 1, and a zero return. Its public path includes
+statuses 55 and 72.
+
+Across every retained Linux tui-match JSON, status totals are: 63=195,
+64=194, 78=193, 80=11, 81=195, 90=206, and 91=195. Statuses 55 and 72 never
+occur. The generic status parser accepts both, so they were not filtered.
+Linux reaches lockout status 81 and never reaches handleCaptureData.
+
+Decision
+--------
+
+The first bounded research TUI discriminator sent flags 0x9 (unlock |
+noBioLockout), matching the exact native success. The required no-finger gate
+then returned status 22 before arming. Exact daemon and driver code explain the
+rejection: bit 8 also requires noBioLockoutUserID at header offset 8 and an
+exact 40-byte noBioLockoutAuthData value at offset 12. Loading and saving the
+encrypted BioLockout record does not provide this authorization. The TUI was
+returned to flags 0x1. Production fprint and the probe default never changed.
+No flags-9 finger request is permitted without a separately recovered,
+validated authorization producer and another no-finger gate.
+
+Preservation
+------------
+
+Full exact-build disassembly SHA-256:
+8a8ea6383d7ec630bfecd1688fb1c9f609bb2508668315d7b0b3f040adc6ae92
+
+Focused acquisition path SHA-256:
+1b865e2f2b4404b4272f2e803779a085b943617a7ce4d74342a2a73ebcaa4405
+
+Focused commandStartMatch SHA-256:
+b865d33d80c756f530f4bcd49a8ba95860bbb071a9300a9d014a1b18536ee40d
+
+Native-success window SHA-256:
+37b2038b5ec80d0363db0e72bea9552e7b95b5beef09829035309c18b46f042e
+
+Read-only root snapshot:
+/var/lib/t2-touchid/research-artifact-snapshots/24G830-driver-match-flags9-boundary-20260903T142000Z

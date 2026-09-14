@@ -26,7 +26,7 @@ class FprintMatchSelectionTests(unittest.TestCase):
         renamed = codec.decode_user_catacomb(
             original.rename(
                 original.identities[0].uuid,
-                "right-index-finger",
+                "finger-1",
             ),
             501,
         )
@@ -34,7 +34,7 @@ class FprintMatchSelectionTests(unittest.TestCase):
             renamed.add(
                 identity_uuid=str(uuid.UUID(int=4)),
                 entity=1,
-                name="left-thumb",
+                name="finger-2",
             ),
             501,
         )
@@ -47,9 +47,9 @@ class FprintMatchSelectionTests(unittest.TestCase):
         result = selection.select(
             self.local,
             self.records,
-            "left-thumb",
+            "finger-2",
         )
-        self.assertEqual(result.finger_name, "left-thumb")
+        self.assertEqual(result.finger_name, "finger-2")
         self.assertEqual(
             result.identity_record,
             record(501, str(uuid.UUID(int=4))),
@@ -65,7 +65,7 @@ class FprintMatchSelectionTests(unittest.TestCase):
         result = selection.select(
             self.local,
             reordered,
-            "right-index-finger",
+            "finger-1",
         )
         self.assertEqual(
             result.identity_record,
@@ -80,7 +80,7 @@ class FprintMatchSelectionTests(unittest.TestCase):
         duplicate = codec.decode_user_catacomb(
             original.rename(
                 original.identities[0].uuid,
-                "right-index-finger",
+                "finger-1",
             ),
             501,
         )
@@ -88,14 +88,14 @@ class FprintMatchSelectionTests(unittest.TestCase):
             duplicate.add(
                 identity_uuid=str(uuid.UUID(int=4)),
                 entity=1,
-                name="right-index-finger",
+                name="finger-1",
             ),
             501,
         )
         for local, name in (
-            (original, "right-index-finger"),
-            (duplicate, "right-index-finger"),
-            (self.local, "right-thumb"),
+            (original, "finger-1"),
+            (duplicate, "finger-1"),
+            (self.local, "finger-3"),
         ):
             records = tuple(
                 record(identity.user_id, identity.uuid)
@@ -119,13 +119,13 @@ class FprintMatchSelectionTests(unittest.TestCase):
             with self.subTest(records=type(records).__name__), self.assertRaises(
                 selection.FprintMatchSelectionError
             ):
-                selection.select(self.local, records, "left-thumb")
+                selection.select(self.local, records, "finger-2")
 
     def test_invalid_finger_or_local_type_fails_before_record_use(self):
         for local, name in (
-            (object(), "left-thumb"),
+            (object(), "finger-2"),
             (self.local, "any"),
-            (self.local, "Finger 1"),
+            (self.local, "right-index-finger"),
         ):
             with self.subTest(name=name), self.assertRaises(
                 selection.FprintMatchSelectionError

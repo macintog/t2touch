@@ -34,6 +34,8 @@ class EnrollmentPhase(Enum):
     PERSISTING = "persisting"
     PERSISTENCE_READY = "persistence-ready"
     RECONCILED = "reconciled"
+    ADDITION_VERIFIED = "addition-verified"
+    ADDITION_ROLLED_BACK = "addition-rolled-back"
     POST_REBOOT_VERIFIED = "post-reboot-verified"
     OUTCOME_UNKNOWN = "outcome-unknown"
 
@@ -273,7 +275,10 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                 evidence, {"connection_generation", "reason"}, milestone
             )
             _same_generation(evidence, baseline)
-            if evidence["reason"] != "caller-requested":
+            if evidence["reason"] not in {
+                "caller-requested",
+                "primary-failure",
+            }:
                 raise EnrollmentJournalError("unsupported enrollment cancel reason")
             phase = EnrollmentPhase.CANCEL_INTENT
             continue
@@ -343,7 +348,7 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                 evidence["payload_length"], "payload length", 1024 * 1024
             )
             length_valid = (
-                payload_length == 20
+                payload_length >= 20
                 if version == 1
                 else version == 2 and payload_length >= 40
             )
@@ -351,7 +356,7 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                 evidence["envelope_type"] != SERVICE_ENROLLMENT_RESULT
                 or version not in (1, 2)
                 or not length_valid
-                or evidence["embedded_user_matches"] is not False
+                or type(evidence["embedded_user_matches"]) is not bool
             ):
                 raise EnrollmentJournalError("terminal result witness framing is invalid")
             _sha256(evidence["event_sha256"], "event_sha256")
@@ -377,7 +382,10 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                 },
                 milestone,
             )
-            _same_generation(evidence, baseline)
+            _uuid(
+                evidence["connection_generation"],
+                "witness read-back connection generation",
+            )
             _uuid(evidence["identity_uuid"], "identity_uuid")
             _sha256(evidence["mapping_generation"], "mapping_generation")
             if (
@@ -397,6 +405,13 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                         f"witness identity read-back field {field} is not true"
                     )
             terminal_identity_uuid = evidence["identity_uuid"]
+            if evidence["connection_generation"] != baseline["connection_generation"]:
+                persistence_connection_generation = evidence[
+                    "connection_generation"
+                ]
+                persistence.use_recovery_generation(
+                    persistence_connection_generation
+                )
             phase = EnrollmentPhase.TERMINAL_IDENTITY
             continue
 
@@ -735,7 +750,7 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
             phase = EnrollmentPhase.RECONCILED
             continue
 
-        if milestone == "E4_POST_REBOOT_VERIFIED":
+        if milestone in {"E4_RUNTIME_VERIFIED", "E4_POST_REBOOT_VERIFIED"}:
             if (
                 phase is not EnrollmentPhase.RECONCILED
                 or terminal_identity_uuid is None
@@ -772,13 +787,16 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                 _uuid(evidence["bridge_boot_uuid"], "bridge_boot_uuid")
             _sha256(evidence["mapping_generation"], "mapping_generation")
             _sha256(evidence["snapshot_sha256"], "snapshot_sha256")
+            if evidence["connection_generation"] == baseline["connection_generation"]:
+                raise EnrollmentJournalError(
+                    "E4 did not cross a connection boundary"
+                )
             if (
-                evidence["linux_boot_uuid"] == baseline["linux_boot_uuid"]
-                or evidence["connection_generation"]
-                == baseline["connection_generation"]
+                milestone == "E4_POST_REBOOT_VERIFIED"
+                and evidence["linux_boot_uuid"] == baseline["linux_boot_uuid"]
             ):
                 raise EnrollmentJournalError(
-                    "E4 did not cross a boot and connection boundary"
+                    "post-reboot E4 did not cross a boot boundary"
                 )
             if (
                 evidence["protocol_version"] != baseline["protocol_version"]
@@ -799,6 +817,122 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                     raise EnrollmentJournalError(f"E4 field {field} is not true")
             post_reboot_linux_boot_uuid = evidence["linux_boot_uuid"]
             phase = EnrollmentPhase.POST_REBOOT_VERIFIED
+            continue
+
+        if milestone == "ADDITION_ROLLED_BACK":
+            if (
+                phase is not EnrollmentPhase.RECONCILED
+                or terminal_identity_uuid is None
+                or baseline.get("baseline_version") != 1
+            ):
+                raise EnrollmentJournalError(
+                    "additional-identity rollback is out of order"
+                )
+            evidence = _exact(
+                evidence,
+                {
+                    "linux_boot_uuid",
+                    "identity_uuid",
+                    "delete_operation_id",
+                    "delete_journal_head_sha256",
+                    "baseline_identity_count",
+                    "identity_count",
+                    "target_absent",
+                    "local_live_equal",
+                    "account_bindings_preserved",
+                },
+                milestone,
+            )
+            for field in (
+                "linux_boot_uuid",
+                "identity_uuid",
+                "delete_operation_id",
+            ):
+                _uuid(evidence[field], field)
+            _sha256(
+                evidence["delete_journal_head_sha256"],
+                "delete journal head",
+            )
+            baseline_count = len(baseline["identity_records"])
+            if (
+                evidence["identity_uuid"] != terminal_identity_uuid
+                or evidence["baseline_identity_count"] != baseline_count
+                or evidence["identity_count"] != baseline_count
+                or evidence["target_absent"] is not True
+                or evidence["local_live_equal"] is not True
+                or evidence["account_bindings_preserved"] is not True
+            ):
+                raise EnrollmentJournalError(
+                    "additional-identity rollback evidence changed"
+                )
+            phase = EnrollmentPhase.ADDITION_ROLLED_BACK
+            continue
+
+        if milestone == "ADDITION_MATCH_VERIFIED":
+            if (
+                phase is not EnrollmentPhase.RECONCILED
+                or terminal_identity_uuid is None
+                or baseline.get("baseline_version") != 1
+            ):
+                raise EnrollmentJournalError(
+                    "additional-identity verification is out of order"
+                )
+            evidence = _exact(
+                evidence,
+                {
+                    "linux_boot_uuid",
+                    "public_result_sha256",
+                    "private_events_sha256",
+                    "host_accepted_result",
+                    "matches_required_identity",
+                    "configured_identity_records_reconciled",
+                    "match_cleanup_valid",
+                    "bridge_os_transaction_released_after_match",
+                    "global_identity_record_count",
+                    "template_sync_identity_count",
+                    "biolockout_generation",
+                },
+                milestone,
+            )
+            _uuid(evidence["linux_boot_uuid"], "linux_boot_uuid")
+            _sha256(evidence["public_result_sha256"], "public_result_sha256")
+            _sha256(evidence["private_events_sha256"], "private_events_sha256")
+            if evidence["linux_boot_uuid"] != baseline["linux_boot_uuid"]:
+                raise EnrollmentJournalError(
+                    "additional-identity verification crossed a boot boundary"
+                )
+            for field in (
+                "host_accepted_result",
+                "matches_required_identity",
+                "configured_identity_records_reconciled",
+                "match_cleanup_valid",
+                "bridge_os_transaction_released_after_match",
+            ):
+                if evidence[field] is not True:
+                    raise EnrollmentJournalError(
+                        f"additional-identity verification field {field} is not true"
+                    )
+            expected_count = baseline["capacity"]["used"] + 1
+            global_count = _uint(
+                evidence["global_identity_record_count"],
+                "global identity record count",
+                0xFFFFFFFF,
+            )
+            template_count = _uint(
+                evidence["template_sync_identity_count"],
+                "template sync identity count",
+                0xFFFFFFFF,
+            )
+            _uint(
+                evidence["biolockout_generation"],
+                "BioLockout generation",
+                0xFFFFFFFF,
+            )
+            if global_count != expected_count or template_count != expected_count:
+                raise EnrollmentJournalError(
+                    "additional-identity verification inventory count changed"
+                )
+            phase = EnrollmentPhase.ADDITION_VERIFIED
             continue
 
         if milestone == "ENROLL_OUTCOME_UNKNOWN":

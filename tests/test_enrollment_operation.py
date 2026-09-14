@@ -97,21 +97,28 @@ class EnrollmentOperationTests(unittest.TestCase):
                     protocol.SKS_LOCK_STATE_PAYLOAD.pack(501, 0x228),
                 ),
                 raw_event(9, protocol.SERVICE_STATISTICS, 1, 0, bytes(28)),
-                raw_event(10, protocol.SERVICE_STATUS, 2, 63),
-                raw_event(11, protocol.SERVICE_STATUS, 2, 55),
-                raw_event(12, protocol.SERVICE_STATUS, 2, 72),
-                raw_event(13, protocol.SERVICE_STATUS, 2, 64),
-                raw_event(14, protocol.SERVICE_STATUS, 2, 90),
-                raw_event(15, protocol.SERVICE_STATUS, 2, 95),
                 raw_event(
-                    16,
+                    10,
+                    protocol.SERVICE_SENSOR_RECOVERY_REASON,
+                    1,
+                    7,
+                    protocol.STATUS_PAYLOAD_HEADER.pack(7, 0),
+                ),
+                raw_event(11, protocol.SERVICE_STATUS, 2, 63),
+                raw_event(12, protocol.SERVICE_STATUS, 2, 55),
+                raw_event(13, protocol.SERVICE_STATUS, 2, 72),
+                raw_event(14, protocol.SERVICE_STATUS, 2, 64),
+                raw_event(15, protocol.SERVICE_STATUS, 2, 90),
+                raw_event(16, protocol.SERVICE_STATUS, 2, 95),
+                raw_event(
+                    17,
                     protocol.SERVICE_STATUS,
                     2,
                     263,
                     protocol.STATUS_PAYLOAD_HEADER.pack(263, 4) + bytes(4),
                 ),
                 raw_event(
-                    17,
+                    18,
                     protocol.SERVICE_ENROLLMENT_RESULT,
                     2,
                     0,
@@ -120,14 +127,20 @@ class EnrollmentOperationTests(unittest.TestCase):
             ]
         )
         feedback = []
+        started = []
         with tempfile.TemporaryDirectory() as directory:
             instance, path, _operation_id = self.create(directory, transport)
-            result = instance.run(bytes(range(16)), on_feedback=feedback.append)
+            result = instance.run(
+                bytes(range(16)),
+                on_started=lambda: started.append(True),
+                on_feedback=feedback.append,
+            )
             history = typed_journal.read(path)
         self.assertEqual(result.outcome, "identity-observed")
         self.assertTrue(result.reconciliation_required)
         self.assertEqual(history.phase, typed_journal.EnrollmentPhase.TERMINAL_IDENTITY)
         self.assertEqual(transport.continue_calls, 1)
+        self.assertEqual(started, [True])
         self.assertEqual(
             [item.action for item in feedback],
             [
@@ -180,6 +193,34 @@ class EnrollmentOperationTests(unittest.TestCase):
         )
         self.assertNotIn(str(uuid.UUID(bytes=wire_identity)), journal_text)
         self.assertNotIn(wire_identity.hex(), journal_text)
+
+    def test_extended_v1_result_is_journaled_as_matching_owner_witness(self):
+        """Protect D196/D206's opaque completion tail and inventory recovery."""
+
+        wire_identity = uuid.UUID(int=9).bytes
+        result_payload = (501).to_bytes(4, "little") + wire_identity + b"opaque-tail"
+        transport = FakeTransport(
+            [
+                raw_event(
+                    1,
+                    protocol.SERVICE_ENROLLMENT_RESULT,
+                    1,
+                    0,
+                    result_payload,
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            instance, path, _operation_id = self.create(directory, transport)
+            result = instance.run(bytes(range(16)))
+            history = typed_journal.read(path)
+            records = journal.read(path)
+        self.assertEqual(result.outcome, "result-witnessed")
+        self.assertEqual(
+            history.phase, typed_journal.EnrollmentPhase.TERMINAL_WITNESS
+        )
+        self.assertTrue(records[-1]["evidence"]["embedded_user_matches"])
+        self.assertEqual(records[-1]["evidence"]["payload_length"], len(result_payload))
 
     def test_nonzero_continue_return_does_not_override_service_events(self):
         identity_uuid = uuid.UUID(int=8).bytes
@@ -367,8 +408,19 @@ class EnrollmentOperationTests(unittest.TestCase):
             with self.assertRaisesRegex(operation.EnrollmentOperationError, "unknown"):
                 instance.run(bytes(range(16)), on_feedback=fail)
             history = typed_journal.read(path)
+            records = journal.read(path)
         self.assertEqual(history.phase, typed_journal.EnrollmentPhase.OUTCOME_UNKNOWN)
         self.assertEqual(transport.continue_calls, 0)
+        self.assertEqual(transport.cancel_calls, 1)
+        self.assertEqual(
+            [record["milestone"] for record in records[-3:]],
+            [
+                "ENROLL_CANCEL_INTENT",
+                "ENROLL_CANCEL_DISPATCH_OBSERVED",
+                "ENROLL_OUTCOME_UNKNOWN",
+            ],
+        )
+        self.assertEqual(records[-3]["evidence"]["reason"], "primary-failure")
 
 
 if __name__ == "__main__":

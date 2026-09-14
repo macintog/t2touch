@@ -118,7 +118,8 @@ def validate_baseline(baseline: Any) -> None:
         missing = sorted(BASELINE_KEYS - set(baseline) if isinstance(baseline, dict) else BASELINE_KEYS)
         extra = sorted(set(baseline) - BASELINE_KEYS) if isinstance(baseline, dict) else []
         raise JournalError(f"baseline fields do not match schema; missing={missing}, extra={extra}")
-    if baseline["baseline_version"] != 1:
+    baseline_version = baseline["baseline_version"]
+    if type(baseline_version) is not int or baseline_version not in (1, 2):
         raise JournalError("unsupported baseline version")
     for field in (
         "caller_linux_uid",
@@ -177,8 +178,15 @@ def validate_baseline(baseline: Any) -> None:
         require_uuid(sep["uuid"], "sep_catacomb.uuid")
         require_sha256(sep["hash"], "sep_catacomb.hash")
     elif sep["present"] is False:
-        if sep["uuid"] is not None or sep["hash"] is not None:
-            raise JournalError("absent SEP Catacomb has UUID/hash data")
+        if baseline_version == 1:
+            if sep["uuid"] is not None or sep["hash"] is not None:
+                raise JournalError("absent SEP Catacomb has UUID/hash data")
+        else:
+            require_uuid(sep["uuid"], "sep_catacomb.uuid")
+            if sep["hash"] is not None:
+                raise JournalError(
+                    "empty Linux-native Catacomb namespace is invalid"
+                )
     else:
         raise JournalError("sep_catacomb.present is not boolean")
 
@@ -201,7 +209,7 @@ def validate_baseline(baseline: Any) -> None:
             require_nonnegative_int(component[field], f"host_components[{index}].{field}")
 
     backups = baseline["backup_references"]
-    if not isinstance(backups, list) or not backups:
+    if not isinstance(backups, list) or (baseline_version == 1 and not backups):
         raise JournalError("baseline has no verified backup references")
     for index, backup in enumerate(backups):
         if not isinstance(backup, dict) or set(backup) != {"reference", "sha256"}:
@@ -209,6 +217,16 @@ def validate_baseline(baseline: Any) -> None:
         if not isinstance(backup["reference"], str) or not backup["reference"]:
             raise JournalError(f"backup_references[{index}].reference is invalid")
         require_sha256(backup["sha256"], f"backup_references[{index}].sha256")
+
+    if baseline_version == 2 and (
+        identities
+        or capacity["used"] != 0
+        or sep["present"] is not False
+        or components
+        or baseline["master_enrollment_count"] != 0
+        or backups
+    ):
+        raise JournalError("Linux-native empty baseline contains durable Catacomb state")
 
 
 def validate_records(lines: list[bytes]) -> list[dict[str, Any]]:

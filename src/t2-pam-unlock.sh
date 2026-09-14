@@ -38,6 +38,7 @@ if "$TOOL" unlock-keybags "$session" "$handle" "$special" \
   systemctl try-restart --no-block fprintd.service || true
   logger --priority authpriv.info --tag t2-pam-unlock 'keybags unlocked from PAM password authentication'
 else
-  logger --priority authpriv.warning --tag t2-pam-unlock 'keybag unlock attempt failed closed'
+  logger --priority authpriv.notice --tag t2-pam-unlock \
+    'native T2 user activation was unavailable; password authentication remains authoritative'
 fi
 exit 0

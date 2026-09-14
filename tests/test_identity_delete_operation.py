@@ -108,6 +108,72 @@ class IdentityDeleteOperationTests(unittest.TestCase):
             journal.read(self.path).phase, journal.IdentityDeletePhase.SEP_DELETED
         )
 
+    def test_last_identity_accepts_only_dirty_absent_catacomb_before_save(self):
+        local = codec.decode_user_catacomb(fixture(), 501)
+        plan = delete.plan(local, live_for(local), slot=1)
+        value = delete_baseline()
+        value["identity_records"] = [
+            {"user_id": item.user_id, "uuid": item.uuid, "entity": item.entity}
+            for item in local.identities
+        ]
+        value["capacity"]["used"] = 1
+        value["master_enrollment_count"] = 1
+        path = Path(self.temp.name) / "last.jsonl"
+        operation_id, _record = mutation.create(path, "delete-one", value)
+        journal.append_checked(
+            path,
+            operation_id,
+            "DELETE_INTENT",
+            {
+                "connection_generation": value["connection_generation"],
+                "user_id": 501,
+                "identity_uuid": plan.identity_uuid,
+                "entity": plan.entity,
+                "target_name_sha256": hashlib.sha256(plan.name.encode()).hexdigest(),
+                "request_sha256": hashlib.sha256(plan.request).hexdigest(),
+                "request_length": 20,
+                "survivor_snapshot_sha256": plan.survivor_snapshot_sha256,
+                "survivor_count": 0,
+                "mapping_generation": value["mapping_generation"],
+            },
+        )
+        empty = codec.decode_user_catacomb(plan.archive, 501)
+        live = live_for(empty)
+        live.update(
+            {
+                "connection_generation": value["connection_generation"],
+                "catacomb": {
+                    "present": False,
+                    "uuid": value["sep_catacomb"]["uuid"],
+                    "hash": "9" * 64,
+                    "user_states": [
+                        {
+                            "kind": "master",
+                            "user_id": 0xFFFFFFFF,
+                            "state": 7,
+                            "needs_save": True,
+                        },
+                        {
+                            "kind": "user",
+                            "user_id": 501,
+                            "state": 7,
+                            "needs_save": True,
+                        },
+                    ],
+                },
+            }
+        )
+        result = operation.run(
+            path,
+            operation_id,
+            plan=plan,
+            local=local,
+            bridge=FakeBridge(value["connection_generation"]),
+            collect_inventory=lambda: live,
+        )
+        self.assertEqual(result.outcome, "sep-deleted")
+        self.assertEqual(journal.read(path).phase, journal.IdentityDeletePhase.SEP_DELETED)
+
     def test_failed_command_and_exact_original_state_closes_not_deleted(self):
         result = self.execute(
             FakeBridge(self.value["connection_generation"], status=-1),

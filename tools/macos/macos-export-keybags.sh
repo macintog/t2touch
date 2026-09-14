@@ -72,7 +72,7 @@ fi
 
 sudo tar -czf "$OUTPUT.tmp.$$" -C "$WORK_DIR" state
 sudo mv -f -- "$OUTPUT.tmp.$$" "$OUTPUT"
-sudo chmod 600 "$OUTPUT"
+sudo chmod 600 "$OUTPUT" 2>/dev/null || true
 sync
 
 echo "Created: $OUTPUT"

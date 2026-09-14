@@ -104,7 +104,6 @@ def summarize(
         or live.get("apple_uid") != apple_user_id
         or live.get("biometric_protocol_version") != 2
         or not isinstance(live.get("catacomb"), dict)
-        or live["catacomb"].get("present") is not True
     ):
         raise IdentityInventoryError("live identity inventory is stale or unstable")
 
@@ -117,6 +116,33 @@ def summarize(
     )
     if local_pairs != per_user_pairs or per_user_pairs != global_pairs:
         raise IdentityInventoryError("local and live identity inventories disagree")
+    catacomb = live["catacomb"]
+    if catacomb.get("present") is not True:
+        states = catacomb.get("user_states")
+        normalized = {
+            (
+                item.get("kind"),
+                item.get("user_id"),
+                item.get("state"),
+                item.get("needs_save"),
+            )
+            for item in states
+            if isinstance(item, dict)
+        } if isinstance(states, list) else set()
+        if (
+            catacomb.get("present") is not False
+            or local_pairs
+            or not isinstance(states, list)
+            or len(states) != 2
+            or normalized
+            != {
+                ("master", 0xFFFFFFFF, 3, False),
+                ("user", apple_user_id, 3, False),
+            }
+        ):
+            raise IdentityInventoryError(
+                "live identity inventory has no reconciled Catacomb authority"
+            )
 
     ordered = sorted(local.identities, key=lambda identity: identity.entity)
     return {
@@ -132,7 +158,79 @@ def summarize(
         ],
         "local_live_reconciled": True,
         "selection_scope": "current-reconciled-list",
-        "fprintd_listing_is_compatibility_alias": True,
+        "finger_names_are_presentation_metadata": True,
+        "identifiers_redacted": True,
+    }
+
+
+def summarize_pending_final_delete(
+    local: t2_catacomb_codec.UserCatacomb,
+    live: dict[str, Any],
+    *,
+    expected_catacomb_uuid: str,
+) -> dict[str, Any]:
+    """Admit only the observed dirty zero-survivor state before persistence.
+
+    Command 0x0d removes the final identity before the user/master Catacomb
+    pair is saved. In that narrow interval SEP reports the same Catacomb UUID
+    as absent, with both components at state 7 and needing save. This is not a
+    generally usable inventory; it is authority only for the deletion
+    pipeline to persist the already-proven empty survivor plan.
+    """
+
+    if (
+        not isinstance(local, t2_catacomb_codec.UserCatacomb)
+        or local.identities
+        or not isinstance(live, dict)
+        or live.get("double_collection_equal") is not True
+        or live.get("apple_uid") != local.expected_user_id
+        or live.get("biometric_protocol_version") != 2
+    ):
+        raise IdentityInventoryError(
+            "final-delete inventory is not a stable empty survivor set"
+        )
+    per_user = _live_pairs(
+        live.get("per_user_identity_records"), local.expected_user_id
+    )
+    global_pairs = _configured_global_pairs(
+        live.get("global_identity_records"), local.expected_user_id
+    )
+    catacomb = live.get("catacomb")
+    states = catacomb.get("user_states") if isinstance(catacomb, dict) else None
+    normalized = {
+        (
+            item.get("kind"),
+            item.get("user_id"),
+            item.get("state"),
+            item.get("needs_save"),
+        )
+        for item in states
+        if isinstance(item, dict)
+    } if isinstance(states, list) else set()
+    if (
+        per_user
+        or global_pairs
+        or not isinstance(catacomb, dict)
+        or catacomb.get("present") is not False
+        or catacomb.get("uuid") != expected_catacomb_uuid
+        or not isinstance(states, list)
+        or len(states) != 2
+        or normalized
+        != {
+            ("master", 0xFFFFFFFF, 7, True),
+            ("user", local.expected_user_id, 7, True),
+        }
+    ):
+        raise IdentityInventoryError(
+            "final-delete Catacomb is not the exact dirty empty state"
+        )
+    return {
+        "schema_version": 1,
+        "identity_count": 0,
+        "identities": [],
+        "local_live_reconciled": True,
+        "selection_scope": "current-reconciled-list",
+        "finger_names_are_presentation_metadata": True,
         "identifiers_redacted": True,
     }
 

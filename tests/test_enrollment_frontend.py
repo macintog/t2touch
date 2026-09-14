@@ -32,6 +32,17 @@ class EnrollmentFrontendTests(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 self.assertEqual(self.translate(list(arguments)), expected)
 
+        native = Path("/safe/t2-native-enroll")
+        manage = Path("/safe/t2-touchid-manage")
+        parsed = MODULE.parser().parse_args(["recover-outcome"])
+        with mock.patch.object(
+            MODULE, "command_path", side_effect=(native, native, manage)
+        ):
+            self.assertEqual(
+                MODULE.native_invocation(parsed),
+                (native, ["--reconcile-outcome-unknown"]),
+            )
+
     def test_list_invokes_truthful_identity_command(self):
         identities = Path("/safe/t2-touchid-identities")
         parsed = MODULE.parser().parse_args(["list", "--json"])
@@ -64,7 +75,7 @@ class EnrollmentFrontendTests(unittest.TestCase):
                 [
                     "start",
                     "--name",
-                    "Research finger",
+                    "finger-4",
                     "--acknowledge-password-fallback-tested",
                     "--acknowledge-live-fingerprint-enrollment",
                     "--acknowledge-local-catacomb-mutation",
@@ -72,7 +83,7 @@ class EnrollmentFrontendTests(unittest.TestCase):
             ),
             [
                 "--identity-name",
-                "Research finger",
+                "finger-4",
                 "--acknowledge-password-fallback-tested",
                 "--acknowledge-live-fingerprint-enrollment",
                 "--acknowledge-local-catacomb-mutation",
@@ -85,7 +96,7 @@ class EnrollmentFrontendTests(unittest.TestCase):
                 [
                     "recover-observed",
                     "--name",
-                    "Recovered finger",
+                    "finger-5",
                     "--acknowledge-observed-identity-recovery",
                     "--acknowledge-local-catacomb-mutation",
                 ]
@@ -93,7 +104,7 @@ class EnrollmentFrontendTests(unittest.TestCase):
             [
                 "--recover-observed-identity",
                 "--identity-name",
-                "Recovered finger",
+                "finger-5",
                 "--acknowledge-observed-identity-recovery",
                 "--acknowledge-local-catacomb-mutation",
             ],
@@ -108,6 +119,10 @@ class EnrollmentFrontendTests(unittest.TestCase):
                 "command_invocation",
                 return_value=(broker, ["--status-only"]),
             ),
+            mock.patch.object(
+                MODULE, "authority_mode", return_value="macos-control-oracle"
+            ),
+            mock.patch.object(Path, "is_file", return_value=True),
             mock.patch.object(MODULE.os, "execv", side_effect=RuntimeError("exec"))
             as execute,
         ):

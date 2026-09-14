@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=Create, activate, or verify the first Linux-native T2 Touch ID identity
+Documentation=file:/opt/t2-touchid/README.md
+Requires=t2-sep-transport.service
+After=local-fs.target t2-sep-transport.service
+Before=t2-biometric-ready.service t2-touchid-post-reboot.service fprintd.service
+ConditionPathExists=/etc/t2-touchid.conf
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/t2-touchid.conf
+ExecStart=/opt/t2-touchid/.venv/bin/python /opt/t2-touchid/src/t2-native-first-run.py
+RemainAfterExit=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=no
+PrivateNetwork=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectKernelModules=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=/dev/t2-aks rw
+DeviceAllow=/dev/t2-acm rw
+ReadWritePaths=/var/lib/t2-touchid
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+TimeoutStartSec=300s

@@ -22,7 +22,7 @@ import t2_polkit_grant as polkit
 def request():
     subject = polkit.read_process_subject(os.getpid(), os.getuid())
     return protocol.DeleteRequest(
-        "left-thumb",
+        "finger-2",
         subject,
         account.AccountEvidence(subject.uid, "a" * 64),
         ipc.SessionEvidence(
@@ -67,7 +67,7 @@ class FprintDeleteWorkerProtocolTests(unittest.TestCase):
     def test_completion_is_exact_and_failure_is_distinct(self):
         left, right = self.socket_pair()
         value = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
         protocol.send_completion(left, value)
         self.assertEqual(protocol.receive_completion(right), value)
@@ -88,7 +88,7 @@ class FprintDeleteWorkerProtocolTests(unittest.TestCase):
         cases = (
             b"{}",
             (
-                b'{"deleted":false,"finger_name":"left-thumb",'
+                b'{"deleted":false,"finger_name":"finger-2",'
                 b'"message":"delete-completed","mutation_performed":false,'
                 b'"post_reboot_pending":false,"reconciled":false,'
                 b'"schema_version":1}'

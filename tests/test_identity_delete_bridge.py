@@ -45,7 +45,7 @@ class IdentityDeleteBridgeTests(unittest.TestCase):
                 (
                     0x0D,
                     {
-                        "version": 0,
+                        "version": 1,
                         "value": 0,
                         "data": request,
                         "output_capacity": 0,

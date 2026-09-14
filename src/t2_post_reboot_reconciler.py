@@ -20,6 +20,7 @@ import t2_linux_account
 import t2_mutation_journal
 import t2_mutation_registry
 import t2_system_credential
+import t2_user_authority
 import t2_user_mapping
 import t2_user_mapping_admin
 import t2_user_readiness
@@ -107,25 +108,19 @@ def _pending_candidate() -> PendingMutation | None:
                         )
                     )
             elif operation_kind == "delete-one":
-                history = t2_identity_delete_journal.validate_history(records)
-                if (
-                    history.phase
-                    is t2_identity_delete_journal.IdentityDeletePhase.RECONCILED
-                ):
-                    candidates.append(
-                        PendingMutation(
-                            "delete-one",
-                            "identity-management",
-                            path,
-                            history,
-                        )
-                    )
+                # Reconciled deletion is the same-boot terminal product
+                # boundary.  Registry validation above still rejects an
+                # invalid or interrupted delete journal, but a completed one
+                # must never turn an ordinary fprintd restart into an implicit
+                # cross-boot ceremony.
+                continue
             elif operation_kind == "enroll":
                 history = t2_enrollment_journal.validate_history(records)
                 if (
                     history.phase
                     is t2_enrollment_journal.EnrollmentPhase.RECONCILED
                     and history.terminal_identity_uuid is not None
+                    and history.baseline.get("baseline_version") == 2
                 ):
                     candidates.append(
                         PendingMutation("enroll", "enroll", path, history)
@@ -218,6 +213,7 @@ def run(
     account_collector=t2_linux_account.collect,
     keybag_reader=t2_user_mapping_admin._keybag_digest,
     runtime_state=t2_system_credential._runtime_state,
+    authority_loader=t2_user_authority.load_runtime,
     boot_reader=_boot_id,
 ) -> PostRebootReconcilerResult:
     """Append only a typed proof after a fresh boot reproduces committed state."""
@@ -233,6 +229,7 @@ def run(
             account_collector,
             keybag_reader,
             runtime_state,
+            authority_loader,
             boot_reader,
         )
     ):
@@ -250,11 +247,21 @@ def run(
     try:
         directory, name = t2_user_mapping_admin._open_parent(MAPPING_PATH)
         mapping_lock = t2_user_mapping_admin._open_lock(directory, name)
-        mapping_set = t2_user_mapping_admin._load_optional(directory, name)
-        if mapping_set is None:
+        protected_mapping = t2_user_mapping_admin._load_optional(directory, name)
+        if protected_mapping is None:
             raise PostRebootReconcilerError(
                 "protected mapping does not exist"
             )
+        target_uid = history.baseline["target_linux_uid"]
+        authority = authority_loader(target_uid)
+        if (
+            not isinstance(authority, t2_user_authority.RuntimeUserAuthority)
+            or authority.origin != "macos-control-oracle-v1"
+        ):
+            raise PostRebootReconcilerError(
+                "automatic post-reboot reconciliation requires compatibility authority"
+            )
+        mapping_set = authority.mapping_set
         selected = _select_mapping(mapping_set, candidate)
         account = account_collector(selected.linux_uid)
         expected_account = t2_linux_account.AccountEvidence(
@@ -346,9 +353,13 @@ def run(
             current_mapping = t2_user_mapping_admin._load_optional(
                 directory, name
             )
-            if current_mapping != mapping_set:
+            if current_mapping != protected_mapping:
                 raise PostRebootReconcilerError(
                     "protected mapping changed during reconciliation"
+                )
+            if authority_loader(target_uid) != authority:
+                raise PostRebootReconcilerError(
+                    "runtime authority changed during reconciliation"
                 )
             if account_collector(selected.linux_uid) != account:
                 raise PostRebootReconcilerError(
@@ -423,6 +434,7 @@ def run(
         t2_identity_rename_reconciliation.IdentityRenameReconciliationError,
         t2_linux_account.LinuxAccountError,
         t2_system_credential.SystemCredentialError,
+        t2_user_authority.UserAuthorityError,
         t2_user_mapping_admin.UserMappingAdminError,
         t2_user_reconciliation_live.LiveUserReconciliationError,
     ) as error:

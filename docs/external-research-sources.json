@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "name": "T1Bridge",
+      "kind": "github_repo",
+      "repository": "standardagents/t1bridge",
+      "lead_scan": true,
+      "focus": "AKS/ACM activation, native enrollment, Catacomb transactions, service integration"
+    },
+    {
+      "name": "KAIT2EN Fedora",
+      "kind": "github_repo",
+      "repository": "kaiT2en/KaiT2en-Fedora",
+      "lead_scan": true,
+      "focus": "T2 BridgeXPC/BiometricKit verification, AKS experiments, resume behavior"
+    },
+    {
+      "name": "KAIT2EN status",
+      "kind": "web_page",
+      "url": "https://kait2en.org/",
+      "focus": "published support and enrollment-status claims"
+    },
+    {
+      "name": "BrettKulp T2 fork",
+      "kind": "github_repo",
+      "repository": "BrettKulp/t2-touchid-linux",
+      "lead_scan": true,
+      "focus": "independent model replication and reboot/CDC-NCM sequencing"
+    },
+    {
+      "name": "Public T2 Touch ID base",
+      "kind": "github_repo",
+      "repository": "jmurth1234/t2-touchid-linux",
+      "lead_scan": true,
+      "focus": "public forks, issues, and integration changes"
+    },
+    {
+      "name": "deqrocks t2bce",
+      "kind": "github_repo",
+      "repository": "deqrocks/t2bce",
+      "lead_scan": true,
+      "focus": "upstreamable BCE/BridgeXPC and suspend substrate"
+    },
+    {
+      "name": "Hoolock m1n1",
+      "kind": "github_repo",
+      "repository": "HoolockLinux/m1n1",
+      "lead_scan": true,
+      "focus": "Apple KingFisher mailbox and older-SEP/T2 transport"
+    },
+    {
+      "name": "Asahi m1n1",
+      "kind": "github_repo",
+      "repository": "AsahiLinux/m1n1",
+      "lead_scan": true,
+      "focus": "SEP/SIO/Mesa tracing and Hoolock transport upstreaming"
+    },
+    {
+      "name": "Asahi Linux",
+      "kind": "github_repo",
+      "repository": "AsahiLinux/linux",
+      "lead_scan": false,
+      "focus": "SEP boot, endpoint readiness, timeout cleanup, and driver lifecycle"
+    },
+    {
+      "name": "Hoolock AKF upstream PR",
+      "kind": "github_pull",
+      "repository": "AsahiLinux/m1n1",
+      "number": 523,
+      "focus": "upstream status of pre-M1/T2 mailbox support"
+    },
+    {
+      "name": "Asahi SEP probe readiness",
+      "kind": "github_issue",
+      "repository": "AsahiLinux/linux",
+      "number": 594,
+      "focus": "asynchronous SEP boot and false-bound state"
+    },
+    {
+      "name": "Asahi SEP timeout cleanup",
+      "kind": "github_issue",
+      "repository": "AsahiLinux/linux",
+      "number": 598,
+      "focus": "mailbox timeout and IRQ ownership"
+    },
+    {
+      "name": "Asahi SEP cleanup PR",
+      "kind": "github_pull",
+      "repository": "AsahiLinux/linux",
+      "number": 599,
+      "focus": "balanced timeout cleanup implementation"
+    },
+    {
+      "name": "Asahi SEP endpoint inventory",
+      "kind": "github_issue",
+      "repository": "AsahiLinux/linux",
+      "number": 605,
+      "focus": "runtime SEPOS endpoint discovery"
+    },
+    {
+      "name": "Aurora Silicon Touch ID",
+      "kind": "web_page",
+      "url": "https://aurorasilicon.org/research/security/touch-id/",
+      "focus": "Apple Silicon SEP/SBIO/SIO biometric research"
+    },
+    {
+      "name": "open-touchid-linux",
+      "kind": "github_repo",
+      "repository": "ELI3GANT/open-touchid-linux",
+      "lead_scan": true,
+      "focus": "privacy-safe Apple Silicon Touch ID probing"
+    },
+    {
+      "name": "BiometricKittie RnD",
+      "kind": "github_repo",
+      "repository": "AgentiLoop/BiometricKittie-RnD",
+      "lead_scan": true,
+      "focus": "BiometricKit private-interface and persistence semantics"
+    },
+    {
+      "name": "libfprint shared-storage branch",
+      "kind": "github_repo",
+      "repository": "Lannamokia/libfprint",
+      "ref": "feature/elan04moc-shared-storage",
+      "lead_scan": false,
+      "focus": "adopt-style device identity and local-account link semantics"
+    },
+    {
+      "name": "Anya",
+      "kind": "github_repo",
+      "repository": "NyanSatan/Anya",
+      "lead_scan": true,
+      "focus": "prototype/JTAG SEP firmware extraction and T1/T2-family targets"
+    },
+    {
+      "name": "libfprint supported devices",
+      "kind": "web_page",
+      "url": "https://fprint.freedesktop.org/supported-devices.html",
+      "focus": "official upstream Apple-device support status"
+    },
+    {
+      "name": "t2linux feature state",
+      "kind": "web_page",
+      "url": "https://wiki.t2linux.org/state/",
+      "focus": "community-visible T2 SEP and Touch ID support status"
+    }
+  ]
+}

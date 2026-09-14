@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=Recover Apple T2 CDC-NCM carrier on %I
+After=NetworkManager.service sys-subsystem-net-devices-%i.device
+Before=network-online.target t2-biometric-ready.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t2-bridge-network-ready %I
+RemainAfterExit=yes
+TimeoutStartSec=20
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_LOCAL AF_NETLINK
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

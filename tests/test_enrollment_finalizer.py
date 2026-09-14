@@ -158,6 +158,42 @@ def live_unchanged():
     }
 
 
+def make_bootstrap_baseline():
+    baseline = make_baseline({})
+    baseline.update(
+        {
+            "baseline_version": 2,
+            "identity_records": [],
+            "capacity": {"used": 0, "maximum": 5},
+            "sep_catacomb": {
+                "present": False,
+                "uuid": str(uuid.UUID(int=6)),
+                "hash": None,
+            },
+            "host_components": [],
+            "master_enrollment_count": 0,
+            "backup_references": [],
+        }
+    )
+    return baseline
+
+
+def live_after_bootstrap():
+    live = live_after()
+    live["per_user_identity_records"] = [
+        {"user_id": 501, "identity_uuid": IDENTITY}
+    ]
+    live["global_identity_records"] = [
+        {
+            "user_id": 501,
+            "identity_uuid": IDENTITY,
+            "group_type": 1,
+            "group_uuid": str(uuid.UUID(int=0)),
+        }
+    ]
+    return live
+
+
 class EnrollmentFinalizerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -263,6 +299,87 @@ class EnrollmentFinalizerTests(unittest.TestCase):
         )
         self.assertEqual(lease.calls[-1][4], 0x1000)
         self.assertFalse(lease.invalidated)
+
+    def test_linux_native_first_enrollment_creates_complete_catacomb(self):
+        root = Path(self.temp.name) / "linux-native-catacomb"
+        root.mkdir(mode=0o700)
+        journal = Path(self.temp.name) / "linux-native-journal" / "operation.jsonl"
+        baseline = make_bootstrap_baseline()
+        operation_id, _record = mutation.create(journal, "enroll", baseline)
+        enrollment.append_checked(
+            journal,
+            operation_id,
+            "ENROLL_START_INTENT",
+            {
+                "apple_uid": 501,
+                "protocol_version": 2,
+                "connection_generation": GENERATION,
+                "request_length": 68,
+                "request_sha256": "a" * 64,
+            },
+        )
+        enrollment.append_checked(
+            journal, operation_id, "ENROLL_START_OBSERVED", {"status": 0}
+        )
+        enrollment.append_checked(
+            journal,
+            operation_id,
+            "E2_TERMINAL_IDENTITY_OBSERVED",
+            {
+                "connection_generation": GENERATION,
+                "event_sequence": 1,
+                "envelope_type": enrollment.SERVICE_ENROLLMENT_RESULT,
+                "event_version": 2,
+                "user_id": 501,
+                "identity_uuid": IDENTITY,
+            },
+        )
+        instance = finalizer.BuiltinEnrollmentFinalizer(
+            lease=FakeLease(),
+            apple_user_id=501,
+            connection_generation=GENERATION,
+            journal_path=journal,
+            operation_id=operation_id,
+            catacomb_root=root,
+            mapping_generation="d" * 64,
+            identity_name="Linux enrolled finger",
+            clock=lambda: codec.APPLE_EPOCH + dt.timedelta(seconds=710000000),
+        )
+        components = (
+            catacomb_protocol.CatacombComponent.user(501),
+            catacomb_protocol.CatacombComponent.master(),
+        )
+        with (
+            patch(
+                "t2_enrollment_finalizer.t2_catacomb_bridge.collect_builtin_save_components",
+                return_value=components,
+            ),
+            patch(
+                "t2_enrollment_finalizer.t2_bridge_inventory.collect_stable_private_inventory",
+                return_value=live_after_bootstrap(),
+            ),
+        ):
+            attestation = instance(
+                enrollment_operation.EnrollmentOperationResult(
+                    "identity-observed", None, True
+                )
+            )
+
+        self.assertTrue(attestation.persistence_ready)
+        self.assertTrue(attestation.reconciliation_complete)
+        self.assertEqual(
+            enrollment.read(journal).phase, enrollment.EnrollmentPhase.RECONCILED
+        )
+        self.assertEqual(
+            codec.decode_master_catacomb(
+                (root / "master.cat").read_bytes()
+            ).enrollment_count,
+            1,
+        )
+        user = codec.decode_user_catacomb(
+            (root / "user_000001f5.cat").read_bytes(), 501
+        )
+        self.assertEqual([identity.uuid for identity in user.identities], [IDENTITY])
 
     def test_terminal_witness_adopts_only_stable_readback_identity(self):
         journal = Path(self.temp.name) / "witness-journal" / "operation.jsonl"
@@ -493,6 +610,78 @@ class EnrollmentFinalizerTests(unittest.TestCase):
         )
         self.assertEqual((self.root / "master.cat").read_bytes(), before_master)
         self.assertEqual([call[0] for call in lease.calls], [0x4A])
+
+    def test_cancelled_enrollment_reconciles_without_persistence(self):
+        journal = Path(self.temp.name) / "cancel-journal" / "operation.jsonl"
+        operation_id, _record = mutation.create(
+            journal, "enroll", self.baseline
+        )
+        enrollment.append_checked(
+            journal,
+            operation_id,
+            "ENROLL_START_INTENT",
+            {
+                "apple_uid": 501,
+                "protocol_version": 2,
+                "connection_generation": GENERATION,
+                "request_length": 68,
+                "request_sha256": "a" * 64,
+            },
+        )
+        enrollment.append_checked(
+            journal, operation_id, "ENROLL_START_OBSERVED", {"status": 0}
+        )
+        enrollment.append_checked(
+            journal,
+            operation_id,
+            "ENROLL_CANCEL_INTENT",
+            {
+                "connection_generation": GENERATION,
+                "reason": "caller-requested",
+            },
+        )
+        enrollment.append_checked(
+            journal,
+            operation_id,
+            "ENROLL_CANCEL_DISPATCH_OBSERVED",
+            {"status": 0},
+        )
+        enrollment.append_checked(
+            journal,
+            operation_id,
+            "ENROLL_TERMINAL_FAILURE_OBSERVED",
+            {
+                "connection_generation": GENERATION,
+                "event_sequence": 1,
+                "envelope_type": enrollment.SERVICE_STATUS,
+                "status": 66,
+            },
+        )
+        lease = FakeLease([])
+        instance = finalizer.BuiltinEnrollmentFinalizer(
+            lease=lease,
+            apple_user_id=501,
+            connection_generation=GENERATION,
+            journal_path=journal,
+            operation_id=operation_id,
+            catacomb_root=self.root,
+            mapping_generation="d" * 64,
+            identity_name="finger-4",
+        )
+        outcome = enrollment_operation.EnrollmentOperationResult(
+            "cancelled", None, True
+        )
+        with patch(
+            "t2_enrollment_finalizer.t2_bridge_inventory.collect_stable_private_inventory",
+            return_value=live_unchanged(),
+        ):
+            attestation = instance(outcome)
+        self.assertFalse(attestation.persistence_ready)
+        self.assertTrue(attestation.reconciliation_complete)
+        self.assertEqual(
+            enrollment.read(journal).phase, enrollment.EnrollmentPhase.RECONCILED
+        )
+        self.assertEqual(lease.calls, [])
 
 
 if __name__ == "__main__":

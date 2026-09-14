@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Exclusive owner for one initialized BridgeXPC biometric connection."""
+"""Exclusive owner for one generation-pinned BridgeXPC biometric connection."""
 
 from __future__ import annotations
 
@@ -23,16 +23,26 @@ class BridgeConnectionState(Enum):
 
 
 class BridgeConnectionLease:
-    """One initialized, non-reentrant Bridge connection and generation."""
+    """One non-reentrant Bridge connection and generation."""
+
+    # Exact 24G830 serviceMatchCommon asks the sensor for its communication
+    # protocol before Bridge client-version selection. Its missing-Catacomb
+    # branch then calls performNoCatacombCommand:, which the exact daemon maps
+    # to command 0x31 with four input bytes and no output. D152/D153 show that
+    # command 0x38 does not belong in this pre-client surface.
+    _PRECLIENT_INVENTORY_SHAPES = {0x01: (0, 4), 0x31: (4, 0)}
 
     def __init__(
         self,
         sock: socket.socket,
         *,
         connection_generation: str | None = None,
+        defer_client_version: bool = False,
     ) -> None:
         if not isinstance(sock, socket.socket):
             raise BridgeConnectionError("Bridge socket is invalid")
+        if type(defer_client_version) is not bool:
+            raise BridgeConnectionError("client-version deferral must be boolean")
         generation = connection_generation or str(uuid.uuid4())
         try:
             parsed = uuid.UUID(generation)
@@ -46,8 +56,9 @@ class BridgeConnectionLease:
         self._lock = threading.Lock()
         self._peer_helo: dict[str, object] = {}
         self._client_version = 0
+        self._pending_client_version = 0
         try:
-            self._initialize()
+            self._initialize(defer_client_version=defer_client_version)
         except BaseException as error:
             self._poison()
             raise BridgeConnectionError("Bridge initialization failed") from error
@@ -60,6 +71,7 @@ class BridgeConnectionLease:
         port: int,
         *,
         timeout: float = 10.0,
+        defer_client_version: bool = False,
     ) -> BridgeConnectionLease:
         if not isinstance(host, str) or not host:
             raise BridgeConnectionError("Bridge host is required")
@@ -67,6 +79,8 @@ class BridgeConnectionLease:
             raise BridgeConnectionError("Bridge interface is required")
         if type(port) is not int or not 1 <= port <= 65535:
             raise BridgeConnectionError("Bridge port is invalid")
+        if type(defer_client_version) is not bool:
+            raise BridgeConnectionError("client-version deferral must be boolean")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 60:
             raise BridgeConnectionError("Bridge timeout is invalid")
         sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -74,7 +88,7 @@ class BridgeConnectionLease:
             sock.settimeout(float(timeout))
             scope_id = socket.if_nametoindex(interface)
             sock.connect((host, port, 0, scope_id))
-            return cls(sock)
+            return cls(sock, defer_client_version=defer_client_version)
         except BaseException:
             sock.close()
             raise
@@ -109,7 +123,7 @@ class BridgeConnectionLease:
             f"client_version={self._client_version})"
         )
 
-    def _initialize(self) -> None:
+    def _initialize(self, *, defer_client_version: bool) -> None:
         frame_type, body = wire.receive_frame(self._socket)
         if frame_type != wire.TYPE_HELO:
             raise BridgeConnectionError("Bridge peer did not send HELO")
@@ -129,12 +143,38 @@ class BridgeConnectionLease:
             or not 1 <= version_reply[1] <= 0xFFFF
         ):
             raise BridgeConnectionError("getBridgeVersion failed")
-        client_version = min(version_reply[1], 2)
-        set_reply = wire.request(self._socket, [10, client_version])
+        self._peer_helo = helo
+        self._pending_client_version = min(version_reply[1], 2)
+        if not defer_client_version:
+            self._select_client_version_unlocked()
+
+    def _select_client_version_unlocked(self) -> None:
+        if self._client_version != 0:
+            raise BridgeConnectionError("Bridge client version is already selected")
+        if not 1 <= self._pending_client_version <= 2:
+            raise BridgeConnectionError("Bridge client version is unavailable")
+        set_reply = wire.request(
+            self._socket, [10, self._pending_client_version]
+        )
         if type(set_reply) is not list or set_reply != [0]:
             raise BridgeConnectionError("setClientVersion failed")
-        self._peer_helo = helo
-        self._client_version = client_version
+        self._client_version = self._pending_client_version
+
+    def select_client_version(self) -> int:
+        """Select API v2 only after the deferred protocol preflight."""
+        self._enter()
+        try:
+            self._select_client_version_unlocked()
+            return self._client_version
+        except BaseException as error:
+            self._poison()
+            if isinstance(error, BridgeConnectionError):
+                raise
+            raise BridgeConnectionError(
+                "Bridge client-version selection failed; connection is poisoned"
+            ) from error
+        finally:
+            self._leave()
 
     def _poison(self) -> None:
         self._state = BridgeConnectionState.POISONED
@@ -178,6 +218,18 @@ class BridgeConnectionLease:
         output_capacity: int,
     ) -> tuple[object, list[object]]:
         self._validate_command(command, version, value, data, output_capacity)
+        if self._client_version == 0:
+            shape = self._PRECLIENT_INVENTORY_SHAPES.get(command)
+            if (
+                shape is None
+                or version != 1
+                or value != 0
+                or len(data) != shape[0]
+                or output_capacity != shape[1]
+            ):
+                raise BridgeConnectionError(
+                    "only exact recovered service preflight commands are allowed before client-version selection"
+                )
         self._enter()
         try:
             return wire.biometric_command(
@@ -192,6 +244,23 @@ class BridgeConnectionLease:
             self._poison()
             raise BridgeConnectionError(
                 "Bridge command failed; connection generation is poisoned"
+            ) from error
+        finally:
+            self._leave()
+
+    def bridge_request(self, payload: object) -> tuple[object, list[object]]:
+        """Issue one generation-owned Bridge method request with callbacks."""
+        if self._client_version == 0:
+            raise BridgeConnectionError(
+                "Bridge method request requires client-version selection"
+            )
+        self._enter()
+        try:
+            return wire.request_with_events(self._socket, payload)
+        except BaseException as error:
+            self._poison()
+            raise BridgeConnectionError(
+                "Bridge method request failed; connection generation is poisoned"
             ) from error
         finally:
             self._leave()

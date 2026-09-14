@@ -1,8 +1,11 @@
-# Deferred evidence collection
+# Evidence collection reference
 
-These tasks correspond to the unresolved evidence table in
-[FINDINGS.md](FINDINGS.md). Collection output is private by default and must not
-be committed to this repository.
+These collectors preserve optional macOS/oracle evidence and support future
+portability or reverse-engineering work. They are no longer prerequisites for
+the reference-machine native path: D196-D218 completed native enrollment,
+different-boot persistence, matching, single-identity deletion/recovery, and
+continuous second-finger enrollment. Collection output is private by default
+and must not be committed to this repository.
 
 ## Recommended one-shot collection
 
@@ -120,21 +123,27 @@ tool is installed, it also records metadata and wrapped KBAG data. A displayed
 KBAG key is wrapped material, not a usable AES key. The script performs no
 decryption and downloads nothing.
 
-## 5. Controlled device validation
+## 5. Controlled device validation (completed on the reference machine)
 
-Final mode-0 consumption, replay/one-shot behavior, cancellation ambiguity,
-and persistence reconciliation ultimately require a disposable-finger hardware
-experiment. Do not attempt it until the read-only inventory, strict Catacomb
-codec, endpoint-10 broker, and durable journal exist.
+The once-deferred device experiment is complete on the MacBookPro16,1. D196-
+D200 proved mode-0 consumption, native persistence, and different-boot E4;
+D204-D205 proved positive and negative matching; D217 proved exact deletion,
+recovery, and survivor verification; and D218 proved uninterrupted additional
+enrollment with immediate new-identity-only matching. The D218 immutable
+artifact/read-only snapshot is
+`D218-continuous-second-finger-ceremony-20260913`, with private-manifest
+SHA-256
+`52f960e06e35e462326c89109597c586b6bd5d3376fa91011d2a93660eb6dd25`.
 
-Run the non-mutating checklist generator first:
+The historical non-mutating checklist generator remains useful when repeating
+the experiment on a new machine:
 
 ```bash
 ./scripts/hardware-experiment-preflight.sh /path/to/private/output
 ```
 
 It intentionally exits nonzero while any prerequisite is unacknowledged and
-contains no enrollment or deletion command. The eventual experiment must be a
+contains no enrollment or deletion command. Any repetition must remain a
 separately reviewed change with an immutable target UID, verified backup,
 password fallback, exact before/after inventory, and explicit operator consent.
 

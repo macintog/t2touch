@@ -4,7 +4,6 @@ Description=Load the macOS user keybag into Apple T2 SEP
 Requires=t2-sep-transport.service
 Wants=t2-biometric-port-refresh.service
 After=t2-sep-transport.service t2-biometric-port-refresh.service local-fs.target
-ConditionPathExists=/var/lib/t2-touchid/user.kb
 
 [Service]
 Type=oneshot

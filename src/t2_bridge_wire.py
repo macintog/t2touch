@@ -19,10 +19,11 @@ BIOMETRIC_COMMAND_HEADER = struct.Struct("<HHHH")
 BIOMETRIC_COMMAND_MAGIC = 0x4D42
 MAX_FRAME_BODY = 16 * 1024 * 1024
 
-# bkremoted uses this fixed CFString in its two-item command reply whenever
-# performCommand:input:output:capacity: returns a nil Objective-C output.  It
-# is a protocol sentinel, not a request, connection, identity, or service UUID.
+# BiometricKit and bkremoted share this fixed CFString for two related nil
+# cases: a nil Objective-C command output and a no-reply Bridge envelope ID.
+# It is not a request, connection, identity, or service UUID.
 BIOMETRIC_NIL_OUTPUT_SENTINEL = "d4161201-daf5-4bbd-ae4f-9bf319fabbe0"
+BRIDGE_NO_REPLY_ID = BIOMETRIC_NIL_OUTPUT_SENTINEL
 
 
 def is_biometric_nil_output(value: object) -> bool:
@@ -70,6 +71,11 @@ def send_message(sock: socket.socket, value: object) -> None:
     sock.sendall(
         HEADER.pack(MAGIC, PROTOCOL_VERSION, TYPE_MESSAGE, len(body)) + body
     )
+
+
+def notify(sock: socket.socket, payload: object) -> None:
+    """Send Apple's exact Bridge notification envelope without awaiting reply."""
+    send_message(sock, [1, False, BRIDGE_NO_REPLY_ID, payload])
 
 
 def describe(frame_type: int, body: bytes) -> object:

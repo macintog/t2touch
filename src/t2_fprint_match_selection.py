@@ -57,13 +57,13 @@ def select(
 
     if not isinstance(local, t2_catacomb_codec.UserCatacomb):
         raise FprintMatchSelectionError("local Catacomb has the wrong type")
-    if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+    if not t2_fprint_projection.is_finger_name(finger_name):
         raise FprintMatchSelectionError("fprint finger name is invalid")
     identities = local.identities
     names = [identity.name for identity in identities]
     if (
         not identities
-        or any(name not in t2_fprint_projection.FINGER_NAME_SET for name in names)
+        or any(not t2_fprint_projection.is_finger_name(name) for name in names)
         or len(names) != len(set(names))
     ):
         raise FprintMatchSelectionError(

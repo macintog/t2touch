@@ -149,11 +149,18 @@ def _require_clean_catacomb(live: dict[str, Any], apple_uid: int) -> None:
         if isinstance(item, dict) and item.get("kind") == "master"
     ]
     if (
-        catacomb.get("present") is not True
+        catacomb.get("present") not in (True, False)
         or len(users) != 1
         or len(masters) != 1
         or users[0].get("needs_save") is not False
         or masters[0].get("needs_save") is not False
+        or (
+            catacomb.get("present") is False
+            and (
+                users[0].get("state") != 0x03
+                or masters[0].get("state") != 0x03
+            )
+        )
     ):
         raise ExternalDeleteReconcileError(
             "SEP Catacomb is not clean after the external deletion"
@@ -190,8 +197,7 @@ def plan(
     local_pairs = set(local_by_pair)
     stale_pairs = local_pairs - per_user
     if (
-        not per_user
-        or per_user - local_pairs
+        per_user - local_pairs
         or len(stale_pairs) != 1
         or len(local_pairs) != len(per_user) + 1
     ):
@@ -200,7 +206,11 @@ def plan(
         )
     stale = local_by_pair[next(iter(stale_pairs))]
     try:
-        archive = local.delete(stale.uuid)
+        archive = (
+            local.clear_after_stable_sep_empty(sep_empty_attested=True)
+            if not per_user
+            else local.delete(stale.uuid)
+        )
         survivor = t2_catacomb_codec.decode_user_catacomb(archive, apple_uid)
         t2_identity_inventory.summarize(survivor, live)
     except (
@@ -455,7 +465,7 @@ def validate_history(records: list[dict[str, Any]]) -> ExternalDeleteHistory:
         or type(baseline["stale_entity"]) is not int
         or type(baseline["local_identity_count"]) is not int
         or type(baseline["live_identity_count"]) is not int
-        or baseline["live_identity_count"] < 1
+        or baseline["live_identity_count"] < 0
         or baseline["local_identity_count"] != baseline["live_identity_count"] + 1
         or baseline["sep_mutation_performed"] is not False
     ):

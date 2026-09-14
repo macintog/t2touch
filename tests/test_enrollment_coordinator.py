@@ -160,6 +160,8 @@ class EnrollmentCoordinatorTests(unittest.TestCase):
         *,
         dispatch_allowed=lambda: True,
         result_user_id: int = 501,
+        authorization_scope=None,
+        linux_native_binding=None,
     ):
         lease = FakeLease()
         lease.result_user_id = result_user_id
@@ -180,13 +182,37 @@ class EnrollmentCoordinatorTests(unittest.TestCase):
             target_linux_uid=1000,
             linux_boot_uuid=str(uuid.UUID(int=60)),
             mapping_generation="e" * 64,
-            backup_reference="backup.tar.gz",
+            backup_reference=None if linux_native_binding is not None else "backup.tar.gz",
             password_fallback_verified=True,
             password_binder=bound.append,
             finalizer=finalizer,
             dispatch_allowed=dispatch_allowed,
+            authorization_scope=authorization_scope,
+            linux_native_binding=linux_native_binding,
         )
         return result, lease, device, bound, path
+
+    def test_existing_linux_native_authority_uses_add_one_baseline(self):
+        def finalize(_result):
+            return coordinator.FinalizationAttestation(GENERATION, True, True)
+
+        binding = {
+            "account_uuid": host_inventory()["account_uuid"],
+            "bag_uuid": host_inventory()["bag_uuid"],
+            "authority_reference": "linux-native-e4:root-proof",
+            "authority_sha256": "f" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            _result, _lease, _device, _bound, path = self.run_coordinator(
+                directory, finalize, linux_native_binding=binding
+            )
+            history = enrollment_journal.read(path)
+        self.assertEqual(history.baseline["baseline_version"], 1)
+        self.assertEqual(history.baseline["identity_records"][0]["uuid"], IDENTITY)
+        self.assertEqual(
+            history.baseline["backup_references"],
+            [{"reference": binding["authority_reference"], "sha256": "f" * 64}],
+        )
 
     def test_dispatch_guard_stops_after_authorization_without_enrollment(self):
         finalized = []
@@ -246,6 +272,27 @@ class EnrollmentCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(history.phase, enrollment_journal.EnrollmentPhase.TERMINAL_IDENTITY)
 
+    def test_external_identity_authorization_scope_supplies_enrollment_context(self):
+        supplied = []
+
+        def authorize(consumer):
+            supplied.append(True)
+            return type("Policy", (), {"satisfied": True})(), consumer(
+                b"\xa5" * 16
+            )
+
+        def finalize(_result):
+            return coordinator.FinalizationAttestation(GENERATION, True, True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            result, _lease, device, bound, _path = self.run_coordinator(
+                directory, finalize, authorization_scope=authorize
+            )
+        self.assertEqual(result.outcome, "identity-observed")
+        self.assertEqual(supplied, [True])
+        self.assertEqual(bound, [])
+        self.assertEqual(device.commands, [])
+
     def test_identity_cannot_complete_without_persistence_attestation(self):
         def finalize(_result):
             return coordinator.FinalizationAttestation(GENERATION, False, True)
@@ -278,6 +325,21 @@ class EnrollmentCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             history.phase, enrollment_journal.EnrollmentPhase.TERMINAL_WITNESS
         )
+
+    def test_witnessed_result_may_finalize_on_fresh_bridge_generation(self):
+        fresh_generation = str(uuid.UUID(int=99))
+
+        def finalize(_result):
+            return coordinator.FinalizationAttestation(
+                fresh_generation, True, True
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            result, _lease, _device, _bound, _path = self.run_coordinator(
+                directory, finalize, result_user_id=502
+            )
+        self.assertEqual(result.outcome, "identity-observed")
+        self.assertTrue(result.persistence_ready)
 
     def test_finalizer_cannot_switch_bridge_generation(self):
         def finalize(_result):

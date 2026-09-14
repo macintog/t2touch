@@ -19,71 +19,61 @@ def projection(names=(), *, count=2, complete=False):
         "unassigned_identity_count": 0 if complete else count,
         "duplicate_finger_name_count": 0,
         "complete": complete,
-        "compatibility_alias_required": not complete,
         "finger_names_are_presentation_metadata": True,
         "identifiers_redacted": True,
     }
 
 
 class FprintRuntimeTests(unittest.TestCase):
-    def test_incomplete_projection_lists_only_compatibility_alias(self):
-        view = runtime.parse_projection(projection(), "right-index-finger")
-        self.assertEqual(view.listed_fingers, ("right-index-finger",))
-        request = runtime.resolve_match(view, "right-index-finger")
-        self.assertTrue(request.match_all)
-        self.assertIsNone(request.target_finger)
-        self.assertTrue(request.compatibility_alias_used)
+    def test_incomplete_projection_invents_no_compatibility_identity(self):
+        view = runtime.parse_projection(projection())
+        self.assertEqual(view.listed_fingers, ())
+        with self.assertRaises(runtime.FprintRuntimeError):
+            runtime.resolve_match(view, "finger-1")
 
-    def test_complete_projection_lists_and_targets_exact_names(self):
+    def test_complete_projection_lists_names_but_authenticates_against_all(self):
         view = runtime.parse_projection(
             projection(
-                ("left-thumb", "right-index-finger"),
+                ("finger-1", "finger-2"),
                 count=2,
                 complete=True,
-            ),
-            "right-index-finger",
+            )
         )
         self.assertEqual(
             view.listed_fingers,
-            ("left-thumb", "right-index-finger"),
+            ("finger-1", "finger-2"),
         )
-        request = runtime.resolve_match(view, "left-thumb")
-        self.assertFalse(request.match_all)
-        self.assertEqual(request.target_finger, "left-thumb")
+        request = runtime.resolve_match(view, "finger-1")
+        self.assertTrue(request.match_all)
+        self.assertIsNone(request.target_finger)
 
     def test_any_matches_all_but_is_never_a_private_target(self):
-        for view in (
-            runtime.parse_projection(projection(), "right-index-finger"),
-            runtime.parse_projection(
-                projection(("left-thumb",), count=1, complete=True),
-                "right-index-finger",
-            ),
-        ):
-            request = runtime.resolve_match(view, "any")
-            self.assertTrue(request.match_all)
-            self.assertIsNone(request.target_finger)
+        view = runtime.parse_projection(
+            projection(("finger-1",), count=1, complete=True)
+        )
+        request = runtime.resolve_match(view, "any")
+        self.assertTrue(request.match_all)
+        self.assertIsNone(request.target_finger)
 
     def test_duplicate_labels_are_validly_incomplete_and_never_listed(self):
         value = projection()
         value["unassigned_identity_count"] = 0
         value["duplicate_finger_name_count"] = 1
-        view = runtime.parse_projection(value, "right-index-finger")
+        view = runtime.parse_projection(value)
         self.assertFalse(view.complete)
-        self.assertEqual(view.listed_fingers, ("right-index-finger",))
+        self.assertEqual(view.listed_fingers, ())
 
     def test_unenrolled_name_and_empty_inventory_fail(self):
         complete = runtime.parse_projection(
-            projection(("left-thumb",), count=1, complete=True),
-            "right-index-finger",
+            projection(("finger-1",), count=1, complete=True)
         )
         empty = runtime.parse_projection(
-            projection((), count=0, complete=True),
-            "right-index-finger",
+            projection((), count=0, complete=True)
         )
         for view, requested in (
-            (complete, "right-thumb"),
+            (complete, "finger-2"),
             (empty, "any"),
-            (empty, "right-index-finger"),
+            (empty, "finger-1"),
         ):
             with self.subTest(), self.assertRaises(runtime.FprintRuntimeError):
                 runtime.resolve_match(view, requested)
@@ -95,16 +85,16 @@ class FprintRuntimeTests(unittest.TestCase):
             ("finger_names", ["any"]),
             ("reconciled_identity_count", True),
             ("identifiers_redacted", False),
-            ("compatibility_alias_required", False),
+            ("finger_names_are_presentation_metadata", False),
         ):
             candidate = projection()
             candidate[key] = value
             cases.append(candidate)
-        partial = projection(("left-thumb",))
+        partial = projection(("finger-1",))
         partial["unassigned_identity_count"] = 1
         cases.append(partial)
         wrong_order = projection(
-            ("right-index-finger", "left-thumb"),
+            ("finger-2", "finger-1"),
             count=2,
             complete=True,
         )
@@ -114,7 +104,7 @@ class FprintRuntimeTests(unittest.TestCase):
         cases.append(extra)
         for candidate in cases:
             with self.subTest(), self.assertRaises(runtime.FprintRuntimeError):
-                runtime.parse_projection(candidate, "right-index-finger")
+                runtime.parse_projection(candidate)
 
 
 if __name__ == "__main__":

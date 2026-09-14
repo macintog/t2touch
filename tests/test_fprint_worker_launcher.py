@@ -27,8 +27,9 @@ class FprintWorkerLauncherTests(unittest.TestCase):
         self.worker_root.mkdir(mode=0o700)
         self.systemd_run = self.root / "systemd-run"
         self.worker = self.root / "worker"
+        self.python = self.root / "python"
         self.credential = self.root / "credential"
-        for path in (self.systemd_run, self.worker):
+        for path in (self.systemd_run, self.worker, self.python):
             path.write_bytes(b"executable")
             path.chmod(0o700)
         self.credential.write_bytes(b"encrypted")
@@ -45,6 +46,7 @@ class FprintWorkerLauncherTests(unittest.TestCase):
             mock.patch.object(worker, "WORKER_ROOT", self.worker_root),
             mock.patch.object(launcher, "SYSTEMD_RUN", self.systemd_run),
             mock.patch.object(launcher, "WORKER", self.worker),
+            mock.patch.object(launcher, "VENV_PYTHON", self.python),
             mock.patch.object(
                 launcher, "ENCRYPTED_CREDENTIAL", self.credential
             ),
@@ -66,7 +68,10 @@ class FprintWorkerLauncherTests(unittest.TestCase):
 
     def test_launches_hardened_credential_worker_and_cleans_socket(self):
         patches = self.patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4],
+            patches[5],
+        ):
             session = launcher.launch(
                 runner=self.runner,
                 unit_resolver=lambda pid: (
@@ -81,16 +86,21 @@ class FprintWorkerLauncherTests(unittest.TestCase):
             command, arguments = self.commands[0]
             rendered = " ".join(command)
             self.assertIn("LoadCredentialEncrypted=", rendered)
+            self.assertIn("PYTHONPATH=/opt/t2-touchid/src", rendered)
+            self.assertIn(str(self.python), command)
             self.assertIn("DeviceAllow=/dev/t2-aks rw", rendered)
             self.assertIn("ProtectSystem=strict", rendered)
             self.assertIn(
                 "CapabilityBoundingSet=CAP_DAC_READ_SEARCH", rendered
             )
+            self.assertIn("CAP_IPC_LOCK", rendered)
+            self.assertIn("CAP_SYS_ADMIN", rendered)
+            self.assertIn("DeviceAllow=/dev/t2-acm rw", rendered)
             self.assertIn("NoNewPrivileges=yes", rendered)
             self.assertIn("RestrictNamespaces=yes", rendered)
             self.assertIn("SystemCallFilter=@system-service", rendered)
             for forbidden in (
-                "left-thumb",
+                "finger-2",
                 "right-index",
                 "apple_uid",
                 "linux_uid",
@@ -106,7 +116,10 @@ class FprintWorkerLauncherTests(unittest.TestCase):
 
     def test_nonzero_launcher_or_wrong_peer_unit_fails_and_cleans(self):
         patches = self.patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4],
+            patches[5],
+        ):
             with self.assertRaises(launcher.FprintWorkerLauncherError):
                 launcher.launch(
                     runner=self.runner,
@@ -114,10 +127,35 @@ class FprintWorkerLauncherTests(unittest.TestCase):
                 )
             self.assertEqual(list(self.worker_root.iterdir()), [])
 
+    def test_linux_native_worker_does_not_require_or_load_password_credential(self):
+        patches = self.patches()
+        missing = self.root / "missing-credential"
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4],
+            patches[5],
+            mock.patch.dict(os.environ, {"T2_TOUCHID_AUTHORITY_MODE": "linux-native"}),
+            mock.patch.object(launcher, "ENCRYPTED_CREDENTIAL", missing),
+        ):
+            session = launcher.launch(
+                runner=self.runner,
+                unit_resolver=lambda pid: (
+                    session_unit(self.commands[0][0])
+                    if pid == self.peer_pid else "wrong.service"
+                ),
+            )
+            rendered = " ".join(self.commands[0][0])
+            self.assertNotIn("LoadCredentialEncrypted=", rendered)
+            self.assertIn("T2_TOUCHID_AUTHORITY_MODE=linux-native", rendered)
+            session.connection.send(b"x")
+            session.close()
+
     def test_public_runtime_directory_fails_before_runner(self):
         self.worker_root.chmod(0o755)
         patches = self.patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4],
+            patches[5],
+        ):
             runner = mock.Mock()
             with self.assertRaises(launcher.FprintWorkerLauncherError):
                 launcher.launch(runner=runner)

@@ -58,6 +58,39 @@ class ACMProtocolTests(unittest.TestCase):
         self.assertEqual(command.hex(), "4452435313000001" + bytes(range(16)).hex())
         self.assertEqual(acm.validate_command(command), acm.OP_CONTEXT_EXTERNALIZE)
 
+    def test_identity_secret_matches_recovered_fixed_framing(self):
+        handle = acm.ContextHandle(bytes(range(16)), 0, True, 1)
+        secret = bytearray(b"correct horse")
+        command = acm.build_identity_secret(handle, secret)
+        self.assertIs(type(command), bytearray)
+        self.assertEqual(command[:8], b"DRCS\x28\x00\x00\x01")
+        self.assertEqual(command[8:24], bytes(range(16)))
+        self.assertEqual(command[24:32], b"\x05\x00\x00\x00\x0d\x00\x00\x00")
+        self.assertEqual(command[32:-4], secret)
+        self.assertEqual(command[-4:], b"\x00" * 4)
+        self.assertEqual(acm.validate_command(command), acm.OP_IDENTITY_SECRET_SET)
+
+    def test_identity_secret_rejects_nonwipeable_or_unbounded_inputs(self):
+        handle = acm.ContextHandle(bytes(range(16)), 0, True, 1)
+        for secret in (b"password", bytearray(), bytearray(0x81)):
+            with self.subTest(secret_type=type(secret), secret_length=len(secret)):
+                with self.assertRaises(acm.ACMProtocolError):
+                    acm.build_identity_secret(handle, secret)  # type: ignore[arg-type]
+
+    def test_identity_secret_validator_rejects_dynamic_field_changes(self):
+        handle = acm.ContextHandle(bytes(range(16)), 0, True, 1)
+        command = acm.build_identity_secret(handle, bytearray(b"password"))
+        malformed = []
+        for offset in (24, 28, len(command) - 1):
+            candidate = bytearray(command)
+            candidate[offset] ^= 1
+            malformed.append(candidate)
+        malformed.extend((command[:-1], command + b"\x00"))
+        for candidate in malformed:
+            with self.subTest(candidate_length=len(candidate)):
+                with self.assertRaises(acm.ACMProtocolError):
+                    acm.validate_command(candidate)
+
     def test_enrollment_preflight_matches_recovered_fixed_framing(self):
         handle = acm.ContextHandle(bytes(range(16)), 0, True, 1)
         command = acm.build_enrollment_policy_preflight(handle)

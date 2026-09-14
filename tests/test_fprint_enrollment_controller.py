@@ -26,7 +26,7 @@ class FprintEnrollmentControllerTests(unittest.IsolatedAsyncioTestCase):
         updates = []
 
         def worker(finger_name, cancel_requested, feedback):
-            self.assertEqual(finger_name, "left-thumb")
+            self.assertEqual(finger_name, "finger-2")
             self.assertFalse(cancel_requested())
             feedback(transition(protocol.EnrollmentAction.FINGER_PRESENT))
             feedback(
@@ -37,7 +37,7 @@ class FprintEnrollmentControllerTests(unittest.IsolatedAsyncioTestCase):
             )
 
         lifecycle = controller.EnrollmentController()
-        task = lifecycle.start("left-thumb", worker, updates.append)
+        task = lifecycle.start("finger-2", worker, updates.append)
         final = await task
         self.assertEqual(final.status, "enroll-completed")
         self.assertEqual(
@@ -61,7 +61,7 @@ class FprintEnrollmentControllerTests(unittest.IsolatedAsyncioTestCase):
             )
 
         lifecycle = controller.EnrollmentController()
-        task = lifecycle.start("right-thumb", worker, updates.append)
+        task = lifecycle.start("finger-3", worker, updates.append)
         await asyncio.to_thread(entered.wait)
         final = await lifecycle.stop()
         self.assertIs(task.cancelled(), False)
@@ -79,7 +79,7 @@ class FprintEnrollmentControllerTests(unittest.IsolatedAsyncioTestCase):
         ):
             updates = []
             lifecycle = controller.EnrollmentController()
-            task = lifecycle.start("left-index-finger", worker, updates.append)
+            task = lifecycle.start("finger-4", worker, updates.append)
             final = await task
             self.assertEqual(final.status, "enroll-unknown-error")
             await lifecycle.stop()
@@ -97,7 +97,7 @@ class FprintEnrollmentControllerTests(unittest.IsolatedAsyncioTestCase):
             )
 
         lifecycle = controller.EnrollmentController()
-        task = lifecycle.start("left-thumb", worker, updates.append)
+        task = lifecycle.start("finger-2", worker, updates.append)
         await asyncio.to_thread(entered.wait)
         task.cancel()
         final = await task
@@ -119,9 +119,9 @@ class FprintEnrollmentControllerTests(unittest.IsolatedAsyncioTestCase):
         lifecycle = controller.EnrollmentController()
         with self.assertRaises(controller.FprintEnrollmentControllerError):
             lifecycle.start("any", worker, lambda _update: None)
-        lifecycle.start("right-index-finger", worker, lambda _update: None)
+        lifecycle.start("finger-1", worker, lambda _update: None)
         with self.assertRaises(controller.FprintEnrollmentControllerError):
-            lifecycle.start("right-thumb", worker, lambda _update: None)
+            lifecycle.start("finger-3", worker, lambda _update: None)
         release.set()
         await lifecycle.stop()
 

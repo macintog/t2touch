@@ -1,39 +1,50 @@
 # Experimental release checklist
 
-## Automated gates
+## Product contract
 
-- [ ] CI passes Python compilation and unit tests.
-- [ ] ShellCheck passes all installed and helper scripts.
-- [ ] `t2-aks-tool` builds without warnings.
-- [ ] Privacy scan finds no private artifacts or stable identifiers.
-- [ ] Fresh installation and repeated installation both complete.
-- [ ] Uninstall preserves private data; explicit purge removes it.
-- [x] DKMS builds, signs, and installs the module for the proven running kernel.
-- [ ] DKMS automatically rebuilds for a newly installed kernel.
+- [ ] A fresh supported Omarchy installation completes `./install-omarchy.sh`
+      without a reboot or manual service sequencing.
+- [x] `t2touch enroll` shows the polished percentage-driven TUI and creates the
+      lowest vacant slot among neutral `Finger 1` through `Finger 5`, without
+      renumbering existing slots.
+- [x] That fingerprint immediately authenticates through fprintd, sudo,
+      graphical PolicyKit, and the Omarchy lock screen.
+- [x] Any enrolled fingerprint works; supported named deletion, including the
+      final named slot, completes in the running system.
+- [x] Password fallback remains available.
+- [x] Reinstall updates userspace in the running session when the resident
+      transport matches; a changed transport is staged only across a planned
+      kernel restart because SEP pins its PCI/DMA owner.
+- [ ] Uninstall restores PAM, disables future transport startup, stops the
+      userspace integration, and preserves private state for a later reinstall;
+      a transport already pinned by SEP remains safely resident until the next
+      ordinary power cycle.
 
-## Proven-machine gates
+## Release validation
 
-- [ ] Root doctor has no unexpected failures.
-- [ ] Enrolled and unenrolled fingers pass raw BridgeXPC controls.
-- [x] Every enrolled finger and one unenrolled finger pass explicit
-  `fprintd-verify -f any "$USER"` controls; each enrolled finger also passes
-  its named `fprintd-verify -f FINGER-NAME "$USER"` control.
-- [ ] Enrolled and unenrolled fingers pass sudo/PAM controls.
-- [x] `omarchy system lock` accepts the enrolled fingerprint.
-- [x] `omarchy system lock` rejects a wrong finger and retains password fallback.
-- [x] Cold boot with encrypted credential passes on the proven machine.
-- [ ] Kernel upgrade rebuild/install passes.
-- [ ] Suspend status is stated accurately; no unsupported claim is made.
+- [x] Targeted product tests pass (130 focused deletion-path tests).
+- [x] Full Python test suite passes (1,172 tests, one intentional skip).
+- [x] ShellCheck passes installed shell scripts.
+- [x] Userspace tools and the DKMS module build without warnings.
+- [x] Privacy checks find no private biometric identifiers, keybags, credentials,
+      machine-local paths, or private media.
+- [x] The installed doctor reports no unexpected failure on the reference Mac.
+- [x] The README commands and support limits match the shipped behavior.
 
-## Documentation gates
+## Outstanding distribution gate
 
-- [ ] README status table matches what is actually installed and proven.
-- [ ] Prerequisites match what a fresh install needs.
-- [ ] Every command shown in the README exists and takes the documented flags.
-- [ ] Non-exposed work stays in `docs/DEVELOPMENT_STATUS.md`, not the README.
+The reference system's running `linux-t2` kernel carries the required typed
+`applesmc` SEP boot-state publisher. The ordinary package has not been shown to
+carry that patch, and this repository deliberately refuses before mutation when
+the publisher is absent. Before calling the four-command flow reproducible on a
+stock fresh Omarchy install, publish or upstream the patched kernel prerequisite
+and repeat the exact public quick start from a clean supported volume. This is a
+distribution/acceptance gate, not a reason to weaken the installer check or add
+manual service sequencing.
 
 ## Publication
 
-- [ ] Review diff and generated artifacts for private data.
-- [ ] Tag `v0.1.0` only after every applicable gate is evidenced.
-- [ ] Mark the GitHub release as pre-release and experimental.
+- [x] Review the final diff, privacy boundary, and licenses.
+- [ ] Push t2touch and t2touch-mini to their public GitHub repositories.
+- [ ] Tag `v0.1.0`.
+- [ ] Mark both releases experimental and name the hardware model actually tested.

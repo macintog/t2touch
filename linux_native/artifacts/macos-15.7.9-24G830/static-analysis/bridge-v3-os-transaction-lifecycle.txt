@@ -1,0 +1,79 @@
+24G830 Bridge-v3 OS-transaction lifecycle
+==========================================
+
+Inputs (Apple binaries remain ignored and are not committed):
+
+- biometrickitd-x86_64, 1,282,880 bytes
+  SHA-256 aa250221917fb64b345a317650371013aa5236e9d5d5228dd96a0256ea206b36
+- bridgeOS bkremoted, 110,160 bytes
+  SHA-256 29b99cb5ba41ef18122d1920986707d5fc7893bf097e343d41f4ec0a87b32630
+
+The minimal inputs are retained byte-identically in read-only Btrfs snapshot
+24G830-bridge-v3-lifecycle-20260903T021542Z.
+
+Host path
+---------
+
+BiometricKitXPCServerMesa serviceMatchBridgeWithIterator: at 0x10003c7e8:
+
+- calls serviceMatchCommon at 0x10003c97b;
+- when bridge version is greater than 1, sends client version 2 at
+  0x10003ca55..0x10003ca72;
+- when bridge version is at least 3, calls syncOSTransactionState at
+  0x10003ca7a..0x10003cad2;
+- installs an activity-update block on ongoingBiometricOperation at
+  0x10003cbf1..0x10003cc8b. The block tail-calls
+  setOSTransactionRetained: at 0x10003cc8c..0x10003cca9.
+
+BiometricKitBridgeConnection syncOSTransactionState at 0x100027b9b builds
+the two-item request [12, remoteOSTransactionRetainCount > 0] and invokes
+sendMessage:andWaitForReply: with the wait argument false at
+0x100027c2d..0x100027c3c. A new connection's initial count is zero, so the
+initial synchronization is [12, false]. setOSTransactionRetained: at
+0x100027c69 uses the same method-12 no-wait request for activity transitions.
+
+No-reply envelope
+-----------------
+
+BiometricKitBridgeTransport sendMessage:andWaitForReply: uses the fixed ID
+d4161201-daf5-4bbd-ae4f-9bf319fabbe0 when wait is false and constructs the
+four-item envelope [1, false, fixed-ID, payload].
+
+On BridgeOS, BiometricKitBridgeTransport handleEnvelope: compares element 2
+with that fixed ID at 0x100004a74..0x100004a88 and replaces the completion ID
+with nil on equality. Its asynchronous completion block at 0x100004c04 tests
+that captured ID at 0x100004c44..0x100004c48 and skips reply construction and
+send entirely when it is nil. Therefore method 12 produces no response frame
+for the host to drain.
+
+BridgeOS dispatch
+-----------------
+
+BiometricKitBridgeConnection performMessage: accepts methods through 12. Its
+method-12 jump-table target at 0x100005454 calls setOSTransactionRetained:.
+That implementation manages the BridgeOS process's persistent OS transaction;
+it does not issue an AppleBiometricServices sensor command.
+
+Linux consequence
+-----------------
+
+For negotiated Bridge interface v3, Linux must send the exact no-reply method
+12 synchronization after selecting client API v2, then retain around the live
+match operation and release after match cleanup. These messages are connection
+lifecycle fidelity, not biometric sensor variants.
+
+Live no-finger gate
+-------------------
+
+Snapshot 24G830-bridge-v3-preflight-20260903T021732Z retains the exact live
+gate. Its public JSON reports Bridge version 3/client 2, initial false, active
+true, released true, zero-status client-version/match-start/cancel, valid
+cleanup, termination requested, and three events. The diagnostic contains
+only the three privacy-safe event lines. Snapshot file hashes are:
+
+- public JSON:
+  f07b05ed919f93561917c1f1d96cd86c2497e30999bc646b1517e00aaee113d6
+- diagnostic:
+  2aa578dc58e83739c7fe5cafda2d8247444551f9b8aadc3c45211becd1ff9d14
+- root-private exact events:
+  7b5adf486d0c3d3f8b8fb4d13c027289026d086dbf3e057c0b415d3884d9d5a0

@@ -1,0 +1,53 @@
+24G830 event-driven match control and serviceMatchCommonFinale closure
+=====================================================================
+
+Live control: 2026-09-03T02:22:37Z
+
+The operator armed the persistent right-pane TUI once. Thereafter the UI
+waited for exact finger-present status 63, immediately requested release, and
+waited for exact finger-removed status 64 before re-arming. The operator made
+50 complete contact/release cycles and then requested clean cancellation.
+
+Public result:
+
+- Bridge reply [0, 3], client API 2.
+- OS-transaction initial state false, active state true, released state true.
+- Match start status 0; cancel status 0; cleanup valid; termination requested.
+- 503 events: 302 status records and 201 statistics records.
+- Status counts: 63 x50, 64 x50, 78 x50, 80 x1, 81 x50, 90 x51, 91 x50.
+- Match-result records: 0.
+- BioLockout save skipped because there was no host-accepted match result.
+- Non-event stderr diagnostics: 0.
+- t2-biometric-ready.service and fprintd.service remained disabled/inactive.
+
+The root-owned source artifacts and four UI screenshots are retained in the
+read-only snapshot
+24G830-event-driven-match-20260903T022237Z. The public result SHA-256 is
+995767cb0610d46aadf2b866c1228063beb5ef30659036fc63ab5b8eb721f8b7 and
+the stderr SHA-256 is
+2956384032ef34ba9bf808ccd398be6972450568c5c57e9172e6b0d6348ee704.
+
+Static follow-up: serviceMatchCommonFinale
+------------------------------------------
+
+Exact binary:
+ota-selected-files/usr/libexec/thin/biometrickitd-x86_64
+
+Method:
+BiometricKitXPCServerMesa.serviceMatchCommonFinale at 0x10003c765
+
+Relevant control flow:
+
+- 0x10003c773 loads postGeneralLockoutStateNotification and calls objc_msgSend.
+- 0x10003c784 loads updateEnrollmentChangedNotification:, supplies true, and
+  calls objc_msgSend.
+- 0x10003c7c8 loads the string "serviceMatch initialized\n" for os_log.
+- 0x10003c7e7 returns.
+
+The complete 131-byte method contains no Bridge envelope construction, no
+sendMessage call, and no biometric sensor command. It cannot account for the
+status-78 acquisition rejection. The Bridge-v3 OS-transaction lifecycle was a
+real fidelity omission and is now proven operational, but it is not the root
+cause of the missing match result. Continue with static acquisition-path
+analysis; do not gather further finger samples until a new discriminator is
+identified.

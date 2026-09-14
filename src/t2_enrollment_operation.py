@@ -83,6 +83,7 @@ class EnrollmentOperation:
         *,
         dispatch_allowed: Callable[[], bool] = lambda: True,
         cancel_requested: Callable[[], bool] = lambda: False,
+        on_started: Callable[[], None] = lambda: None,
         on_feedback: Callable[[protocol.EnrollmentTransition], None] = lambda _transition: None,
         event_limit: int = 512,
     ) -> EnrollmentOperationResult:
@@ -149,6 +150,21 @@ class EnrollmentOperation:
                 self._append_during_active_operation(
                     "ENROLL_START_OBSERVED", {"status": 0}, stage="start"
                 )
+                try:
+                    started_result = on_started()
+                    if inspect.isawaitable(started_result):
+                        close = getattr(started_result, "close", None)
+                        if callable(close):
+                            close()
+                        raise EnrollmentOperationError(
+                            "enrollment-start callback must be synchronous"
+                        )
+                    if started_result is not None:
+                        raise EnrollmentOperationError(
+                            "enrollment-start callback must return None"
+                        )
+                except BaseException as error:
+                    self._outcome_unknown("active", "protocol-error", error)
 
             cancel_sent = False
             event_count = 0
@@ -231,6 +247,12 @@ class EnrollmentOperation:
                     except BaseException as error:
                         self._outcome_unknown("active", "protocol-error", error)
 
+                # A synchronous operator UI can request cancellation while it
+                # holds a service-requested next-capture acknowledgement. Re-enter
+                # the loop so cancellation is journaled before another capture.
+                if transition.continue_required and cancel_requested():
+                    continue
+
                 if transition.continue_required:
                     self._append_during_active_operation(
                         "ENROLL_CONTINUE_INTENT",
@@ -296,7 +318,11 @@ class EnrollmentOperation:
                             "event_version": event.version,
                             "payload_length": len(event.payload),
                             "event_sha256": hashlib.sha256(raw_event).hexdigest(),
-                            "embedded_user_matches": False,
+                            "embedded_user_matches": (
+                                len(event.payload) >= 4
+                                and int.from_bytes(event.payload[:4], "little")
+                                == self.apple_user_id
+                            ),
                         },
                         stage="terminal",
                     )
@@ -359,6 +385,18 @@ class EnrollmentOperation:
     def _outcome_unknown(
         self, stage: str, reason: str, cause: BaseException
     ) -> None:
+        # A presentation/protocol callback can fail while the same Bridge
+        # generation is still healthy and Mesa still owns an incomplete
+        # enrollment.  Explicitly discard that volatile capture before
+        # closing the session.  Transport and journal failures remain
+        # outcome-unknown: the cancel is best effort and never masks the
+        # primary failure or substitutes for fresh-inventory reconciliation.
+        if (
+            self.history.phase is enrollment_journal.EnrollmentPhase.ACTIVE
+            and reason == "protocol-error"
+            and stage in {"active", "terminal"}
+        ):
+            self._cancel_after_primary_failure()
         try:
             self._append(
                 "ENROLL_OUTCOME_UNKNOWN",
@@ -376,6 +414,35 @@ class EnrollmentOperation:
         raise EnrollmentOperationError(
             "enrollment outcome is unknown; reconciliation is required"
         ) from cause
+
+    def _cancel_after_primary_failure(self) -> None:
+        try:
+            self._append(
+                "ENROLL_CANCEL_INTENT",
+                {
+                    "connection_generation": self.transport.connection_generation,
+                    "reason": "primary-failure",
+                },
+            )
+        except EnrollmentOperationError:
+            # The primary failure still owns the result.  A broken journal
+            # cannot safely claim that cleanup was requested.
+            return
+        try:
+            status = self._transport_status(
+                self.transport.cancel(), "failure cleanup cancel"
+            )
+        except BaseException:
+            return
+        if status != 0:
+            return
+        try:
+            self._append(
+                "ENROLL_CANCEL_DISPATCH_OBSERVED",
+                {"status": 0},
+            )
+        except EnrollmentOperationError:
+            return
 
     def _append_during_active_operation(
         self,

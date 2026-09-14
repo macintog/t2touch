@@ -9,7 +9,11 @@ the Linux syscall-note exception on the userspace transport header.
 [T1Bridge](https://github.com/standardagents/t1bridge/tree/7003b8d9f791) is a
 reference for the native adoption research. Its top-level
 [license](https://github.com/standardagents/t1bridge/blob/7003b8d9f791/LICENSE)
-is MIT. The native implementation has not yet been imported into this checkout.
+is MIT. It was used as comparison evidence where protocol-family behavior
+agreed; T2-specific credential forms, request layouts, and hardware claims were
+derived and validated separately. The completed native implementation imported
+here is recorded by engineering revision
+`d821b087658792b863fef35336c871d494709961` and remains GPL-2.0-only.
 
 The original [research documentation](research/README.md) is available under its
 own [MIT license](research/LICENSE), also in t2touch-mini. Its

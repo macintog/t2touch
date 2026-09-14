@@ -19,9 +19,11 @@ import t2_fprint_worker
 
 SYSTEMD_RUN = Path("/usr/bin/systemd-run")
 WORKER = Path("/usr/local/sbin/t2-fprint-enrollment-worker")
+VENV_PYTHON = Path("/opt/t2-touchid/.venv/bin/python")
 ENCRYPTED_CREDENTIAL = Path(
     "/etc/credstore.encrypted/t2-touchid-password"
 )
+INSTALLED_SOURCE = Path("/opt/t2-touchid/src")
 ROOT_UID = 0
 PEERCRED = struct.Struct("3i")
 Runner = Callable[..., object]
@@ -118,14 +120,26 @@ def _systemd_unit_for_pid(pid: int) -> str:
         ) from error
 
 
-def _command(unit: str, endpoint: Path) -> list[str]:
-    return [
+def _authority_mode() -> str:
+    mode = os.environ.get("T2_TOUCHID_AUTHORITY_MODE", "macos-control-oracle")
+    if mode not in {"linux-native", "macos-control-oracle"}:
+        raise FprintWorkerLauncherError("worker authority mode is invalid")
+    return mode
+
+
+def _command(
+    unit: str, endpoint: Path, authority_mode: str | None = None
+) -> list[str]:
+    authority_mode = _authority_mode() if authority_mode is None else authority_mode
+    command = [
         str(SYSTEMD_RUN),
         "--system",
         "--quiet",
         "--collect",
         "--service-type=exec",
         f"--unit={unit}",
+        f"--setenv=T2_TOUCHID_AUTHORITY_MODE={authority_mode}",
+        f"--setenv=PYTHONPATH={INSTALLED_SOURCE}",
         "--property=UMask=0077",
         "--property=NoNewPrivileges=yes",
         "--property=PrivateTmp=yes",
@@ -144,25 +158,28 @@ def _command(unit: str, endpoint: Path) -> list[str]:
         "--property=RestrictSUIDSGID=yes",
         "--property=LockPersonality=yes",
         "--property=SystemCallArchitectures=native",
-        "--property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
-        "--property=AmbientCapabilities=CAP_DAC_READ_SEARCH",
+        "--property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN",
+        "--property=AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN",
         "--property=MemoryDenyWriteExecute=yes",
         "--property=ProtectHostname=yes",
         "--property=RestrictAddressFamilies=AF_UNIX AF_INET6",
         "--property=DevicePolicy=closed",
         "--property=DeviceAllow=/dev/t2-aks rw",
+        "--property=DeviceAllow=/dev/t2-acm rw",
         "--property=ReadWritePaths=/run/t2-touchid /var/lib/t2-touchid",
         "--property=SystemCallFilter=@system-service",
         "--property=TimeoutStartSec=45s",
         "--property=TimeoutStopSec=15s",
-        (
+    ]
+    if authority_mode == "macos-control-oracle":
+        command.append(
             "--property=LoadCredentialEncrypted="
             f"t2-touchid-password:{ENCRYPTED_CREDENTIAL}"
-        ),
-        str(WORKER),
-        "--endpoint",
-        str(endpoint),
-    ]
+        )
+    command.extend(
+        [str(VENV_PYTHON), str(WORKER), "--endpoint", str(endpoint)]
+    )
+    return command
 
 
 @dataclass(repr=False)
@@ -217,7 +234,16 @@ def launch(
     _require_private_root()
     _require_executable(SYSTEMD_RUN)
     _require_executable(WORKER)
-    _require_credential()
+    try:
+        interpreter = VENV_PYTHON.resolve(strict=True)
+    except OSError as error:
+        raise FprintWorkerLauncherError(
+            "worker Python interpreter is unavailable"
+        ) from error
+    _require_executable(interpreter)
+    authority_mode = _authority_mode()
+    if authority_mode == "macos-control-oracle":
+        _require_credential()
     operation_id = str(uuid.uuid4())
     unit = f"t2-fprint-enrollment-{operation_id}.service"
     endpoint = t2_fprint_worker.WORKER_ROOT / f"{operation_id}.sock"
@@ -230,7 +256,7 @@ def launch(
         os.chmod(endpoint, 0o600, follow_symlinks=False)
         server.listen(1)
         completed = runner(
-            _command(unit, endpoint),
+            _command(unit, endpoint, authority_mode),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

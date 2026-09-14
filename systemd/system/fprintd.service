@@ -2,20 +2,20 @@
 [Unit]
 Description=Apple T2 Touch ID authentication daemon
 Documentation=file:/opt/t2-touchid/README.md
-Requires=t2-keybag-load.service t2-credential-unlock.service t2-biometric-ready.service
-Wants=t2-touchid-post-reboot.service
-After=dbus.service network.target t2-keybag-load.service t2-credential-unlock.service t2-biometric-ready.service t2-touchid-post-reboot.service
+Requires=t2-native-first-run.service t2-biometric-ready.service t2-touchid-post-reboot.service
+After=dbus.service network.target t2-native-first-run.service t2-biometric-ready.service t2-touchid-post-reboot.service
 
 [Service]
 Type=dbus
 BusName=net.reactivated.Fprint
 EnvironmentFile=/etc/t2-touchid.conf
-ExecStart=/opt/t2-touchid/.venv/bin/python /opt/t2-touchid/src/t2-fprintd.py
+ExecStart=/opt/t2-touchid/.venv/bin/python /opt/t2-touchid/src/t2-fprintd.py --enable-native-enrollment --enable-native-deletion
 Restart=on-failure
 RestartSec=2
 UMask=0077
 RuntimeDirectory=t2-touchid/workers
 RuntimeDirectoryMode=0700
+ReadWritePaths=/run/t2-touchid /var/lib/t2-touchid
 
 ProtectSystem=strict
 # The installer binds only the configured account home back into this empty

@@ -1,0 +1,34 @@
+Exact 24G830 match cadence/finale lookahead (2026-09-03)
+
+BKOperation statusMessage:client: handles status 63/64 at
+0x7ff90a5d60b1-0x7ff90a5d6154.  Its callback block at
+0x7ff90a5d61ec-0x7ff90a5d622a invokes presenceStateChanged with
+(status == 63): 63 is presence true and 64 is presence false.  Presence true
+is not an instruction to lift.  BKMatchOperation does not expose status 91 as
+an operator callback.  Status 78 is capture error 6 / ImageRejected and is
+nonterminal; it requires no biometric follow-up command beyond the normal
+Bridge callback acknowledgement.
+
+Inherited terminal statuses 66, 67, and 68 route to operationEndsWithReason:
+2, 3, and 4 respectively at 0x7ff90a5d5fda-0x7ff90a5d6028.  They are terminal
+operation states, never match/no-match verdicts.
+
+The current selected-identity serialization, event acknowledgements, Catacomb
+state-3 sequence, BioLockout/display/awake order, command-4 request, cancel,
+and Bridge-v3 transaction lifecycle have no concrete divergence from the exact
+path.  Status records must pass the common-header and detail-length validators
+before their ordinals can drive UI or terminal state.
+
+The daemon matchResult path calls saveBioLockoutRecord synchronously at
+0x100038705-0x100038710 before queued stop/cancel work completes.  Framework
+saveBioLockoutRecord at 0x7ffa016b3cab-0x7ffa016b3d86 issues Mesa save command
+0x4a and persists the returned secure data.  Linux must therefore export and
+commit BioLockout after a host-accepted result but before command 0x0c and
+Bridge method 12(false).
+
+The 20260903T025834Z Linux control recorded 50 cycles, each containing statuses
+63, 78, and 64; 50 also contained 91.  It recorded 301 status events and 201
+statistics events, no match-result event, a zero-status cancel, valid cleanup,
+and Bridge transaction release.  Because the old TUI told the operator to lift
+at 63 and 91, this run is evidence of premature operator-driven release, not an
+end-state sensor acquisition control.

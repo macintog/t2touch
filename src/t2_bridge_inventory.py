@@ -7,12 +7,86 @@ import struct
 import uuid
 from typing import Protocol
 
-import t2_catacomb_protocol as catacomb_protocol
 import t2_bridge_wire as wire
+import t2_catacomb_protocol as catacomb_protocol
+import t2_enrollment_protocol as enrollment_protocol
 
 
 class BridgeInventoryError(RuntimeError):
     """Raised when a same-connection E0 snapshot cannot be trusted."""
+
+
+class PreclientServiceEventError(BridgeInventoryError):
+    """A read-only preclient query consumed an unrelated service callback."""
+
+
+class InventoryServiceEventError(BridgeInventoryError):
+    """A stable read-only inventory command consumed an unrelated callback."""
+
+
+def require_preparation_service_events(
+    events: object, apple_user_id: int | None = None
+) -> None:
+    """Admit exact non-mutating callbacks without using their private data.
+
+    T1Bridge keeps callback transport separate from operation state.  T2
+    adapts that boundary narrowly: SKS lock notifications remain ambient, and
+    recovered no-op phase plus presence-state statuses may arrive after a
+    failed operation has closed.  None can advance or select an identity;
+    progress, continue, retry, terminal, result, and unknown events still fail.
+    """
+    if (
+        apple_user_id is not None
+        and (
+            type(apple_user_id) is not int
+            or isinstance(apple_user_id, bool)
+            or not 0 <= apple_user_id <= 0xFFFFFFFF
+        )
+    ) or type(events) is not list:
+        raise BridgeInventoryError("preparation service events are malformed")
+    for value in events:
+        if (
+            type(value) is not list
+            or len(value) != 5
+            or value[0] != 9
+            or value[1] != enrollment_protocol.BRIDGE_SERVICE_STATUS
+            or type(value[2]) is not bytes
+        ):
+            raise BridgeInventoryError("preparation service event envelope is invalid")
+        try:
+            event = enrollment_protocol.parse_service_event(value[2])
+            if event.envelope_type == enrollment_protocol.SERVICE_SKS_LOCK_STATE:
+                enrollment_protocol.validate_sks_lock_state_payload(event)
+                accepted = (
+                    event.version == 1
+                    and event.ordinal == 0
+                    and len(event.payload) == 22
+                )
+            elif (
+                event.envelope_type == enrollment_protocol.SERVICE_STATUS
+                and event.version in (1, 2)
+                and (
+                    event.ordinal in (63, 64)
+                    or any(
+                        lower <= event.ordinal <= upper
+                        for lower, upper in (
+                            enrollment_protocol.EXACT_NOOP_PHASE_RANGES
+                        )
+                    )
+                )
+            ):
+                enrollment_protocol.validate_status_payload(event)
+                accepted = True
+            else:
+                accepted = False
+        except enrollment_protocol.EnrollmentProtocolError as error:
+            raise BridgeInventoryError(
+                "preparation service event is malformed"
+            ) from error
+        if not accepted:
+            raise BridgeInventoryError(
+                "preparation emitted a state-changing service event"
+            )
 
 
 class InventoryLease(Protocol):
@@ -45,7 +119,13 @@ COMMANDS = (
 )
 
 
-def _reply_output(reply: object, name: str, *, allow_nonzero: bool = False) -> bytes:
+def _reply_output(
+    reply: object,
+    name: str,
+    *,
+    allow_nonzero: bool = False,
+    allow_nil_empty: bool = False,
+) -> bytes:
     if type(reply) is not list or len(reply) != 2:
         raise BridgeInventoryError(f"{name} reply is malformed")
     status, output = reply
@@ -59,10 +139,28 @@ def _reply_output(reply: object, name: str, *, allow_nonzero: bool = False) -> b
         type(status) is not int
         or isinstance(status, bool)
         or not -(2**31) <= status < 2**32
-        or (status != 0 and not allow_nonzero)
-        or type(output) is not bytes
     ):
-        raise BridgeInventoryError(f"{name} reply is invalid")
+        raise BridgeInventoryError(f"{name} reply status is malformed")
+    # D151 proved only that the empty global-list output was non-bytes. The
+    # known fixed bkremoted sentinel is the narrow falsifiable hypothesis;
+    # normalize that exact value and nothing else.
+    if wire.is_biometric_nil_output(output):
+        if status == 0 and allow_nil_empty:
+            return b""
+        raise BridgeInventoryError(f"{name} reply output is not bytes")
+    if type(output) is not bytes:
+        output_kind = (
+            "null"
+            if output is None
+            else "unrecognized string"
+            if type(output) is str
+            else "unsupported type"
+        )
+        raise BridgeInventoryError(f"{name} reply output is {output_kind}")
+    if status != 0 and not allow_nonzero:
+        raise BridgeInventoryError(
+            f"{name} reply returned status 0x{status & 0xffffffff:08x}"
+        )
     return output
 
 
@@ -84,8 +182,12 @@ def _collect_once(
         )
         if lease.connection_generation != generation:
             raise BridgeInventoryError("Bridge generation changed during E0")
-        if type(events) is not list or events:
-            raise BridgeInventoryError(f"{name} emitted an unexpected service event")
+        try:
+            require_preparation_service_events(events, apple_user_id)
+        except BridgeInventoryError as error:
+            raise BridgeInventoryError(
+                f"{name} emitted an unexpected service event"
+            ) from error
         output = _reply_output(
             reply,
             name,
@@ -103,16 +205,118 @@ def _collect_once(
                 )
                 if lease.connection_generation != generation:
                     raise BridgeInventoryError("Bridge generation changed during E0")
-                if type(retry_events) is not list or retry_events:
-                    raise BridgeInventoryError(
-                        "protocol retry emitted an unexpected service event"
-                    )
+                require_preparation_service_events(retry_events, apple_user_id)
                 output = _reply_output(retry, name, allow_nonzero=True)
                 status = retry[0]
                 if len(output) == 4:
                     break
         snapshot[name] = (status, output)
     return snapshot
+
+
+def attest_preclient_protocol(lease: InventoryLease, apple_user_id: int) -> None:
+    """Issue the one exact sensor protocol query required before API selection."""
+    try:
+        generation = lease.connection_generation
+        parsed_generation = uuid.UUID(generation)
+        if str(parsed_generation) != generation:
+            raise BridgeInventoryError("Bridge generation is not canonical")
+    except (AttributeError, TypeError, ValueError) as error:
+        raise BridgeInventoryError("Bridge generation is invalid") from error
+
+    try:
+        output = b""
+        for _attempt in range(3):
+            reply, events = lease.biometric_command(
+                0x01,
+                version=1,
+                value=0,
+                data=b"",
+                output_capacity=4,
+            )
+            if lease.connection_generation != generation:
+                raise BridgeInventoryError(
+                    "Bridge generation changed during protocol preflight"
+                )
+            require_preparation_service_events(events, apple_user_id)
+            output = _reply_output(reply, "protocol", allow_nonzero=True)
+            if len(output) == 4:
+                break
+        if len(output) != 4:
+            raise BridgeInventoryError("protocol preflight reply length is invalid")
+    except BaseException as error:
+        try:
+            lease.invalidate()
+        except BaseException:
+            pass
+        if isinstance(error, BridgeInventoryError):
+            raise
+        raise BridgeInventoryError("protocol preflight failed") from error
+
+
+def prepare_empty_native_components(
+    lease: InventoryLease, apple_user_id: int
+) -> None:
+    """Select the missing master and user Catacomb components before API v2.
+
+    Exact 24G830 maps performNoCatacombCommand: to command 0x31 with one
+    uint32 input and no output. Pinned T1Bridge commit 7003b8d9f791 adapts the
+    master-then-user component order only; its transport and v1 workflow are
+    not used here.
+    """
+    if (
+        type(apple_user_id) is not int
+        or not 0 <= apple_user_id <= 0x7FFFFFFF
+    ):
+        raise BridgeInventoryError("Apple user ID is outside signed component range")
+    try:
+        generation = lease.connection_generation
+        parsed_generation = uuid.UUID(generation)
+        if str(parsed_generation) != generation:
+            raise BridgeInventoryError("Bridge generation is not canonical")
+    except (AttributeError, TypeError, ValueError) as error:
+        raise BridgeInventoryError("Bridge generation is invalid") from error
+
+    try:
+        for component in (0xFFFFFFFF, apple_user_id):
+            reply, events = lease.biometric_command(
+                0x31,
+                version=1,
+                value=0,
+                data=struct.pack("<I", component),
+                output_capacity=0,
+            )
+            if lease.connection_generation != generation:
+                raise BridgeInventoryError(
+                    "Bridge generation changed during empty-component preparation"
+                )
+            if type(events) is not list or events:
+                raise BridgeInventoryError(
+                    "empty-component preparation emitted an unexpected service event"
+                )
+            if type(reply) is not list or len(reply) not in (1, 2):
+                raise BridgeInventoryError(
+                    "empty-component preparation reply is malformed"
+                )
+            status = reply[0]
+            if type(status) is not int or isinstance(status, bool) or status != 0:
+                raise BridgeInventoryError(
+                    "empty-component preparation returned a failure status"
+                )
+            if len(reply) == 2:
+                output = reply[1]
+                if output not in (None, b"") and not wire.is_biometric_nil_output(output):
+                    raise BridgeInventoryError(
+                        "empty-component preparation returned unexpected output"
+                    )
+    except BaseException as error:
+        try:
+            lease.invalidate()
+        except BaseException:
+            pass
+        if isinstance(error, BridgeInventoryError):
+            raise
+        raise BridgeInventoryError("empty-component preparation failed") from error
 
 
 def _records(output: bytes, size: int, name: str) -> tuple[bytes, ...]:

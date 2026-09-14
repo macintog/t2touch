@@ -21,6 +21,7 @@ BRIDGE_SERVICE_STATUS = 0xE3FF8000
 SERVICE_STATUS = 0xE3FF8001
 SERVICE_ENROLLMENT_RESULT = 0xE3FF8003
 SERVICE_STATISTICS = 0xE3FF8004
+SERVICE_SENSOR_RECOVERY_REASON = 0xE3FF8009
 SERVICE_SKS_LOCK_STATE = 0xE3FF800A
 SERVICE_ACCESSORY_AUTHORIZATION = 0xE3FF800E
 SERVICE_HEADER = struct.Struct("<QIIQ")
@@ -223,9 +224,9 @@ def parse_service_event(data: bytes) -> ServiceEvent:
     # ordinal at byte 24, followed by padding and a 64-bit detail length.
     # Use the timestamp as the operation-local monotonic sequence key.
     ordinal = 0
-    if envelope_type == SERVICE_STATUS:
+    if envelope_type in {SERVICE_STATUS, SERVICE_SENSOR_RECOVERY_REASON}:
         if len(payload) < STATUS_PAYLOAD_HEADER.size:
-            raise EnrollmentProtocolError("generic status payload is truncated")
+            raise EnrollmentProtocolError("service ordinal payload is truncated")
         ordinal, _detail_length = STATUS_PAYLOAD_HEADER.unpack_from(payload)
     return ServiceEvent(event_timestamp, envelope_type, version, ordinal, payload)
 
@@ -337,18 +338,38 @@ class EnrollmentStateMachine:
         self._fingerprints.append(fingerprint)
 
         if event.envelope_type == SERVICE_ENROLLMENT_RESULT:
+            # D196 and D206 both reached 100 percent and then delivered a
+            # version-1 completion with data beyond the recovered 20-byte
+            # identity prefix.  Pinned T1Bridge likewise treats 20 bytes as a
+            # minimum.  Validate that prefix, but do not let an opaque T2 tail
+            # select an identity; stable same-connection inventory owns that
+            # decision through the terminal-witness path.
+            has_opaque_v1_tail = event.version == 1 and len(event.payload) > 20
             try:
-                identity = parse_enrollment_result(event)
+                identity_event = (
+                    ServiceEvent(
+                        event.sequence,
+                        event.envelope_type,
+                        event.version,
+                        event.ordinal,
+                        event.payload[:20],
+                    )
+                    if has_opaque_v1_tail
+                    else event
+                )
+                identity = parse_enrollment_result(identity_event)
             except EnrollmentProtocolError as error:
                 self.state = EnrollmentState.FROZEN
                 raise EnrollmentProtocolError(
                     "invalid enrollment-result event"
                 ) from error
-            if identity.user_id != self.expected_user_id:
+            if has_opaque_v1_tail or identity.user_id != self.expected_user_id:
                 # Live 23P1072 evidence shows that this embedded field can
                 # disagree even when the authoritative per-user and global
-                # SEP inventories add exactly one built-in identity.  Treat
-                # the event only as a terminal witness; never adopt its UUID.
+                # SEP inventories add exactly one built-in identity. D196 and
+                # D206 additionally prove that native T2 completion can carry
+                # an opaque v1 tail. Treat either only as a terminal witness;
+                # never adopt its UUID.
                 self.state = EnrollmentState.SEP_RESULT_WITNESSED
                 return EnrollmentTransition(
                     EnrollmentAction.RESULT_WITNESSED, self.state
@@ -368,6 +389,23 @@ class EnrollmentStateMachine:
             if len(event.payload) < STATISTICS_MIN_PAYLOAD_SIZE:
                 self._freeze("statistics telemetry payload is truncated")
             return EnrollmentTransition(EnrollmentAction.IGNORE_TELEMETRY, self.state)
+        # Exact macOS 15.7 / 24G830 accepts only version 1 for the sensor-
+        # recovery-reason envelope. It logs the decoded ordinal, forwards it
+        # to statistics, and returns without changing the active biometric
+        # operation or issuing a command. The common Bridge record still owns
+        # the ordinal/detail-length framing, which Linux validates and then
+        # discards without exposing the opaque detail.
+        if event.envelope_type == SERVICE_SENSOR_RECOVERY_REASON:
+            if event.version != 1:
+                self._freeze("invalid sensor-recovery auxiliary event")
+            try:
+                validate_status_payload(event)
+            except EnrollmentProtocolError as error:
+                self.state = EnrollmentState.FROZEN
+                raise EnrollmentProtocolError(
+                    "invalid sensor-recovery auxiliary event"
+                ) from error
+            return EnrollmentTransition(EnrollmentAction.IGNORE_AUXILIARY, self.state)
         # Matching macOS accepts a version-1 record containing at least a
         # uint32 Apple user ID and uint16 SKS state. It can synchronize the
         # template list, save the bio-lockout record, cancel a tokenless unlock

@@ -13,6 +13,7 @@ import t2_bridge_inventory
 import t2_catacomb_store
 import t2_fprint_deletion_runtime
 import t2_fprint_projection
+import t2_fprint_sequence
 import t2_identity_delete
 import t2_identity_delete_bridge
 import t2_identity_delete_journal as delete_journal
@@ -55,11 +56,14 @@ class DeletionConsumer:
         default=t2_bridge_inventory.collect_stable_private_inventory,
         repr=False,
     )
+    handle_reconciler: Callable[[object, object], int] = field(
+        default=t2_fprint_sequence.reconcile, repr=False
+    )
 
     def __post_init__(self) -> None:
-        if self.finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_projection.is_finger_name(self.finger_name):
             raise FprintDeletionConsumerError(
-                "deletion consumer requires a canonical finger name"
+                "deletion consumer requires a canonical finger handle"
             )
         if not isinstance(self.mutation_root, Path) or any(
             not callable(value)
@@ -70,6 +74,7 @@ class DeletionConsumer:
                 self.operation_runner,
                 self.persistence_runner,
                 self.inventory_collector,
+                self.handle_reconciler,
             )
         ):
             raise FprintDeletionConsumerError(
@@ -160,10 +165,14 @@ class DeletionConsumer:
             raise FprintDeletionConsumerError(
                 "finger name is not currently enrolled"
             )
-        if len(projection.finger_names) <= 1:
-            raise FprintDeletionConsumerError(
-                "refusing to delete the final fingerprint"
+        try:
+            self.handle_reconciler(
+                authority.selected.apple_uid, projection.finger_names
             )
+        except (t2_fprint_sequence.FprintSequenceError, ValueError) as error:
+            raise FprintDeletionConsumerError(
+                "neutral fingerprint handle history reconciliation failed"
+            ) from error
         try:
             material = prepare(authority.selected, authority.operation_id)
         except Exception as error:
@@ -304,6 +313,6 @@ class DeletionConsumer:
             self.finger_name,
             True,
             True,
-            True,
+            False,
             True,
         )

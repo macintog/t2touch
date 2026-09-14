@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=Apple T2 native user activation socket
+Documentation=file:/opt/t2-touchid/README.md
+
+[Socket]
+ListenSequentialPacket=/run/t2-touchid/activation.sock
+Accept=yes
+SocketMode=0666
+DirectoryMode=0755
+RemoveOnStop=yes
+MaxConnections=16
+
+[Install]
+WantedBy=sockets.target

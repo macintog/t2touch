@@ -106,7 +106,7 @@ class Lease:
 class Live:
     runtime_generation = identifier(32)
 
-    def __init__(self, material, names=("right-index-finger",)):
+    def __init__(self, material, names=("finger-1",)):
         self.material = material
         self.names = names
         self.calls = []
@@ -123,7 +123,7 @@ class Live:
             ],
             "local_live_reconciled": True,
             "selection_scope": "current-reconciled-list",
-            "fprintd_listing_is_compatibility_alias": True,
+            "finger_names_are_presentation_metadata": True,
             "identifiers_redacted": True,
         }
 
@@ -177,6 +177,7 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
         self.live = Live(self.material)
         self.acm = ACM()
         self.finalizer = object()
+        self.finalizer_arguments = []
         self.coordinator_calls = []
 
     def tearDown(self):
@@ -189,7 +190,7 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
             "identity-observed", True, True, True
         )
 
-    def make_consumer(self, finger_name="left-thumb"):
+    def make_consumer(self, finger_name="finger-2"):
         return consumer.EnrollmentConsumer(
             finger_name,
             lambda _context: None,
@@ -197,9 +198,14 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
             lambda _transition: None,
             True,
             acm_device_factory=lambda: self.acm,
-            finalizer_factory=lambda **_arguments: self.finalizer,
+            finalizer_factory=self.make_finalizer,
             coordinator=self.run_coordinator,
+            handle_allocator=lambda _uid, _names: "finger-2",
         )
+
+    def make_finalizer(self, **arguments):
+        self.finalizer_arguments.append(arguments)
+        return self.finalizer
 
     def test_runs_on_exact_broker_lease_anchor_and_authority(self):
         original = consumer.MUTATION_ROOT
@@ -227,13 +233,14 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
             arguments["backup_reference"], self.material.anchor.reference
         )
         self.assertIs(arguments["finalizer"], self.finalizer)
+        self.assertEqual(self.finalizer_arguments[0]["identity_name"], "finger-2")
 
     def test_rejects_noncanonical_name_or_unverified_fallback(self):
         with self.assertRaises(consumer.FprintEnrollmentConsumerError):
             self.make_consumer("Finger 1")
         with self.assertRaises(consumer.FprintEnrollmentConsumerError):
             consumer.EnrollmentConsumer(
-                "left-thumb",
+                "finger-2",
                 lambda _context: None,
                 lambda: False,
                 lambda _transition: None,
@@ -269,19 +276,19 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
             self.make_consumer()(self.current, Live(material))
         self.assertEqual(self.coordinator_calls, [])
 
-    def test_rejects_incomplete_or_duplicate_lock_held_projection(self):
-        cases = (
-            (("Finger 1",), "require migration"),
-            (("left-thumb",), "already enrolled"),
-        )
-        for names, message in cases:
-            current_live = Live(self.material, names)
-            with self.subTest(names=names), self.assertRaisesRegex(
-                consumer.FprintEnrollmentConsumerError, message
-            ):
-                self.make_consumer()(self.current, current_live)
-            self.assertEqual(current_live.calls, [])
+    def test_rejects_incomplete_lock_held_projection(self):
+        current_live = Live(self.material, ("right-index-finger",))
+        with self.assertRaisesRegex(
+            consumer.FprintEnrollmentConsumerError, "require migration"
+        ):
+            self.make_consumer()(self.current, current_live)
+        self.assertEqual(current_live.calls, [])
         self.assertEqual(self.coordinator_calls, [])
+
+    def test_request_handle_does_not_select_the_persisted_handle(self):
+        result = self.make_consumer("finger-1")(self.current, self.live)
+        self.assertEqual(result.outcome, "identity-observed")
+        self.assertEqual(self.finalizer_arguments[0]["identity_name"], "finger-2")
 
     def test_rejects_missing_or_malformed_lock_held_projection(self):
         malformed = Live(self.material)
@@ -303,7 +310,7 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
             )
 
         current = consumer.EnrollmentConsumer(
-            "left-thumb",
+            "finger-2",
             lambda _context: None,
             lambda: True,
             lambda _transition: None,
@@ -311,6 +318,7 @@ class FprintEnrollmentConsumerTests(unittest.TestCase):
             acm_device_factory=lambda: self.acm,
             finalizer_factory=lambda **_arguments: self.finalizer,
             coordinator=coordinator_run,
+            handle_allocator=lambda _uid, _names: "finger-2",
         )
         result = current(self.current, self.live)
         self.assertEqual(result.outcome, "cancelled")

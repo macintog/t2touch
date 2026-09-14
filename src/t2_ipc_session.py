@@ -14,7 +14,7 @@ import errno
 import fcntl
 import os
 import re
-import signal
+import select
 import socket
 import struct
 import time
@@ -455,9 +455,16 @@ class PinnedPeer:
         if self._closed:
             raise IPCSessionError("IPC peer pidfd is closed")
         try:
-            signal.pidfd_send_signal(self.pidfd, 0)
+            poller = select.poll()
+            poller.register(
+                self.pidfd,
+                select.POLLIN | select.POLLERR | select.POLLHUP,
+            )
+            exited = bool(poller.poll(0))
         except OSError as error:
-            raise IPCSessionError("IPC peer process is no longer alive") from error
+            raise IPCSessionError("IPC peer liveness is unavailable") from error
+        if exited:
+            raise IPCSessionError("IPC peer process is no longer alive")
         current = t2_polkit_grant.read_process_subject(
             self.subject.pid,
             self.subject.uid,

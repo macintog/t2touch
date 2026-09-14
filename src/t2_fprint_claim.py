@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import os
 import pwd
+import re
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import t2_dbus_identity
 import t2_ipc_session
 import t2_linux_account
+import t2_polkit_grant
 
 
 class FprintClaimError(RuntimeError):
@@ -18,6 +23,13 @@ class FprintClaimError(RuntimeError):
 
 NameResolver = Callable[[str], object]
 AccountCollector = Callable[[int], t2_linux_account.AccountEvidence]
+
+POLKIT_AGENT_HELPER = Path("/usr/lib/polkit-1/polkit-agent-helper-1")
+POLKIT_AGENT_CGROUP = re.compile(
+    rb"0::/system\.slice/system-polkit\\x2dagent\\x2dhelper\.slice/"
+    rb"polkit-agent-helper@[0-9]{1,20}-[0-9]{1,20}-"
+    rb"[0-9]{1,20}_[0-9]{1,20}-([0-9]{1,10})\.service\n?"
+)
 
 
 def _resolve_uid(username: object, resolver: NameResolver) -> int:
@@ -58,11 +70,87 @@ def _account(
         raise FprintClaimError("Linux account assertion failed") from error
 
 
+def _is_polkit_agent_helper(
+    caller: t2_dbus_identity.PinnedDBusCaller,
+    target_uid: int,
+) -> bool:
+    """Bind one root PAM caller to Polkit's exact socket helper instance."""
+
+    subject = caller.subject
+    if (
+        subject.uid != t2_linux_account.ROOT_UID
+        or subject.setuid_real_uid is not None
+        or type(target_uid) is not int
+        or not 1 <= target_uid < t2_linux_account.UINT32_MAX
+    ):
+        return False
+    process_root = caller.proc_root / str(subject.pid)
+    try:
+        caller.verify()
+        process = os.stat(process_root / "exe")
+        expected = os.stat(POLKIT_AGENT_HELPER)
+        cgroup = t2_polkit_grant._read_bounded(process_root / "cgroup")
+        matched = POLKIT_AGENT_CGROUP.fullmatch(cgroup)
+        if (
+            not stat.S_ISREG(expected.st_mode)
+            or expected.st_uid != t2_linux_account.ROOT_UID
+            or expected.st_mode & 0o022
+            or (process.st_dev, process.st_ino)
+            != (expected.st_dev, expected.st_ino)
+            or matched is None
+            or int(matched.group(1), 10) != target_uid
+        ):
+            return False
+        caller.verify()
+        return True
+    except (
+        OSError,
+        ValueError,
+        t2_dbus_identity.DBusIdentityError,
+        t2_polkit_grant.PolkitGrantError,
+    ):
+        return False
+
+
+def _polkit_target_session(
+    caller: t2_dbus_identity.PinnedDBusCaller,
+    backend: t2_ipc_session.SessionBackend,
+    uid: int,
+) -> t2_ipc_session.SessionEvidence:
+    if not _is_polkit_agent_helper(caller, uid):
+        raise t2_ipc_session.IPCSessionError(
+            "root fprint caller is not the target-bound Polkit helper"
+        )
+    acceptable = []
+    for session in backend.active_sessions(uid):
+        try:
+            description = backend.describe(session)
+        except t2_ipc_session.SessionUnavailable:
+            continue
+        if t2_ipc_session._acceptable(description, uid):
+            acceptable.append((session, description))
+    if len(acceptable) != 1:
+        raise t2_ipc_session.IPCSessionError(
+            "Polkit target has no unique active local physical login session"
+        )
+    caller.verify()
+    session, description = acceptable[0]
+    return t2_ipc_session.SessionEvidence(
+        "polkit-agent-helper-active-session",
+        session,
+        description.session_type,
+        description.session_class,
+        True,
+        description.start_time_usec,
+    )
+
+
 def _session(
     caller: t2_dbus_identity.PinnedDBusCaller,
     backend: t2_ipc_session.SessionBackend,
     uid: int,
 ) -> t2_ipc_session.SessionEvidence:
+    direct_error = None
     try:
         with caller.duplicate_peer() as peer:
             return t2_ipc_session.collect_session(
@@ -72,7 +160,16 @@ def _session(
         t2_dbus_identity.DBusIdentityError,
         t2_ipc_session.IPCSessionError,
     ) as error:
-        raise FprintClaimError("active local login assertion failed") from error
+        direct_error = error
+    try:
+        return _polkit_target_session(caller, backend, uid)
+    except (
+        t2_dbus_identity.DBusIdentityError,
+        t2_ipc_session.IPCSessionError,
+    ) as error:
+        raise FprintClaimError(
+            "active local login assertion failed"
+        ) from direct_error or error
 
 
 @dataclass(frozen=True, repr=False)

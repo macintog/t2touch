@@ -1,23 +1,22 @@
-# About the work
+# t2touch publication handoff
 
-t2touch explores how Linux can set up Touch ID on a T2 Mac without an existing
-macOS user account or imported biometric data. The work is intended to help other
-engineers reproduce the result and integrate it into their projects.
+The product path is intentionally small:
 
-The native path creates account authority in the Secure Enclave, enrolls
-fingerprints, saves their state, and uses them for matching. Those steps have been
-demonstrated on the reference machine, including persistence across reboot and
-deletion of an individual fingerprint. The implementation has not yet been added
-to this repository.
+```bash
+./install-omarchy.sh
+t2touch enroll
+```
 
-The Mac continues to use Apple's bridgeOS and Secure Enclave firmware. The
-contribution concerns creating and managing the user and fingerprint state from
-Linux.
+Installation prepares and starts the complete Touch ID stack in the running
+Omarchy session. Enrollment returns success only when the fingerprint has been
+persisted and published for immediate standard fprintd authentication. No reboot,
+manual research phase, or acknowledgement flag belongs in the normal workflow.
 
-The [research reference](docs/research/README.md) documents the SEP services,
-identity and authorization formats, embedded storage, and biometric lifecycle.
-It is shared under MIT in both t2touch and t2touch-mini for adaptation into other
-projects.
+Users manage one origin-neutral inventory through `t2touch status`,
+`t2touch enroll`, `t2touch verify`, and `t2touch delete`. Password
+authentication remains available. The installer owns reversible PAM changes,
+and uninstall restores them.
 
-See [sources and credits](docs/handoff-provenance.md) for the project's foundation
-and research references.
+The native lifecycle was hardware-proven from blank state on the MacBookPro16,1.
+Current release work is packaging, automated validation, privacy review, and
+publication—not additional hardware bringup.

@@ -68,13 +68,13 @@ class FprintDeleteWorkerClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_only_exact_reconciled_completion(self):
         expected = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
 
         def worker():
             request, descriptor = protocol.receive_request(self.worker_socket)
             os.close(descriptor)
-            self.assertEqual(request.finger_name, "left-thumb")
+            self.assertEqual(request.finger_name, "finger-2")
             protocol.send_completion(self.worker_socket, expected)
 
         thread = threading.Thread(target=worker)
@@ -84,7 +84,7 @@ class FprintDeleteWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(claim.ClaimEvidence, "revalidate") as revalidate:
             result = await lifecycle.delete(
-                "left-thumb", self.caller, self.evidence
+                "finger-2", self.caller, self.evidence
             )
         thread.join(timeout=2)
         self.assertEqual(result, expected)
@@ -94,7 +94,7 @@ class FprintDeleteWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         started = threading.Event()
         release = threading.Event()
         expected = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
 
         def worker():
@@ -111,7 +111,7 @@ class FprintDeleteWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(claim.ClaimEvidence, "revalidate"):
             task = asyncio.create_task(
-                lifecycle.delete("left-thumb", self.caller, self.evidence)
+                lifecycle.delete("finger-2", self.caller, self.evidence)
             )
             await asyncio.to_thread(started.wait)
             task.cancel()
@@ -135,7 +135,7 @@ class FprintDeleteWorkerClientTests(unittest.IsolatedAsyncioTestCase):
             lambda _uid: None,
         )
         with self.assertRaises(client.FprintDeleteWorkerClientError):
-            await lifecycle.delete("left-thumb", self.caller, wrong)
+            await lifecycle.delete("finger-2", self.caller, wrong)
 
         def worker():
             _request, descriptor = protocol.receive_request(self.worker_socket)
@@ -147,7 +147,7 @@ class FprintDeleteWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(claim.ClaimEvidence, "revalidate"):
             with self.assertRaises(client.FprintDeleteWorkerClientError):
                 await lifecycle.delete(
-                    "left-thumb", self.caller, self.evidence
+                    "finger-2", self.caller, self.evidence
                 )
         thread.join(timeout=2)
 

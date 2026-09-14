@@ -24,6 +24,11 @@ class UserActivationPhase(Enum):
     HANDLE_OBSERVED = "handle-observed"
     BIND_INTENT = "bind-intent"
     ALIAS_OBSERVED = "alias-observed"
+    CONFIGURATION_INTENT = "configuration-intent"
+    CONFIGURATION_RESOLVED = "configuration-resolved"
+    ALIAS_UNLOCKED = "alias-unlocked"
+    UNLOAD_INTENT = "unload-intent"
+    HANDLE_RELEASED = "handle-released"
     UNLOCK_INTENT = "unlock-intent"
     READY = "ready"
     STOPPED = "stopped"
@@ -114,6 +119,7 @@ def _validate_baseline(value: Any) -> dict[str, Any]:
         "alias-absent",
         "device-locked",
         "before-first-unlock",
+        "ready",
     }:
         raise UserActivationJournalError("activation baseline is not actionable")
     if type(baseline["alias_preexisting"]) is not bool or baseline[
@@ -149,7 +155,7 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
         milestone = record.get("milestone")
         evidence = record.get("evidence")
         if milestone == "USER_KEYBAG_LOAD_INTENT":
-            if phase is not UserActivationPhase.BASELINE or baseline["alias_preexisting"]:
+            if phase is not UserActivationPhase.BASELINE:
                 raise UserActivationJournalError("keybag load intent is out of order")
             evidence = _exact(
                 evidence,
@@ -224,8 +230,114 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
                 raise UserActivationJournalError("alias observation did not reconcile")
             phase = UserActivationPhase.ALIAS_OBSERVED
             continue
+        if milestone == "USER_KEYBAG_UNLOAD_INTENT":
+            if phase not in {
+                UserActivationPhase.ALIAS_OBSERVED,
+                UserActivationPhase.ALIAS_UNLOCKED,
+            }:
+                raise UserActivationJournalError("keybag unload intent is out of order")
+            evidence = _exact(
+                evidence,
+                {"runtime_generation", "handle", "mutation_possible"},
+                milestone,
+            )
+            if (
+                evidence["runtime_generation"] != baseline["runtime_generation"]
+                or evidence["handle"] != temporary_handle
+                or evidence["mutation_possible"] is not True
+            ):
+                raise UserActivationJournalError("keybag unload intent is not bound")
+            phase = UserActivationPhase.UNLOAD_INTENT
+            continue
+        if milestone == "USER_KEYBAG_HANDLE_RELEASED":
+            if phase is not UserActivationPhase.UNLOAD_INTENT:
+                raise UserActivationJournalError("keybag release is out of order")
+            evidence = _exact(
+                evidence,
+                {
+                    "runtime_generation",
+                    "handle",
+                    "special_alias",
+                    "bag_uuid_matches",
+                    "command_status",
+                    "command_raised",
+                },
+                milestone,
+            )
+            _status(evidence["command_status"], "unload command status")
+            if (
+                evidence["runtime_generation"] != baseline["runtime_generation"]
+                or evidence["handle"] != temporary_handle
+                or evidence["special_alias"] != baseline["special_alias"]
+                or evidence["bag_uuid_matches"] is not True
+                or evidence["command_status"] != 0
+                or evidence["command_raised"] is not False
+            ):
+                raise UserActivationJournalError("keybag release did not reconcile")
+            phase = UserActivationPhase.HANDLE_RELEASED
+            continue
+        if milestone == "USER_ALIAS_CONFIGURATION_INTENT":
+            if phase not in {
+                UserActivationPhase.BASELINE,
+                UserActivationPhase.ALIAS_OBSERVED,
+            }:
+                raise UserActivationJournalError(
+                    "alias configuration intent is out of order"
+                )
+            if phase is UserActivationPhase.BASELINE and not baseline["alias_preexisting"]:
+                raise UserActivationJournalError(
+                    "absent alias cannot resolve configuration"
+                )
+            evidence = _exact(
+                evidence,
+                {"runtime_generation", "special_alias", "mutation_possible"},
+                milestone,
+            )
+            if (
+                evidence["runtime_generation"] != baseline["runtime_generation"]
+                or evidence["special_alias"] != baseline["special_alias"]
+                or evidence["mutation_possible"] is not True
+            ):
+                raise UserActivationJournalError(
+                    "alias configuration intent is not bound"
+                )
+            phase = UserActivationPhase.CONFIGURATION_INTENT
+            continue
+        if milestone == "USER_ALIAS_CONFIGURATION_RESOLVED":
+            if phase is not UserActivationPhase.CONFIGURATION_INTENT:
+                raise UserActivationJournalError(
+                    "alias configuration result is out of order"
+                )
+            evidence = _exact(
+                evidence,
+                {
+                    "runtime_generation",
+                    "special_alias",
+                    "bag_uuid_matches",
+                    "command_status",
+                    "command_raised",
+                },
+                milestone,
+            )
+            _status(evidence["command_status"], "configuration command status")
+            if (
+                evidence["runtime_generation"] != baseline["runtime_generation"]
+                or evidence["special_alias"] != baseline["special_alias"]
+                or evidence["bag_uuid_matches"] is not True
+                or evidence["command_status"] != 0
+                or evidence["command_raised"] is not False
+            ):
+                raise UserActivationJournalError(
+                    "alias configuration did not reconcile"
+                )
+            phase = UserActivationPhase.CONFIGURATION_RESOLVED
+            continue
         if milestone == "USER_ALIAS_UNLOCK_INTENT":
-            if phase not in {UserActivationPhase.BASELINE, UserActivationPhase.ALIAS_OBSERVED}:
+            if phase not in {
+                UserActivationPhase.BASELINE,
+                UserActivationPhase.HANDLE_RELEASED,
+                UserActivationPhase.CONFIGURATION_RESOLVED,
+            }:
                 raise UserActivationJournalError("alias unlock intent is out of order")
             if phase is UserActivationPhase.BASELINE and not baseline["alias_preexisting"]:
                 raise UserActivationJournalError("absent alias cannot be unlocked")
@@ -242,9 +354,39 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
                 raise UserActivationJournalError("alias unlock intent is not bound")
             phase = UserActivationPhase.UNLOCK_INTENT
             continue
+        if milestone == "USER_ALIAS_UNLOCKED":
+            if phase is not UserActivationPhase.UNLOCK_INTENT or temporary_handle is None:
+                raise UserActivationJournalError("alias unlock result is out of order")
+            evidence = _exact(
+                evidence,
+                {
+                    "runtime_generation",
+                    "special_alias",
+                    "bag_uuid_matches",
+                    "readiness_state",
+                    "command_status",
+                    "command_raised",
+                },
+                milestone,
+            )
+            _status(evidence["command_status"], "unlock command status")
+            if (
+                evidence["runtime_generation"] != baseline["runtime_generation"]
+                or evidence["special_alias"] != baseline["special_alias"]
+                or evidence["bag_uuid_matches"] is not True
+                or evidence["readiness_state"] != "ready"
+                or type(evidence["command_raised"]) is not bool
+                or (
+                    evidence["command_raised"]
+                    and evidence["command_status"] is not None
+                )
+            ):
+                raise UserActivationJournalError("alias unlock result is invalid")
+            phase = UserActivationPhase.ALIAS_UNLOCKED
+            continue
         if milestone == "USER_ACTIVATION_READY":
             if phase not in {
-                UserActivationPhase.ALIAS_OBSERVED,
+                UserActivationPhase.HANDLE_RELEASED,
                 UserActivationPhase.UNLOCK_INTENT,
             }:
                 raise UserActivationJournalError("ready observation is out of order")
@@ -271,8 +413,8 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
                 or evidence["readiness_state"] != "ready"
                 or evidence["source"]
                 != (
-                    "bind-readback"
-                    if phase is UserActivationPhase.ALIAS_OBSERVED
+                    "release-readback"
+                    if phase is UserActivationPhase.HANDLE_RELEASED
                     else "unlock-readback"
                 )
                 or type(evidence["command_raised"]) is not bool
@@ -287,7 +429,12 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
                 UserActivationPhase.HANDLE_OBSERVED,
                 UserActivationPhase.BIND_INTENT,
                 UserActivationPhase.ALIAS_OBSERVED,
+                UserActivationPhase.UNLOAD_INTENT,
+                UserActivationPhase.HANDLE_RELEASED,
+                UserActivationPhase.CONFIGURATION_INTENT,
+                UserActivationPhase.CONFIGURATION_RESOLVED,
                 UserActivationPhase.UNLOCK_INTENT,
+                UserActivationPhase.ALIAS_UNLOCKED,
             }:
                 raise UserActivationJournalError("activation stop is out of order")
             evidence = _exact(
@@ -299,8 +446,16 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
                 UserActivationPhase.LOAD_INTENT: {"load", "handle"},
                 UserActivationPhase.HANDLE_OBSERVED: {"handle", "bind"},
                 UserActivationPhase.BIND_INTENT: {"bind", "readback"},
-                UserActivationPhase.ALIAS_OBSERVED: {"bind", "unlock", "readback"},
+                UserActivationPhase.ALIAS_OBSERVED: {"unload", "readback"},
+                UserActivationPhase.CONFIGURATION_INTENT: {
+                    "configuration",
+                    "readback",
+                },
+                UserActivationPhase.CONFIGURATION_RESOLVED: {"unlock", "readback"},
+                UserActivationPhase.UNLOAD_INTENT: {"unload", "readback"},
+                UserActivationPhase.HANDLE_RELEASED: {"unlock", "readback"},
                 UserActivationPhase.UNLOCK_INTENT: {"unlock", "readback"},
+                UserActivationPhase.ALIAS_UNLOCKED: {"unload", "readback"},
             }
             if (
                 evidence["runtime_generation"] != baseline["runtime_generation"]
@@ -416,13 +571,17 @@ def create(
     linux_boot_uuid: str,
     runtime_generation: str,
     operation_id: str | None = None,
+    allow_ready: bool = False,
 ) -> UserActivationHistory:
     decision = t2_user_readiness.assess(selected, capability, persistent, alias)
-    if decision.state not in {
+    actionable = {
         "alias-absent",
         "device-locked",
         "before-first-unlock",
-    }:
+    }
+    if allow_ready:
+        actionable.add("ready")
+    if decision.state not in actionable:
         raise UserActivationJournalError("mapping is not safely actionable")
     if selected not in mapping_set.mappings or mapping_set.generation == "":
         raise UserActivationJournalError("selected mapping is not in the mapping set")

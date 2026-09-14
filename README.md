@@ -1,26 +1,156 @@
 # t2touch
 
-A proof of concept for setting up Touch ID from Linux on Intel Macs with Apple T2
-chips, without importing macOS user or fingerprint data.
+Touch ID integration for Intel Macs with Apple’s T2 chip, using the standard
+Linux `fprintd` interface.
 
-The research implementation has demonstrated native enrollment, persistence across
-reboot, matching, and deletion on the reference T2 Mac. Its source import is still
-being prepared; this checkout contains source from the original, macOS-assisted
-project and the native research documentation.
+This is an early proof of concept. Keep password authentication enabled and
+available. Hardware validation currently covers one `MacBookPro16,1`; other T2
+models need testing.
 
-- [About the work](HANDOFF.md)
-- [SEP architecture and native-adoption research](docs/research/README.md)
-- [Sources and credits](docs/handoff-provenance.md)
-- [Community use](SUPPORT.md)
+## Try it on Omarchy
 
-## Upstream foundation
+When the kernel prerequisite below is already installed, the installation and
+enrollment flow runs entirely in the current Linux session. It does not require
+a reboot.
 
-This project builds on
-[jmurth1234/t2-touchid-linux](https://github.com/jmurth1234/t2-touchid-linux/tree/ea46d8a0aef3e73b0e2f747aa18721dbcd265bce),
-with its history and [GPL-2.0-only license](LICENSE) preserved.
+```bash
+git clone https://github.com/jmurth1234/t2touch.git
+cd t2touch
+./install-omarchy.sh
+t2touch enroll
+```
 
-The original documentation in [docs/research](docs/research/README.md) is separately
-[MIT licensed](docs/research/LICENSE) and is also included in t2touch-mini.
+The enrollment command opens the Touch ID terminal interface. Briefly touch and
+lift the same finger as prompted. SEP reports real, non-linear progress; the
+fingerprint graphic fills to match that percentage. Enrollment returns success
+only after the new fingerprint is durable and ready for immediate use.
 
-The [upstream installation guide](https://github.com/jmurth1234/t2-touchid-linux/blob/ea46d8a0aef3e73b0e2f747aa18721dbcd265bce/README.md)
-describes the macOS-assisted workflow included in this checkout.
+Afterward, any enrolled finger can authenticate through:
+
+- `sudo`
+- graphical PolicyKit prompts
+- the Omarchy lock screen
+- applications using the standard fprintd D-Bus API
+
+Your normal Linux password remains available as fallback.
+
+## Everyday commands
+
+```bash
+# Enroll another fingerprint
+t2touch enroll
+
+# Show the service and neutral fingerprint slots
+t2touch status
+
+# Test any enrolled fingerprint
+t2touch verify
+
+# Delete one fingerprint
+t2touch delete finger-2
+```
+
+Fingerprint names are five neutral slots: `Finger 1` through `Finger 5`. They
+do not claim which physical finger you used. Deleting one slot never renumbers
+the others; the next successful enrollment takes the lowest vacant slot. An
+empty inventory therefore starts at `Finger 1`. Failed or cancelled enrollment
+does not create a slot.
+
+All enrolled fingerprints are equivalent for authentication. Existing and new
+entries use the same fprintd inventory and the same add, verify, and delete
+operations; their origin is not an authentication distinction. Deleting the
+final named fingerprint produces a clean, enrollable empty inventory; the next
+successful enrollment is `Finger 1`. A batch delete-all operation is not
+exposed. If another trusted owner, such as macOS, removes the final fingerprint,
+the service detects the stable empty SEP inventory and reconciles Linux before
+fprintd starts.
+
+## Requirements
+
+- An Intel Mac with an Apple T2 chip
+- Omarchy with the T2 Linux kernel and matching headers
+- A T2 kernel carrying the typed `applesmc` SEP boot-state publisher in
+  [`linux_native/patches/applesmc-t2-sep-boot-state.patch`](linux_native/patches/applesmc-t2-sep-boot-state.patch).
+  The reference Mac uses that patch; do not assume an unmodified `linux-t2`
+  package contains it.
+- An active local desktop session for the account that will use Touch ID
+- Secure Boot configuration that permits the locally built DKMS module
+
+The Omarchy installer installs `base-devel`, `dkms`, `fprintd`, Python, and
+the headers matching the running kernel through `omarchy pkg add`. It detects
+the Apple T2 network interface, creates an encrypted Linux-owned identity
+credential, builds the transport with DKMS, starts the complete service chain,
+and installs reversible PAM integration.
+
+Run the installer as your desktop account, not as root. It invokes `sudo` only
+for the system changes it owns.
+
+## Existing Apple Touch ID state
+
+The quick-start path creates a Linux-owned authority only when the T2 has no
+existing fingerprint authority. It refuses to overwrite an existing one.
+
+Compatibility code for machines retaining macOS Touch ID state is preserved,
+but this release does not yet provide a supported end-user migration command.
+It refuses the Linux-native first-run rather than overwrite that authority.
+The architectural boundary and contributor work are described in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Once connected, imported and
+Linux-enrolled fingerprints are designed to share one neutral fprintd inventory
+and the same verify/delete behavior without regard to origin; that migration is
+not part of the four-command proof of concept.
+
+Booting macOS may reconcile SEP from macOS’s own database. Linux-only additions
+therefore are not currently guaranteed to survive a later macOS boot. When
+macOS removes the sole remaining fingerprint, Linux automatically discards its
+stale local inventory entry and permits a new `t2touch enroll`; it does not
+restore or replace the fingerprint macOS removed. This does not affect
+Linux-only systems.
+
+## Troubleshooting
+
+```bash
+sudo t2-touchid-doctor
+```
+
+The doctor reports the failed component without exposing private biometric
+identifiers or keybag material. Normal installation should not require manual
+service sequencing or research acknowledgement flags.
+
+## Uninstall
+
+Restore the original PAM configuration and remove the software while preserving
+the encrypted configuration and biometric state for a later reinstall:
+
+```bash
+sudo ./uninstall.sh
+```
+
+The uninstaller stops the userspace integration in the current session and
+does not require a reboot. A transport already pinned by SEP remains safely
+resident but is disabled for future kernel starts. The uninstaller
+intentionally preserves the private authority and fingerprint state so
+reinstall remains possible.
+
+## What has been proven
+
+On the `MacBookPro16,1` reference system, Linux created its own T2 fingerprint
+authority from blank state, enrolled multiple fingerprints, authenticated with
+any enrolled fingerprint, deleted individual fingerprints without affecting
+survivors, deleted the final named fingerprint back to a clean empty inventory,
+and retained populated inventories across service and machine restarts.
+Standard fprintd clients, `sudo`, graphical PolicyKit, the Omarchy lock path,
+and password fallback all completed successfully. A matching-transport
+userspace reinstall also completed without a reboot or hardware unbind.
+
+The public claim is intentionally narrower than broad hardware support: this
+remains a single-model proof of concept until other T2 Macs reproduce it.
+
+Architecture, protocol provenance, and security boundaries are documented in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The small reusable protocol
+reference is published separately as
+[`t2touch-mini`](https://github.com/jmurth1234/t2touch-mini).
+
+## License
+
+The integration is licensed under GPL-2.0-only. The separately identified
+research reference subset in `docs/research/` is MIT licensed.

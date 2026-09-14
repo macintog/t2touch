@@ -204,6 +204,15 @@ class CatacombStore:
             )
         return self._read_root_components()
 
+    def require_empty_bootstrap_root(self) -> None:
+        """Prove the private store has no imported or partial Catacomb state."""
+        with os.scandir(self.root) as entries:
+            names = {entry.name for entry in entries}
+        if names:
+            raise CatacombStoreError(
+                "Linux-native Catacomb bootstrap root is not empty"
+            )
+
     def read_committed_components_during_prepare(
         self,
         expected_names: set[str],
@@ -297,6 +306,21 @@ class CatacombStore:
             if hook:
                 hook(f"prepare_unlinked:{name}")
         self._sync_directory(prepare)
+        prepare.rmdir()
+        self._sync_directory(self.root)
+
+    def discard_empty_prepare(self) -> None:
+        """Discard only a validated empty rollback-side transaction.
+
+        This is narrower than :meth:`discard_prepare`: it is for a process
+        that created the transaction directory but stopped before producing
+        any component bytes or a host commit boundary.
+        """
+        prepare = self.root / "prepare"
+        if self._directory_entries(prepare):
+            raise CatacombStoreError(
+                "empty prepare recovery found a staged component"
+            )
         prepare.rmdir()
         self._sync_directory(self.root)
 

@@ -251,6 +251,103 @@ class UserBrokerTests(unittest.TestCase):
         self.assertNotIn(identifier(1), rendered)
         self.assertNotIn(str(self.uid), rendered)
 
+    def test_compatibility_uses_validated_runtime_mapping(self):
+        protected = mapping.load(self.path)
+        disabled = mapping.UserMapping(
+            self.uid,
+            "a" * 64,
+            501,
+            identifier(1),
+            identifier(2),
+            f"/var/lib/t2-touchid/users/{self.uid}/user.kb",
+            "b" * 64,
+            "password-on-demand",
+            frozenset({"verify"}),
+            False,
+        )
+        self.path.write_bytes(mapping.serialize((disabled,)))
+        runtime_selected = mapping.UserMapping(
+            self.uid,
+            "a" * 64,
+            501,
+            identifier(1),
+            identifier(2),
+            f"/var/lib/t2-touchid/users/{self.uid}/user.kb",
+            "b" * 64,
+            "host-encrypted-credential",
+            frozenset({"enroll", "identity-management", "verify"}),
+            True,
+        )
+        runtime_set = mapping.UserMappingSet(
+            "c" * 64, (runtime_selected,), protected.schema_version
+        )
+        authorization = FakeAuthorizationSession(self.uid)
+        evidence = (persistent(), READY)
+        live = FakeLiveSession((evidence, evidence, evidence))
+        used = []
+        with (
+            mock.patch.dict(
+                os.environ,
+                {broker.t2_user_authority.AUTHORITY_MODE: broker.t2_user_authority.COMPATIBILITY_MODE},
+            ),
+            mock.patch.object(
+                mapping_admin, "DEFAULT_MAPPING_PATH", self.path
+            ),
+            mock.patch.object(
+                broker.t2_user_authority,
+                "load_compatibility",
+                return_value=mock.Mock(mapping_set=runtime_set),
+            ) as load,
+        ):
+            result = self.invoke(
+                authorization,
+                live,
+                lambda authority, _session: used.append(authority.selected),
+            )
+        self.assertTrue(result.consumer_invoked)
+        self.assertEqual(used, [runtime_selected])
+        self.assertEqual(load.call_count, 4)
+        self.assertTrue(
+            all(call == mock.call(self.uid) for call in load.call_args_list)
+        )
+
+    def test_compatibility_authority_drift_fails_before_consumer(self):
+        protected = mapping.load(self.path)
+        disabled = mapping.UserMapping(
+            **{**protected.mappings[0].__dict__, "enabled": False}
+        )
+        self.path.write_bytes(mapping.serialize((disabled,)))
+        runtime = mock.Mock(mapping_set=protected)
+        changed = mock.Mock(mapping_set=protected)
+        authorization = FakeAuthorizationSession(self.uid)
+        evidence = (persistent(), READY)
+        live = FakeLiveSession((evidence, evidence, evidence))
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    broker.t2_user_authority.AUTHORITY_MODE:
+                    broker.t2_user_authority.COMPATIBILITY_MODE
+                },
+            ),
+            mock.patch.object(mapping_admin, "DEFAULT_MAPPING_PATH", self.path),
+            mock.patch.object(
+                broker.t2_user_authority,
+                "load_compatibility",
+                side_effect=(runtime, changed),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                broker.UserBrokerError, "runtime authority changed"
+            ):
+                self.invoke(
+                    authorization,
+                    live,
+                    lambda _authority, _session: self.fail(
+                        "consumer must not run"
+                    ),
+                )
+
     def test_precreated_authorization_session_uses_exclusive_handoff(self):
         evidence = (persistent(), READY)
         authorization = FakeAuthorizationSession(self.uid)

@@ -1,26 +1,24 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Project reconciled T2 labels onto fprint's fixed finger-name vocabulary."""
+"""Project reconciled T2 identities onto neutral durable fprint handles."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import t2_user_broker_inventory
+import t2_fprint_identity
 
-
-FINGER_NAMES = (
-    "left-thumb",
-    "left-index-finger",
-    "left-middle-finger",
-    "left-ring-finger",
-    "left-little-finger",
-    "right-thumb",
-    "right-index-finger",
-    "right-middle-finger",
-    "right-ring-finger",
-    "right-little-finger",
+# Compatibility exports for callers that only need the concurrent capacity.
+# Neutral handles are five stable slots rather than anatomy labels. Membership
+# still uses ``is_finger_name`` so every boundary shares one validator.
+FINGER_NAMES = tuple(
+    t2_fprint_identity.handle(value)
+    for value in range(1, t2_fprint_identity.MAX_ENROLLED_IDENTITIES + 1)
 )
-FINGER_NAME_SET = frozenset(FINGER_NAMES)
+
+
+def is_finger_name(value: object) -> bool:
+    return t2_fprint_identity.is_handle(value)
 
 
 class FprintProjectionError(ValueError):
@@ -43,7 +41,6 @@ class FprintProjection:
             "unassigned_identity_count": self.unassigned_identity_count,
             "duplicate_finger_name_count": self.duplicate_finger_name_count,
             "complete": self.complete,
-            "compatibility_alias_required": not self.complete,
             "finger_names_are_presentation_metadata": True,
             "identifiers_redacted": True,
         }
@@ -61,16 +58,12 @@ def project(value: object) -> FprintProjection:
     recognized = [
         identity.name
         for identity in inventory.identities
-        if identity.name in FINGER_NAME_SET
+        if is_finger_name(identity.name)
     ]
     unassigned = inventory.identity_count - len(recognized)
     duplicates = len(recognized) - len(set(recognized))
     complete = unassigned == 0 and duplicates == 0
-    ordered = (
-        tuple(name for name in FINGER_NAMES if name in recognized)
-        if complete
-        else ()
-    )
+    ordered = t2_fprint_identity.ordered(recognized) if complete else ()
     if complete and len(ordered) != inventory.identity_count:
         raise FprintProjectionError("fprint projection is internally inconsistent")
     return FprintProjection(

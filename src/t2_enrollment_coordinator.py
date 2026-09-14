@@ -14,6 +14,7 @@ import t2_bridge_inventory
 import t2_enrollment_bridge
 import t2_enrollment_operation
 import t2_enrollment_protocol
+import t2_mesa_enrollment_preparation
 import t2_mutation_journal
 
 
@@ -36,6 +37,11 @@ def _safe_stop_detail(error: BaseException) -> str | None:
             current, t2_enrollment_operation.EnrollmentPreDispatchCancelled
         ):
             detail = "enrollment cancelled before start dispatch"
+        elif isinstance(
+            current,
+            t2_mesa_enrollment_preparation.MesaEnrollmentPreparationError,
+        ):
+            detail = str(current)
         cause = current.__cause__
         current = cause if isinstance(cause, BaseException) else None
     return detail
@@ -87,31 +93,108 @@ def run(
     target_linux_uid: int,
     linux_boot_uuid: str,
     mapping_generation: str,
-    backup_reference: str,
+    backup_reference: str | None,
     password_fallback_verified: bool,
     password_binder: Callable[[bytes], None],
     finalizer: Finalizer,
     dispatch_allowed: Callable[[], bool],
+    authorization_scope: Callable[[Callable[[bytes], object]], tuple[object, object]]
+    | None = None,
+    linux_native_binding: dict[str, str] | None = None,
     cancel_requested: Callable[[], bool] = lambda: False,
+    on_started: Callable[[], None] = lambda: None,
     on_feedback: Callable[[object], None] = lambda _transition: None,
+    live_inventory: dict[str, object] | None = None,
 ) -> EnrollmentCoordinatorResult:
     """Run one operation while retaining the E0 Bridge lease and ACM context."""
-    if not callable(password_binder) or not callable(finalizer):
+    if (
+        not callable(password_binder)
+        or not callable(finalizer)
+        or (authorization_scope is not None and not callable(authorization_scope))
+    ):
         raise EnrollmentCoordinatorError("password binder and finalizer are required")
     try:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, apple_user_id
+        live = (
+            t2_bridge_inventory.collect_stable_private_inventory(
+                lease, apple_user_id
+            )
+            if live_inventory is None
+            else live_inventory
         )
-        baseline = t2_baseline.build_baseline(
-            host=host_inventory,
-            live=live,
-            caller_linux_uid=caller_linux_uid,
-            target_linux_uid=target_linux_uid,
-            linux_boot_uuid=linux_boot_uuid,
-            mapping_generation=mapping_generation,
-            backup_reference=backup_reference,
-            password_fallback_verified=password_fallback_verified,
-        )
+        if (
+            not isinstance(live, dict)
+            or live.get("connection_generation") != lease.connection_generation
+            or live.get("double_collection_equal") is not True
+        ):
+            raise EnrollmentCoordinatorError(
+                "supplied E0 inventory is stale or unstable"
+            )
+        if linux_native_binding is None:
+            if not isinstance(backup_reference, str) or not backup_reference:
+                raise EnrollmentCoordinatorError(
+                    "existing-state enrollment requires a backup reference"
+                )
+            baseline = t2_baseline.build_baseline(
+                host=host_inventory,
+                live=live,
+                caller_linux_uid=caller_linux_uid,
+                target_linux_uid=target_linux_uid,
+                linux_boot_uuid=linux_boot_uuid,
+                mapping_generation=mapping_generation,
+                backup_reference=backup_reference,
+                password_fallback_verified=password_fallback_verified,
+            )
+        else:
+            binding_keys = set(linux_native_binding)
+            empty_keys = {"account_uuid", "bag_uuid"}
+            existing_keys = empty_keys | {
+                "authority_reference",
+                "authority_sha256",
+            }
+            if frozenset(binding_keys) not in {
+                frozenset(empty_keys),
+                frozenset(existing_keys),
+            }:
+                raise EnrollmentCoordinatorError(
+                    "Linux-native binding has an invalid schema"
+                )
+            if backup_reference is not None:
+                raise EnrollmentCoordinatorError(
+                    "Linux-native enrollment cannot import a host backup"
+                )
+            if binding_keys == empty_keys:
+                if host_inventory:
+                    raise EnrollmentCoordinatorError(
+                        "Linux-native first enrollment has existing host state"
+                    )
+                baseline = t2_baseline.build_linux_native_empty_baseline(
+                    live=live,
+                    caller_linux_uid=caller_linux_uid,
+                    target_linux_uid=target_linux_uid,
+                    linux_boot_uuid=linux_boot_uuid,
+                    mapping_generation=mapping_generation,
+                    account_uuid=linux_native_binding["account_uuid"],
+                    bag_uuid=linux_native_binding["bag_uuid"],
+                    password_fallback_verified=password_fallback_verified,
+                )
+            else:
+                if not host_inventory:
+                    raise EnrollmentCoordinatorError(
+                        "Linux-native additional enrollment has no host state"
+                    )
+                baseline = t2_baseline.build_linux_native_existing_baseline(
+                    host=host_inventory,
+                    live=live,
+                    caller_linux_uid=caller_linux_uid,
+                    target_linux_uid=target_linux_uid,
+                    linux_boot_uuid=linux_boot_uuid,
+                    mapping_generation=mapping_generation,
+                    account_uuid=linux_native_binding["account_uuid"],
+                    bag_uuid=linux_native_binding["bag_uuid"],
+                    authority_reference=linux_native_binding["authority_reference"],
+                    authority_sha256=linux_native_binding["authority_sha256"],
+                    password_fallback_verified=password_fallback_verified,
+                )
         t2_mutation_journal.create(
             journal_path, "enroll", baseline, operation_id=operation_id
         )
@@ -139,6 +222,7 @@ def run(
                 external_form,
                 dispatch_allowed=dispatch_allowed,
                 cancel_requested=cancel_requested,
+                on_started=on_started,
                 on_feedback=on_feedback,
             )
             try:
@@ -152,11 +236,18 @@ def run(
                     raise EnrollmentCoordinatorError(
                         "finalizer returned no typed attestation"
                     )
-                if attestation.connection_generation != generation:
+                fresh_witness_generation = (
+                    result.outcome == "result-witnessed"
+                    and attestation.connection_generation != generation
+                )
+                if (
+                    attestation.connection_generation != generation
+                    and not fresh_witness_generation
+                ):
                     raise EnrollmentCoordinatorError(
                         "finalizer used another Bridge generation"
                     )
-                if lease.connection_generation != generation:
+                if not fresh_witness_generation and lease.connection_generation != generation:
                     raise EnrollmentCoordinatorError(
                         "Bridge generation changed during finalization"
                     )
@@ -178,12 +269,26 @@ def run(
                 raise
             return result, attestation
 
-        _initial, final_policy, consumed = t2_acm_device.with_authorized_context(
-            acm_device,
-            apple_user_id,
-            password_binder,
-            consume,
-        )
+        if authorization_scope is None:
+            _initial, final_policy, consumed = t2_acm_device.with_authorized_context(
+                acm_device,
+                apple_user_id,
+                password_binder,
+                consume,
+            )
+        else:
+            final_policy, consumed = authorization_scope(consume)
+            if inspect.isawaitable(consumed):
+                close = getattr(consumed, "close", None)
+                if callable(close):
+                    close()
+                raise EnrollmentCoordinatorError(
+                    "authorization scope must be synchronous"
+                )
+            if type(getattr(final_policy, "satisfied", None)) is not bool:
+                raise EnrollmentCoordinatorError(
+                    "authorization scope returned no typed policy"
+                )
         enrollment_result, attestation = consumed
         public_outcome = (
             "identity-observed"

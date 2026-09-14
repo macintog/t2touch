@@ -1,20 +1,55 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Copy to /etc/t2-touchid.conf and keep it root-owned (0644 or stricter).
+# Copy to /etc/t2-touchid.conf and keep it root-owned, mode 0600.
 T2_TOUCHID_USER=your-linux-user
 T2_TOUCHID_HOST=fe80::replace-with-the-t2-link-local-address
 T2_TOUCHID_INTERFACE=replace-with-the-t2-usb-network-interface
 T2_TOUCHID_PROJECT_DIR=/opt/t2-touchid
 T2_TOUCHID_MACOS_USER_ID=501
 T2_TOUCHID_SPECIAL_BAG=-501
-T2_TOUCHID_ENROLLED_FINGER=right-index-finger
 # Persist successful-match adaptive template updates in the local Catacomb.
 # This causes authenticated biometric state writes after successful matches.
 T2_TOUCHID_AUTO_SYNC_ADAPTIVE=0
-# Research-only endpoint-10 registration. It does not enable enrollment.
+# Optional early-load research override. The ordered Linux-native transport
+# service owns endpoint-10 registration automatically.
 T2_TOUCHID_ENABLE_ACM_RESEARCH=0
-# Research-only macOS audit-session ID. This is not the numeric user ID.
-# Leave zero unless the enrollment research procedure explicitly supplies it.
+# Optional early-load research override. The ordered Linux-native transport
+# service negotiates AppleKeyStore capabilities automatically.
+T2_TOUCHID_PROBE_CAPABILITIES=0
+# Optional early-load research override. Keep disabled in a normal install;
+# the ordered transport service enables the one-shot kernel gate only when
+# both native mapping and provisioning journal are absent.
+T2_TOUCHID_ENABLE_IDENTITY_PROVISIONING=0
+# One-shot replacement of an already-provisioned Linux-native identity. Keep
+# disabled except for a reconciled replacement transaction. Requires identity
+# provisioning, ACM research, and capability probing enabled.
+T2_TOUCHID_ENABLE_IDENTITY_REPLACEMENT=0
+# Read-only bring-up mode: expose only durable primary-identity inventory.
+# This requires ACM/probe/provisioning disabled and XART_OS_UUID empty.
+T2_TOUCHID_INVENTORY_ONLY=0
+# AKS platform audit-session ID used by the Linux-native ACM owner. Zero is the
+# proven default unless a firmware-specific integration supplies another value.
 T2_TOUCHID_AKS_PLATFORM_ASID=0
-# Research-only 20-byte native caller identity, encoded as 40 hexadecimal digits.
-# Leave empty unless the enrollment research procedure explicitly supplies it.
+# Optional 20-byte native caller identity, encoded as 40 hexadecimal digits.
+# Empty is the proven default unless a firmware-specific integration supplies it.
 T2_TOUCHID_AKS_PLATFORM_CDHASH=
+# Retired raw-PCI versioned-app experiment; bridgeOS owns this action.
+T2_TOUCHID_MACOS_APP_VERSION=0
+# SEP app epoch passed through the typed bridgeOS SMC boot-state record.
+# The matched bridgeOS default is 1.0; other firmware may require its own
+# recovered epoch without changing the transport protocol.
+T2_TOUCHID_SEP_EPOCH_MAJOR=1
+T2_TOUCHID_SEP_EPOCH_MINOR=0
+# Retired direct-PCI xART experiment. These two settings must remain empty;
+# bridgeOS's internal xars operation is not the x86 PCI endpoint-16 contract.
+T2_TOUCHID_XART_OS_UUID=
+T2_TOUCHID_XART_OS_UUID_FILE=
+# Retired with the direct-PCI experiment; must remain zero.
+T2_TOUCHID_DEFER_XART_PUBLISH=0
+# Reference-machine oracle only: before loading the Linux SEP transport, require
+# a successful read-only SKS lock-state reply for the configured Apple user.
+# Never enable this in the finished Linux-native provisioning path.
+T2_TOUCHID_REQUIRE_ORACLE_SKS_READY=0
+# Explicit, reversible compatibility demonstration. This validates the
+# immutable macOS-control proof chain and grants verify only in memory; the
+# protected native mapping remains disabled on disk.
+T2_TOUCHID_AUTHORITY_MODE=linux-native

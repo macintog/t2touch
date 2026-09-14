@@ -2,10 +2,18 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 import unittest
+import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "t2_native_pam_ready", ROOT / "src/t2_native_pam_ready.py"
+)
+NATIVE_READY = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(NATIVE_READY)
 
 
 class PamAssetTests(unittest.TestCase):
@@ -27,7 +35,8 @@ class PamAssetTests(unittest.TestCase):
         rollback = (ROOT / "tools/rollback-pam.sh").read_text()
 
         self.assertIn(
-            "sudo omarchy-lock-password omarchy-lock-fingerprint",
+            "for name in sudo polkit-1 omarchy-lock-password "
+            "omarchy-lock-fingerprint",
             rollback,
         )
         self.assertIn("system-auth.original", rollback)
@@ -51,6 +60,32 @@ class PamAssetTests(unittest.TestCase):
         self.assertIn("[success=ignore default=2]", sudo_stack)
         self.assertIn("t2-pam-fingerprint-ready", sudo_stack)
         self.assertNotIn("t2-pam-unlock", sudo_stack)
+
+    def test_native_e4_readiness_does_not_require_compatibility_markers(self):
+        selected = SimpleNamespace(linux_uid=1000)
+        authority = SimpleNamespace(
+            origin="linux-native-e4",
+            selected=selected,
+            mapping_set=SimpleNamespace(
+                resolve=lambda linux_uid, capability: (
+                    selected
+                    if (linux_uid, capability) == (1000, "verify")
+                    else None
+                )
+            ),
+        )
+        NATIVE_READY.require_native_readiness(
+            1000,
+            authority_loader=lambda _uid: authority,
+            mutation_scanner=lambda _root: (
+                SimpleNamespace(blocks_new_mutation=False),
+            ),
+        )
+
+        helper = (ROOT / "src/t2-pam-fingerprint-ready.sh").read_text()
+        self.assertIn("T2_TOUCHID_AUTHORITY_MODE", helper)
+        self.assertIn("t2_native_pam_ready.py", helper)
+        self.assertIn("keybags-unlocked", helper)
 
     def test_pam_unlock_prompts_separately_without_shell_storage(self):
         helper = (ROOT / "src/t2-pam-unlock.sh").read_text()
@@ -105,7 +140,7 @@ class PamAssetTests(unittest.TestCase):
         self.assertIn("ReadWritePaths=/run/t2-touchid", service)
         self.assertIn("DevicePolicy=closed", service)
         self.assertIn("DeviceAllow=/dev/t2-aks rw", service)
-        self.assertNotIn("Wants=t2-touchid-post-reboot.service t2-interactive-unlock.service", fprintd)
+        self.assertNotIn("t2-interactive-unlock.service", fprintd)
         self.assertNotIn("t2-interactive-unlock.service", fprintd.split("After=", 1)[1])
         install = (ROOT / "install.sh").read_text()
         self.assertNotIn("enable t2-interactive-unlock.service", install)

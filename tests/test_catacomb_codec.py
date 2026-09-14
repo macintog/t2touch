@@ -196,6 +196,21 @@ class CatacombCodecTests(unittest.TestCase):
         decoded = codec.decode_user_catacomb(fixture(), 501)
         with self.assertRaisesRegex(codec.CatacombCodecError, "zero-identity"):
             decoded.delete(str(uuid.UUID(int=1)))
+        empty = codec.decode_user_catacomb(
+            decoded.clear_after_stable_sep_empty(sep_empty_attested=True), 501
+        )
+        self.assertEqual(empty.identities, ())
+        restored = codec.decode_user_catacomb(
+            empty.add(
+                identity_uuid=str(uuid.UUID(int=9)),
+                entity=0,
+                name="finger-2",
+                created=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            ),
+            501,
+        )
+        self.assertEqual(len(restored.identities), 1)
+        self.assertEqual(restored.identities[0].identity_type, 1)
 
     def test_absent_sep_replacement_preserves_one_identity_schema(self):
         before = codec.decode_user_catacomb(fixture(), 501)

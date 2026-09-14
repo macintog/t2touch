@@ -1,0 +1,58 @@
+# 24G830 authenticated match-header boundary
+
+Date: 2026-09-03
+Build: macOS 15.7.9 (24G830), x86_64 host; bridgeOS 23P6068 driver
+
+## Recovered facts
+
+- `-[BKMatchOperation optionsDictionaryWithError:]` adds
+  `BKOptionMatchBypassPasscodeBiolockout` for purpose 6. When the operation
+  has `_credentialSet`, that branch also adds `BKOptionAuthWithCredentialSet`.
+- `-[BiometricKitXPCServer parseAuthDict:toAuthData:]` zeroes and fills this
+  exact 40-byte structure:
+
+      uint32_t usingAuthToken;  // +0
+      uint32_t tokenLength;     // +4
+      uint8_t token[32];        // +8
+
+  Credential-set mode sets `usingAuthToken = 0` and accepts 1 through 32
+  bytes. Auth-token mode sets `usingAuthToken = 1` and accepts exactly 16
+  bytes. The recognized inputs include
+  `BKOptionAuthWithCredentialSet`, `BKOptionAuthWithAuthToken`, and
+  `BKOptionMatchAuthTokenToBypassPasscodeBiolockout`.
+- `-[BiometricKitXPCServer initMatchOperation:...]` derives the operation
+  `userID` from `BKFilterUserID`. In the bypass branch it passes that same
+  filter value to `setNoBioLockoutUserID:`, obtains
+  `noBioLockoutAuthData`, and calls `parseAuthDict:toAuthData:`.
+- `performMatchCommand:` serializes an exact 68-byte command-4 request:
+  flags at offset 0, operation `userID` at offset 4,
+  `noBioLockoutUserID` at offset 8, and all 40 auth-data bytes at offset 12.
+- bridgeOS 23P6068 AppleMesaSEPDriver's bit-8 path reads command offset 8,
+  requires a value in 1 through 32, stores it as an internal length, and
+  copies that many bytes from command offset 12.
+
+## Inference, not implementation authority
+
+The Linux ACM helper can create, password-bind, policy-evaluate, externalize,
+consume, and delete a live 16-byte ACM context synchronously. That exact size
+is compatible with the host parser's auth-token mode. Size and lifetime alone
+do not prove that this is the token BiometricKit expects, so it must not yet be
+sent to firmware.
+
+## Still unknown
+
+- The exact command-offset-8 value in a native successful unlock.
+- The exact native authorization bytes at command offset 12.
+- Why the same-build host property names offset 8 as a user ID while the
+  same-build driver treats it as a 1-to-32 byte copy length.
+- The exact producer/call site that supplies the purpose-6 credential set or
+  auth token.
+
+No bit-8 command or enrolled-finger attempt was made while recovering this
+boundary. At 2026-09-03 10:31 EDT the persistent TUI was alive in standby,
+showed `ATTEMPTS 00`, had no probe child, and had created no artifact newer
+than the rejected 10:10 no-finger gate. The operator's sensor press therefore
+did not reach hardware.
+
+Primary and derived evidence is frozen in the read-only Btrfs snapshot
+`/var/lib/t2-touchid/research-artifact-snapshots/24G830-auth-bypass-boundary-20260903T142840Z`.

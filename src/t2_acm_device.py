@@ -7,9 +7,10 @@ import fcntl
 import inspect
 import os
 import struct
+from contextlib import contextmanager
 from pathlib import Path
 from collections.abc import Callable
-from typing import TypeVar, cast
+from typing import Iterator, TypeVar, cast
 
 import t2_acm_protocol as protocol
 
@@ -23,6 +24,19 @@ EXCHANGE_SIZE = struct.calcsize(EXCHANGE_FORMAT)
 
 class ACMDeviceError(RuntimeError):
     pass
+
+
+class ACMContextCleanupError(ACMDeviceError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        primary_error: BaseException | None,
+        cleanup_errors: tuple[BaseException, ...],
+    ) -> None:
+        super().__init__(message)
+        self.primary_error = primary_error
+        self.cleanup_errors = cleanup_errors
 
 
 T = TypeVar("T")
@@ -94,7 +108,7 @@ class ACMDevice:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def exchange(self, command: bytes, response_capacity: int) -> bytes:
+    def exchange(self, command: bytes | bytearray, response_capacity: int) -> bytes:
         if self.fd < 0:
             raise ACMDeviceError("ACM device is closed")
         protocol.validate_command(command)
@@ -267,15 +281,364 @@ def externalize_context(device: ACMDevice, handle: protocol.ContextHandle) -> by
     return handle.context
 
 
-def with_authorized_context(
+def set_identity_secret(
+    device: ACMDevice, handle: protocol.ContextHandle, secret: bytearray
+) -> None:
+    """Install request-10's transient type-5 data and wipe its command copy."""
+    command = protocol.build_identity_secret(handle, secret)
+    try:
+        response = device.exchange(command, 0)
+        if response:
+            raise ACMDeviceError("identity-secret command returned an unexpected body")
+    finally:
+        _zero(command)
+
+
+@contextmanager
+def identity_secret_context(
+    device: ACMDevice,
+    user_id: int,
+    secret: bytearray,
+    *,
+    tracking: bool = True,
+) -> Iterator[bytes]:
+    """Hold request-10's exact credential-bearing ACM context for one consumer."""
+    response_capacity = 21 if tracking else 17
+    response = device.exchange(
+        protocol.build_create(user_id=user_id, tracking=tracking), response_capacity
+    )
+    if len(response) < protocol.CONTEXT_SIZE:
+        raise ACMDeviceError(
+            "create response omitted the context required for mandatory cleanup"
+        )
+    cleanup_handle = protocol.ContextHandle(
+        response[: protocol.CONTEXT_SIZE], 0, tracking, False
+    )
+    primary_error: BaseException | None = None
+    stage = "create-response"
+    try:
+        handle = protocol.parse_create_response(response, tracking=tracking)
+        stage = "identity-secret"
+        set_identity_secret(device, handle, secret)
+        stage = "context-externalization"
+        external_form = externalize_context(device, handle)
+        stage = "credential-bearing-consumer"
+        yield external_form
+    except BaseException as error:
+        primary_error = error
+    try:
+        delete_response = device.exchange(protocol.build_delete(cleanup_handle), 0)
+        if delete_response:
+            raise ACMDeviceError("delete returned an unexpected response body")
+    except BaseException as cleanup_error:
+        if primary_error is not None:
+            raise ACMDeviceError(
+                f"identity provisioning failed at {stage} and mandatory context "
+                f"cleanup failed: {cleanup_error}"
+            ) from primary_error
+        raise ACMDeviceError(
+            f"identity provisioning completed but mandatory context cleanup failed: "
+            f"{cleanup_error}"
+        ) from cleanup_error
+    if primary_error is not None:
+        raise ACMDeviceError(
+            f"identity provisioning failed at {stage}; context was cleaned up"
+        ) from primary_error
+
+
+def identity_secret_lifecycle_test(
+    device: ACMDevice, user_id: int, secret: bytearray, *, tracking: bool = True
+) -> dict[str, object]:
+    """Exercise request-10's transient secret producer with mandatory cleanup."""
+    response_capacity = 21 if tracking else 17
+    response = device.exchange(
+        protocol.build_create(user_id=user_id, tracking=tracking),
+        response_capacity,
+    )
+    if len(response) < protocol.CONTEXT_SIZE:
+        raise ACMDeviceError(
+            "create response omitted the context required for mandatory cleanup"
+        )
+    cleanup_handle = protocol.ContextHandle(
+        response[: protocol.CONTEXT_SIZE], 0, tracking, False
+    )
+    primary_error: BaseException | None = None
+    stage = "create-response"
+    try:
+        handle = protocol.parse_create_response(response, tracking=tracking)
+        stage = "identity-secret-set"
+        set_identity_secret(device, handle, secret)
+        stage = "context-externalization"
+        externalize_context(device, handle)
+    except BaseException as error:
+        primary_error = error
+    try:
+        delete_response = device.exchange(protocol.build_delete(cleanup_handle), 0)
+        if delete_response:
+            raise ACMDeviceError("delete returned an unexpected response body")
+    except BaseException as cleanup_error:
+        if primary_error is not None:
+            raise ACMDeviceError(
+                f"identity-secret lifecycle failed at {stage} and mandatory "
+                f"cleanup failed: {cleanup_error}"
+            ) from primary_error
+        raise ACMDeviceError(
+            f"identity-secret lifecycle completed but mandatory cleanup failed: "
+            f"{cleanup_error}"
+        ) from cleanup_error
+    if primary_error is not None:
+        raise ACMDeviceError(
+            f"identity-secret lifecycle failed at {stage}; context was cleaned up"
+        ) from primary_error
+    return {
+        "schema_version": 1,
+        "context_create_tracking": tracking,
+        "identity_secret_type": protocol.IDENTITY_SECRET_TYPE,
+        "identity_secret_set": True,
+        "context_externalized": True,
+        "context_identifier_redacted": True,
+        "delete_succeeded": True,
+        "mutation_reconciled": True,
+        "keybag_mutation_performed": False,
+        "fingerprint_mutation_performed": False,
+    }
+
+
+@contextmanager
+def identity_authorized_context(
+    device: ACMDevice,
+    user_id: int,
+    identity_secret: bytearray,
+    identity_binder: Callable[[bytes, bytes], None],
+    *,
+    tracking: bool = True,
+    include_authorization_context: bool = False,
+) -> Iterator[
+    tuple[protocol.PolicyResult, protocol.PolicyResult, bytes]
+    | tuple[protocol.PolicyResult, protocol.PolicyResult, bytes, bytes]
+]:
+    """Authorize a distinct policy target and yield the login credential."""
+    response_capacity = 21 if tracking else 17
+    cleanup_handles: list[protocol.ContextHandle] = []
+    identity_reference = bytearray()
+    initial = final = None
+    primary_error: BaseException | None = None
+    stage = "identity-create"
+    try:
+        response = device.exchange(
+            protocol.build_create(user_id=user_id, tracking=tracking),
+            response_capacity,
+        )
+        if len(response) < protocol.CONTEXT_SIZE:
+            raise ACMDeviceError(
+                "identity create omitted the context required for mandatory cleanup"
+            )
+        cleanup_handles.append(
+            protocol.ContextHandle(
+                response[: protocol.CONTEXT_SIZE], 0, tracking, False
+            )
+        )
+        identity_handle = protocol.parse_create_response(
+            response, tracking=tracking
+        )
+        stage = "identity-secret"
+        set_identity_secret(device, identity_handle, identity_secret)
+        stage = "identity-reference-externalization"
+        identity_reference.extend(externalize_context(device, identity_handle))
+
+        stage = "authorization-create"
+        response = device.exchange(
+            protocol.build_create(user_id=user_id, tracking=tracking),
+            response_capacity,
+        )
+        if len(response) < protocol.CONTEXT_SIZE:
+            raise ACMDeviceError(
+                "authorization create omitted the context required for mandatory cleanup"
+            )
+        cleanup_handles.append(
+            protocol.ContextHandle(
+                response[: protocol.CONTEXT_SIZE], 0, tracking, False
+            )
+        )
+        authorization_handle = protocol.parse_create_response(
+            response, tracking=tracking
+        )
+        if authorization_handle.context == identity_reference:
+            raise ACMDeviceError("ACM identity and authorization references collided")
+        stage = "policy-preflight"
+        initial = protocol.parse_policy_response(
+            device.exchange(
+                protocol.build_enrollment_policy(
+                    authorization_handle, preflight=True
+                ),
+                protocol.POLICY_RESPONSE_CAPACITY,
+            )
+        )
+        if initial.satisfied or initial.requirement_type != 1:
+            raise ACMDeviceError("initial policy state is not the passcode requirement")
+        stage = "authorization-context-externalization"
+        authorization_context = externalize_context(device, authorization_handle)
+        stage = "identity-authentication"
+        identity_binder(bytes(identity_reference), authorization_context)
+        stage = "policy-final"
+        final = protocol.parse_policy_response(
+            device.exchange(
+                protocol.build_enrollment_policy(
+                    authorization_handle, preflight=False
+                ),
+                protocol.POLICY_RESPONSE_CAPACITY,
+            )
+        )
+        if not final.satisfied:
+            raise ACMDeviceError("policy 1007 remained unsatisfied after authentication")
+        stage = "authorized-consumer"
+        # AKSIdentityAuthenticate uses the second context only as its
+        # authorization output.  AKSIdentityLoginWithACMCred subsequently
+        # receives the original LACUserCredential.password.contextRef.
+        if include_authorization_context:
+            yield (
+                initial,
+                final,
+                bytes(identity_reference),
+                authorization_context,
+            )
+        else:
+            yield initial, final, bytes(identity_reference)
+    except BaseException as error:
+        primary_error = error
+    cleanup_errors: list[BaseException] = []
+    for cleanup_handle in reversed(cleanup_handles):
+        try:
+            delete_response = device.exchange(
+                protocol.build_delete(cleanup_handle), 0
+            )
+            if delete_response:
+                raise ACMDeviceError("delete returned an unexpected response body")
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+    _zero(identity_reference)
+    if cleanup_errors:
+        cause = primary_error if primary_error is not None else cleanup_errors[0]
+        raise ACMContextCleanupError(
+            f"identity authorization stopped at {stage}; mandatory cleanup of "
+            f"{len(cleanup_errors)} context(s) failed",
+            primary_error=primary_error,
+            cleanup_errors=tuple(cleanup_errors),
+        ) from cause
+    if primary_error is not None:
+        raise ACMDeviceError(
+            f"identity authorization failed at {stage}; both contexts were cleaned up"
+        ) from primary_error
+
+
+def reconcile_identity_cleanup_after_close(
+    error: ACMContextCleanupError,
+    device: ACMDevice,
+    *,
+    device_factory: Callable[[], ACMDevice] = ACMDevice,
+) -> None:
+    """Accept cleanup-only failure only after bounded kernel-close proof."""
+    if not isinstance(error, ACMContextCleanupError) or error.primary_error is not None:
+        raise error
+    device.close()
+    with device_factory():
+        pass
+
+
+def raise_primary_after_identity_cleanup_close(
+    error: ACMContextCleanupError,
+    device: ACMDevice,
+    *,
+    device_factory: Callable[[], ACMDevice] = ACMDevice,
+) -> None:
+    """Prove bounded close cleanup, then preserve the consumer's failure."""
+    if not isinstance(error, ACMContextCleanupError) or error.primary_error is None:
+        raise error
+    primary = error.primary_error
+    device.close()
+    with device_factory():
+        pass
+    raise primary
+
+
+@contextmanager
+def identity_verification_only_context(
+    device: ACMDevice,
+    user_id: int,
+    identity_secret: bytearray,
+    identity_binder: Callable[[bytes, bytes], None],
+    *,
+    tracking: bool = True,
+) -> Iterator[tuple[protocol.PolicyResult, protocol.PolicyResult, bytes]]:
+    """Verify one live identity input without creating an authorization target."""
+    response_capacity = 21 if tracking else 17
+    cleanup_handle: protocol.ContextHandle | None = None
+    identity_reference = bytearray()
+    primary_error: BaseException | None = None
+    stage = "identity-create"
+    try:
+        response = device.exchange(
+            protocol.build_create(user_id=user_id, tracking=tracking),
+            response_capacity,
+        )
+        if len(response) < protocol.CONTEXT_SIZE:
+            raise ACMDeviceError(
+                "identity create omitted the context required for mandatory cleanup"
+            )
+        cleanup_handle = protocol.ContextHandle(
+            response[: protocol.CONTEXT_SIZE], 0, tracking, False
+        )
+        identity_handle = protocol.parse_create_response(
+            response, tracking=tracking
+        )
+        stage = "identity-secret"
+        set_identity_secret(device, identity_handle, identity_secret)
+        stage = "identity-reference-externalization"
+        identity_reference.extend(externalize_context(device, identity_handle))
+        stage = "identity-verification-only"
+        identity_binder(bytes(identity_reference), b"")
+        stage = "verification-complete"
+        raise ACMDeviceError(
+            "identity verification completed; authorization target intentionally omitted"
+        )
+        if False:  # pragma: no cover - context-manager generator marker
+            yield None, None, b""  # type: ignore[misc]
+    except BaseException as error:
+        primary_error = error
+    cleanup_error: BaseException | None = None
+    if cleanup_handle is not None:
+        try:
+            delete_response = device.exchange(protocol.build_delete(cleanup_handle), 0)
+            if delete_response:
+                raise ACMDeviceError("delete returned an unexpected response body")
+        except BaseException as error:
+            cleanup_error = error
+    _zero(identity_reference)
+    if cleanup_error is not None:
+        raise ACMDeviceError(
+            f"identity verification stopped at {stage}; mandatory cleanup failed"
+        ) from primary_error
+    if primary_error is not None:
+        raise ACMDeviceError(
+            f"identity verification stopped at {stage}; context was cleaned up"
+        ) from primary_error
+
+
+@contextmanager
+def authorized_context(
     device: ACMDevice,
     user_id: int,
     password_binder: Callable[[bytes], None],
-    consumer: Callable[[bytes], T],
     *,
     tracking: bool = True,
-) -> tuple[protocol.PolicyResult, protocol.PolicyResult, T]:
-    """Run one trusted consumer while a fresh policy-1007 context is live."""
+    identity_secret: bytearray | None = None,
+) -> Iterator[tuple[protocol.PolicyResult, protocol.PolicyResult, bytes]]:
+    """Hold one password-authorized policy-1007 context for a synchronous scope.
+
+    The optional ``identity_secret`` form is retained only for compatibility
+    diagnostics. Native identity activation uses ``identity_authorized_context``
+    so Apple's input and output ACM references remain distinct.
+    """
     response_capacity = 21 if tracking else 17
     response = device.exchange(
         protocol.build_create(user_id=user_id, tracking=tracking),
@@ -289,8 +652,6 @@ def with_authorized_context(
         response[: protocol.CONTEXT_SIZE], 0, tracking, False
     )
     initial = final = None
-    missing = object()
-    consumer_result: object = missing
     primary_error: BaseException | None = None
     stage = "create-response"
     try:
@@ -304,6 +665,9 @@ def with_authorized_context(
         )
         if initial.satisfied or initial.requirement_type != 1:
             raise ACMDeviceError("initial policy state is not the passcode requirement")
+        if identity_secret is not None:
+            stage = "identity-secret"
+            set_identity_secret(device, handle, identity_secret)
         stage = "context-externalization"
         external_form = externalize_context(device, handle)
         stage = "password-binding"
@@ -318,13 +682,7 @@ def with_authorized_context(
         if not final.satisfied:
             raise ACMDeviceError("policy 1007 remained unsatisfied after password binding")
         stage = "authorized-consumer"
-        candidate = consumer(external_form)
-        if inspect.isawaitable(candidate):
-            close = getattr(candidate, "close", None)
-            if callable(close):
-                close()
-            raise ACMDeviceError("authorized consumer must complete synchronously")
-        consumer_result = candidate
+        yield initial, final, external_form
     except BaseException as error:
         primary_error = error
     try:
@@ -344,6 +702,29 @@ def with_authorized_context(
         raise ACMDeviceError(
             f"authorized operation failed at {stage}; context was cleaned up"
         ) from primary_error
+
+
+def with_authorized_context(
+    device: ACMDevice,
+    user_id: int,
+    password_binder: Callable[[bytes], None],
+    consumer: Callable[[bytes], T],
+    *,
+    tracking: bool = True,
+) -> tuple[protocol.PolicyResult, protocol.PolicyResult, T]:
+    """Run one trusted consumer while a fresh policy-1007 context is live."""
+    missing = object()
+    consumer_result: object = missing
+    with authorized_context(
+        device, user_id, password_binder, tracking=tracking
+    ) as (initial, final, external_form):
+        candidate = consumer(external_form)
+        if inspect.isawaitable(candidate):
+            close = getattr(candidate, "close", None)
+            if callable(close):
+                close()
+            raise ACMDeviceError("authorized consumer must complete synchronously")
+        consumer_result = candidate
     assert initial is not None and final is not None
     assert consumer_result is not missing
     return initial, final, cast(T, consumer_result)

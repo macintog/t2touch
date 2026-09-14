@@ -10,6 +10,7 @@ services, wire formats, and persistent state behind that result.
 | [Identity and authorization](identity-and-authorization.md) | Creating a keybag, preserving its activation input, and authorizing enrollment. |
 | [Boot and persistent storage](boot-and-storage.md) | EFI startup, xART, gigalocker backing, and embedded NVMe namespaces. |
 | [Fingerprint lifecycle](fingerprint-lifecycle.md) | First enrollment, Catacomb construction, restore, matching, and deletion. |
+| [Integration follow-up](integration-followup.md) | Subsequent installed results, mutable identity sets, stable names, and interrupted-operation recovery. |
 | [Artifacts and method](artifacts-and-method.md) | Firmware identities, analysis tools, and ways to reproduce the findings. |
 | [Findings index](findings.json) | Machine-readable entry points into the same explanations. |
 
@@ -28,8 +29,21 @@ survivor after reboot. A continuous second-finger session checked for a duplicat
 completed enrollment, saved the resulting state, reconciled two identities, and
 matched the newly added finger.
 
-The Mac continues to run Apple's bridgeOS and SEP firmware. Desktop authentication
-through fprintd/PAM, packaging, and broader hardware coverage remain integration work.
+The completed installed greenfield work exercised standard fprintd first and
+additional enrollment, positive and negative verification, selected deletion,
+durable neutral naming, and automatic post-reboot reconciliation. Final
+inventory was `finger-1`, `finger-2`, and `finger-4` under the historical
+allocator. The product now exposes five stable slots, never renumbers retained
+identities, and fills the lowest vacancy. Unattended service startup, real
+sudo/PAM fingerprint authentication, and independent password fallback with
+fprintd unavailable were also demonstrated. The
+[follow-up](integration-followup.md) separates those results from source-only
+repairs and explains the client boundaries used for the observations.
+
+The Mac continues to run Apple's bridgeOS and SEP firmware. Release packaging,
+multi-user operation, unsupported deletion modes, deep-sleep recovery, and
+broader hardware coverage remain separate work at this review's evidence
+boundary.
 
 ## Reuse
 

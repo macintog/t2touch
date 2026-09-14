@@ -1,0 +1,73 @@
+diff --git a/ApfsLib/ApfsContainer.cpp b/ApfsLib/ApfsContainer.cpp
+index 61103d5..bf0e88b 100644
+--- a/ApfsLib/ApfsContainer.cpp
++++ b/ApfsLib/ApfsContainer.cpp
+@@ -51,7 +51,7 @@ ApfsContainer::~ApfsContainer()
+ {
+ }
+ 
+-bool ApfsContainer::Init(xid_t req_xid)
++bool ApfsContainer::Init(xid_t req_xid, bool metadata_only)
+ {
+ 	std::vector<uint8_t> blk;
+ 
+@@ -186,8 +186,9 @@ bool ApfsContainer::Init(xid_t req_xid)
+ 	{
+ 		if (!m_keymgr.Init(m_nx.nx_keylocker.pr_start_addr, m_nx.nx_keylocker.pr_block_count, m_nx.nx_uuid))
+ 		{
+-			std::cerr << "Initialization of KeyManager failed." << std::endl;
+-			return false;
++			if (!metadata_only)
++				return false;
++			std::cerr << "Initialization of KeyManager failed; metadata-only access continues." << std::endl;
+ 		}
+ 	}
+ 
+diff --git a/ApfsLib/ApfsContainer.h b/ApfsLib/ApfsContainer.h
+index 49f12b8..1328f92 100644
+--- a/ApfsLib/ApfsContainer.h
++++ b/ApfsLib/ApfsContainer.h
+@@ -39,7 +39,7 @@ public:
+ 	ApfsContainer(Device *disk_main, uint64_t main_start, uint64_t main_len, Device *disk_tier2 = 0, uint64_t tier2_start = 0, uint64_t tier2_len = 0);
+ 	~ApfsContainer();
+ 
+-	bool Init(xid_t req_xid = 0);
++	bool Init(xid_t req_xid = 0, bool metadata_only = false);
+ 
+ 	ApfsVolume *GetVolume(unsigned int fsid, const std::string &passphrase = std::string(), xid_t snap_xid = 0);
+ 	bool GetVolumeInfo(unsigned int fsid, apfs_superblock_t &apsb);
+diff --git a/ApfsLib/PList.h b/ApfsLib/PList.h
+index 645df2d..1d7fdf0 100644
+--- a/ApfsLib/PList.h
++++ b/ApfsLib/PList.h
+@@ -3,6 +3,7 @@
+ #include <vector>
+ #include <map>
+ #include <memory>
++#include <cstdint>
+ 
+ enum PLType
+ {
+diff --git a/ApfsUtil/ApfsUtil.cpp b/ApfsUtil/ApfsUtil.cpp
+index 779f265..00d9554 100644
+--- a/ApfsUtil/ApfsUtil.cpp
++++ b/ApfsUtil/ApfsUtil.cpp
+@@ -92,7 +92,7 @@ int main(int argc, char *argv[])
+ 
+ 		container = new ApfsContainer(device, offset, size);
+ 
+-		if (container->Init()) {
++		if (container->Init(0, true)) {
+ 			// printf("Listing volumes:\n");
+ 			for (int k = 0; k < NX_MAX_FILE_SYSTEMS; k++) {
+ 				if (!container->GetVolumeInfo(k, apsb))
+@@ -100,6 +100,9 @@ int main(int argc, char *argv[])
+ 				printf("Volume %d ", k);
+ 				print_apfs_uuid(apsb.apfs_vol_uuid);
+ 				printf("\n");
++				printf("Volume Group:       ");
++				print_apfs_uuid(apsb.apfs_volume_group_id);
++				printf("\n");
+ 				printf("---------------------------------------------\n");
+ 
+ 				printf("Role:               ");

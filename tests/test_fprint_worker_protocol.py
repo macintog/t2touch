@@ -23,7 +23,7 @@ import t2_polkit_grant as polkit
 def request() -> protocol.StartRequest:
     subject = polkit.read_process_subject(os.getpid(), os.getuid())
     return protocol.StartRequest(
-        "left-thumb",
+        "finger-2",
         subject,
         account.AccountEvidence(subject.uid, "a" * 64),
         ipc.SessionEvidence(
@@ -153,10 +153,10 @@ class FprintWorkerProtocolTests(unittest.TestCase):
         updates = (
             runtime.EnrollmentUpdate(None, False, False, True),
             runtime.EnrollmentUpdate(
-                "enroll-stage-passed", False, True, False
+                "enroll-stage-passed", False, True, False, 23
             ),
             runtime.EnrollmentUpdate(
-                "enroll-completed", True, False, False
+                "enroll-completed", True, False, False, 100
             ),
             runtime.EnrollmentUpdate(
                 "enroll-duplicate", True, False, False
@@ -176,10 +176,25 @@ class FprintWorkerProtocolTests(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, encoded.lower())
 
+        legacy = (
+            b'{"done":false,"finger_needed":true,"finger_present":false,'
+            b'"message":"update","schema_version":1,"status":null}'
+        )
+        self.assertEqual(
+            protocol.decode_update(legacy),
+            runtime.EnrollmentUpdate(None, False, False, True),
+        )
+
     def test_updates_reject_contradictory_or_unknown_state(self):
         invalid = (
             runtime.EnrollmentUpdate("made-up", False, False, True),
             runtime.EnrollmentUpdate("enroll-completed", False, False, False),
+            runtime.EnrollmentUpdate(
+                "enroll-stage-passed", False, False, True
+            ),
+            runtime.EnrollmentUpdate(
+                "enroll-completed", True, False, False, 99
+            ),
             runtime.EnrollmentUpdate(None, True, False, False),
             runtime.EnrollmentUpdate(None, False, True, True),
             runtime.EnrollmentUpdate("enroll-failed", True, True, False),

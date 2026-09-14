@@ -19,7 +19,7 @@ class IdentityDeleteTests(unittest.TestCase):
         one = codec.decode_user_catacomb(fixture(), 501)
         second_uuid = str(uuid.UUID(int=2))
         self.local = codec.decode_user_catacomb(
-            one.add(identity_uuid=second_uuid, entity=1, name="Finger 2"), 501
+            one.add(identity_uuid=second_uuid, entity=1, name="finger-2"), 501
         )
         self.live = live_for(self.local)
 
@@ -31,17 +31,25 @@ class IdentityDeleteTests(unittest.TestCase):
         self.assertEqual(value.identity_uuid, str(uuid.UUID(int=2)))
         self.assertEqual(
             value.request,
-            uuid.UUID(int=2).bytes + struct.pack("<I", 501),
+            struct.pack("<I", 501) + uuid.UUID(int=2).bytes,
         )
         self.assertNotIn(value.identity_uuid, repr(value))
         self.assertNotIn(value.request.hex(), repr(value))
 
-    def test_plan_rejects_stale_slot_or_last_identity(self):
+    def test_plan_rejects_stale_slot_and_plans_last_identity_as_empty(self):
         with self.assertRaises(delete.IdentityDeleteError):
             delete.plan(self.local, self.live, slot=3)
         one = codec.decode_user_catacomb(fixture(), 501)
-        with self.assertRaisesRegex(delete.IdentityDeleteError, "zero-identity"):
-            delete.plan(one, live_for(one), slot=1)
+        value = delete.plan(one, live_for(one), slot=1)
+        empty = codec.decode_user_catacomb(value.archive, 501)
+        self.assertEqual(empty.identities, ())
+        rebuilt = delete.recovery_plan(
+            empty,
+            identity_uuid=value.identity_uuid,
+            entity=value.entity,
+            expected_survivor_sha256=value.survivor_snapshot_sha256,
+        )
+        self.assertEqual(rebuilt.archive, value.archive)
 
     def test_plan_target_rebuilds_the_same_journal_bound_plan(self):
         selected = delete.plan(self.local, self.live, slot=2)
@@ -52,43 +60,43 @@ class IdentityDeleteTests(unittest.TestCase):
         renamed = codec.decode_user_catacomb(
             self.local.rename(
                 self.local.identities[0].uuid,
-                "right-index-finger",
+                "finger-1",
             ),
             501,
         )
         renamed = codec.decode_user_catacomb(
             renamed.rename(
                 renamed.identities[1].uuid,
-                "left-thumb",
+                "finger-2",
             ),
             501,
         )
         value = delete.plan_named(
             renamed,
             live_for(renamed),
-            finger_name="left-thumb",
+            finger_name="finger-2",
         )
         self.assertEqual(value.identity_uuid, str(uuid.UUID(int=2)))
-        self.assertEqual(value.name, "left-thumb")
+        self.assertEqual(value.name, "finger-2")
 
     def test_plan_named_rejects_noncanonical_duplicate_or_stale_authority(self):
         renamed = codec.decode_user_catacomb(
             self.local.rename(
                 self.local.identities[0].uuid,
-                "right-index-finger",
+                "finger-1",
             ),
             501,
         )
         renamed = codec.decode_user_catacomb(
             renamed.rename(
                 renamed.identities[1].uuid,
-                "left-thumb",
+                "finger-2",
             ),
             501,
         )
         good_live = live_for(renamed)
         selected = delete.plan_named(
-            renamed, good_live, finger_name="left-thumb"
+            renamed, good_live, finger_name="finger-2"
         )
         self.assertEqual(selected.identity_uuid, str(uuid.UUID(int=2)))
         for name in ("any", "Finger 2", "right-thumb"):
@@ -99,7 +107,7 @@ class IdentityDeleteTests(unittest.TestCase):
         stale = live_for(renamed)
         stale["per_user_identity_records"].pop()
         with self.assertRaises(delete.IdentityDeleteError):
-            delete.plan_named(renamed, stale, finger_name="left-thumb")
+            delete.plan_named(renamed, stale, finger_name="finger-2")
 
     def test_recovery_plan_rebinds_an_already_committed_survivor_archive(self):
         selected = delete.plan(self.local, self.live, slot=2)
