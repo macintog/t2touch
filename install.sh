@@ -50,6 +50,7 @@ check_applesmc_prerequisite || exit $?
 target_dir=/opt/t2-touchid
 target_user=$SUDO_USER
 target_uid=$(id -u -- "$target_user")
+target_gid=$(id -g -- "$target_user")
 target_home=$(getent passwd "$target_user" | cut -d: -f6)
 if [[ ! $target_uid =~ ^[0-9]+$ || -z $target_home || ! -d $target_home ]]; then
   echo "Could not determine the home directory for $target_user." >&2
@@ -438,10 +439,10 @@ chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf
 # Persist both the selected applesmc module and its boot-state options. This is
 # required even when the running module was already capable: uninstall may have
 # rebuilt the image without this product-owned configuration.
-mkinitcpio -P
+rebuild_boot_images
 
-install -d -o "$target_user" -g "$target_user" -m 0755 "$target_home/.config/systemd/user"
-install -o "$target_user" -g "$target_user" -m 0644 \
+install -d -o "$target_user" -g "$target_gid" -m 0755 "$target_home/.config/systemd/user"
+install -o "$target_user" -g "$target_gid" -m 0644 \
   "$source_dir/systemd/user/"*.service "$target_home/.config/systemd/user/"
 
 install -d -o root -g root -m 0755 /etc/dbus-1/system.d

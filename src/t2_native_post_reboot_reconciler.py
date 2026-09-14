@@ -24,6 +24,7 @@ import t2_user_mapping
 ROOT_UID = 0
 SOURCE_ROOT = Path(__file__).resolve().parent
 MUTATION_ROOT = t2_post_reboot_reconciler.MUTATION_ROOT
+CATACOMB_ROOT = Path("/var/lib/t2-touchid/catacomb")
 
 
 class NativePostRebootReconcilerError(RuntimeError):
@@ -264,6 +265,19 @@ def reconcile_external_deletion_if_needed(
         raise NativePostRebootReconcilerError(
             "native external reconciliation requires one enabled mapping"
         )
+    user_root = t2_user_authority.USERS_ROOT / str(enabled[0].linux_uid)
+    # A newly activated account has no enrollment authority or Catacomb yet.
+    # External deletion reconciliation requires an earlier enrollment; making
+    # it a prerequisite here prevents fprintd from accepting the first one.
+    # Only the empty initial state is a no-op. Retained mutation/Catacomb
+    # evidence or an existing (even dangling) manifest still needs validation.
+    if (
+        not os.path.lexists(user_root / "authority.json")
+        and not any(MUTATION_ROOT.iterdir())
+        and not any(CATACOMB_ROOT.iterdir())
+        and not any(user_root.glob("*.jsonl"))
+    ):
+        return NativePostRebootReconcilerResult("no-pending-mutation", False)
     completed = runner(
         [
             sys.executable,

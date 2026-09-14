@@ -3,6 +3,16 @@
 # Sourced by install.sh; functions are also exercised by hardware-free fixtures.
 # shellcheck disable=SC2154 # source_dir is supplied by the sourcing caller.
 
+rebuild_boot_images() {
+  # Omarchy's mkinitcpio wrapper prompts to redirect here. Use the supported
+  # UKI generator directly instead of feeding answers into an interactive hook.
+  if command -v limine-mkinitcpio >/dev/null 2>&1; then
+    limine-mkinitcpio
+  else
+    mkinitcpio -P
+  fi
+}
+
 stage_applesmc_prerequisite() {
   local package_name=applesmc-t2touch
   local package_version=0.1.0
@@ -57,7 +67,7 @@ stage_applesmc_prerequisite() {
     echo "The staged applesmc replacement did not become the selected on-disk module." >&2
     return 1
   fi
-  mkinitcpio -P || return 1
+  rebuild_boot_images || return 1
 }
 
 write_applesmc_boot_options() {
@@ -70,7 +80,7 @@ EOF
 
 enable_applesmc_next_boot() {
   write_applesmc_boot_options || return 1
-  mkinitcpio -P || return 1
+  rebuild_boot_images || return 1
 }
 
 # Read the result attribute, never the module's enable flag. APP0001 is

@@ -12,6 +12,32 @@ HELPER = ROOT / "tools/installer-kernel.sh"
 
 
 class KernelPrerequisiteTests(unittest.TestCase):
+    def test_boot_rebuild_selects_limine_and_propagates_failure(self):
+        for available, expected in ((True, "limine"), (False, "mkinitcpio -P")):
+            for status in (0, 7):
+                with self.subTest(limine=available, status=status):
+                    result = subprocess.run(
+                        ["bash", "-c", '''
+set -euo pipefail
+source "$1"
+command() {
+  if [[ $* == '-v limine-mkinitcpio' ]]; then
+    [[ $LIMINE_AVAILABLE == yes ]]
+  else
+    builtin command "$@"
+  fi
+}
+limine-mkinitcpio() { echo limine; return "$BUILD_STATUS"; }
+mkinitcpio() { echo "mkinitcpio $*"; return "$BUILD_STATUS"; }
+rebuild_boot_images
+''', "fixture", str(HELPER)],
+                        env={**os.environ, "LIMINE_AVAILABLE": "yes" if available else "no",
+                             "BUILD_STATUS": str(status)},
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(result.stdout.strip(), expected)
+
     def run_gate(self, result, disk=True, fail_stage=False):
         return subprocess.run(
             ["bash", "-c", '''

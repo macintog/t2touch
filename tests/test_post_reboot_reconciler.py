@@ -87,6 +87,49 @@ class Live:
 
 
 class PostRebootReconcilerTests(unittest.TestCase):
+    def test_external_reconciliation_skips_only_empty_initial_state(self):
+        mapping_set = SimpleNamespace(
+            mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)
+        )
+        for retained in (None, "manifest", "dangling-manifest", "mutation", "catacomb", "journal"):
+            with self.subTest(retained=retained), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                users = root / "users"
+                user = users / "1000"
+                mutations = root / "mutations"
+                catacomb = root / "catacomb"
+                for directory in (user, mutations, catacomb):
+                    directory.mkdir(parents=True)
+                if retained == "manifest":
+                    (user / "authority.json").write_text("invalid")
+                elif retained == "dangling-manifest":
+                    (user / "authority.json").symlink_to(user / "absent")
+                elif retained == "mutation":
+                    (mutations / "retained.jsonl").touch()
+                elif retained == "catacomb":
+                    (catacomb / "prepare").mkdir()
+                elif retained == "journal":
+                    (user / "retained.jsonl").touch()
+                runner = mock.Mock(return_value=SimpleNamespace(returncode=17))
+                with (
+                    mock.patch.object(native_reconciler.t2_user_mapping, "load", return_value=mapping_set),
+                    mock.patch.object(native_reconciler.t2_user_authority, "USERS_ROOT", users),
+                    mock.patch.object(native_reconciler, "MUTATION_ROOT", mutations),
+                    mock.patch.object(native_reconciler, "CATACOMB_ROOT", catacomb),
+                ):
+                    if retained is None:
+                        result = native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+                        self.assertEqual(result.state, "no-pending-mutation")
+                        self.assertFalse(result.journal_updated)
+                        runner.assert_not_called()
+                    else:
+                        with self.assertRaises(post_reboot_diagnostic.PostRebootStageError) as caught:
+                            native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+                        failure = caught.exception.redacted()
+                        self.assertEqual(failure["stage"], "external-deletion-reconciliation")
+                        self.assertEqual(failure["child_exit_status"], 17)
+                        runner.assert_called_once()
+
     def test_failure_diagnostic_is_bounded_and_redacted(self):
         private = OSError(errno.EIO, "/private/identifier/payload")
         failure = post_reboot_diagnostic.staged(
@@ -709,8 +752,9 @@ class PostRebootReconcilerTests(unittest.TestCase):
         mapping = SimpleNamespace(
             mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)
         )
-        with mock.patch.object(
-            native_reconciler.t2_user_mapping, "load", return_value=mapping
+        with (
+            mock.patch.object(native_reconciler.t2_user_mapping, "load", return_value=mapping),
+            mock.patch.object(native_reconciler.os.path, "lexists", return_value=True),
         ):
             result = native_reconciler.reconcile_external_deletion_if_needed(
                 runner=external_runner

@@ -10,6 +10,8 @@ fi
 [[ $# -eq 0 ]] || exit 2
 
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
+# shellcheck source=tools/installer-kernel.sh
+source "$source_dir/tools/installer-kernel.sh"
 target_user=
 target_home=
 target_uid=
@@ -100,8 +102,8 @@ systemctl reload dbus.service 2>/dev/null || true
 if command -v depmod >/dev/null 2>&1; then
   depmod -a "$(uname -r)"
 fi
-if command -v mkinitcpio >/dev/null 2>&1; then
-  mkinitcpio -P
+if command -v limine-mkinitcpio >/dev/null 2>&1 || command -v mkinitcpio >/dev/null 2>&1; then
+  rebuild_boot_images
 fi
 
 echo "Removed installed files. Preserved config, credentials, and biometric data."
