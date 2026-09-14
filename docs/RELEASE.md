@@ -23,7 +23,7 @@
 ## Release validation
 
 - [x] Targeted product tests pass (130 focused deletion-path tests).
-- [x] Full Python test suite passes (1,172 tests, one intentional skip).
+- [x] Full Python test suite passes (1,173 tests, one intentional skip).
 - [x] ShellCheck passes installed shell scripts.
 - [x] Userspace tools and the DKMS module build without warnings.
 - [x] Privacy checks find no private biometric identifiers, keybags, credentials,
@@ -39,6 +39,24 @@ publisher. The remaining release gate is to repeat the exact public quick start
 from a clean, fully updated supported Omarchy volume. This is an acceptance
 gate, not a reason to weaken the live-driver check or add manual service
 sequencing.
+
+## Updated reference-machine acceptance — 2026-09-14
+
+After updating to Omarchy `4.0.3-1`, the exact documented
+`./install-omarchy.sh` entry point completed with exit status 0 on the
+`MacBookPro16,1` reference system. It required no reboot, module unload, PCI
+unbind, manual service sequencing, password entry, or fingerprint operation.
+The installed daemon and product CLI matched the candidate source byte for
+byte; the doctor passed every check; fprintd reported an enrollable empty
+inventory; and the mutation registry reported no pending operation.
+
+The included applesmc source applies to the current public
+`linux-t2 7.2.4.arch1-2` package source and builds against the reference
+`7.1.8.arch1-3` headers. An isolated DKMS add/build/install produced the
+expected `updates/dkms/applesmc.ko` with all three typed boot-state parameters,
+and an isolated DKMS removal removed that module while preserving source. The
+reference system already boots a capable applesmc, so this run did not replace
+its live driver or claim the still-pending clean-volume first activation.
 
 ## Publication
 
