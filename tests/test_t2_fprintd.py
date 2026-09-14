@@ -905,10 +905,95 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await enroll_start(device, "right-index-finger")
 
         self.assertEqual(
-            client.start_arguments, ("right-index-finger", caller, evidence)
+            client.start_arguments, ("finger-1", caller, evidence)
         )
         await MODULE.FprintDevice.EnrollStop.__wrapped__(device)
         await MODULE.FprintDevice.Release.__wrapped__(device)
+
+    async def test_legacy_enrollment_reaches_real_worker_client(self):
+        client = MODULE.t2_fprint_worker_client.EnrollmentWorkerClient()
+        device = make_device(enrollment_client=client)
+        await claim(device)
+        # Kernel identity collection is tested separately on Linux. Keep the
+        # actual facade -> worker validation boundary in this portable test.
+        caller = mock.Mock(spec=MODULE.t2_dbus_identity.PinnedDBusCaller)
+        caller.sender = ":1.100"
+        caller.subject = mock.Mock(uid=1000)
+        device.claimed_caller = caller
+        object.__setattr__(device.claimed_evidence, "account", mock.Mock(linux_uid=1000))
+        with mock.patch.object(client, "_supervise", new_callable=AsyncMock) as run:
+            await enroll_start(device, "right-index-finger")
+            await client.task
+            self.assertEqual(run.call_args.args[0], "finger-1")
+            await MODULE.FprintDevice.Release.__wrapped__(device)
+
+    async def test_stop_calls_rearm_idle_claim_expiry(self):
+        for operation in ("verify", "enroll", "idle-verify", "idle-enroll"):
+            with self.subTest(operation=operation), mock.patch.object(
+                MODULE, "UNSTARTED_CLAIM_SECONDS", 0.01
+            ):
+                client = FakeEnrollmentClient()
+                device = make_device(enrollment_client=client)
+                await claim(device)
+                if operation == "verify":
+                    device.VerifyFingerSelected = lambda _: None
+                    device.VerifyFingerMatched = lambda _: None
+                    device.VerifyStatus = lambda *_: None
+                    await verify_start(device, "any")
+                    await device.verify_task
+                elif operation == "enroll":
+                    await enroll_start(device, "finger-1")
+                stop = (
+                    MODULE.FprintDevice.VerifyStop.__wrapped__
+                    if operation.endswith("verify")
+                    else MODULE.FprintDevice.EnrollStop.__wrapped__
+                )
+                if operation.startswith("idle-"):
+                    with self.assertRaises(MODULE.DBusError):
+                        await stop(device)
+                else:
+                    await stop(device)
+                self.assertIsNotNone(device.claim_expiry_task)
+                await asyncio.sleep(0.03)
+                self.assertIsNone(device.claimed_user)
+                # Another client can now acquire the device.
+                await claim(device)
+                await MODULE.FprintDevice.Release.__wrapped__(device)
+
+    async def test_terminal_update_during_stop_does_not_lose_idle_expiry(self):
+        client = FakeEnrollmentClient()
+        original_stop = client.stop
+        async def stop_with_terminal():
+            client.emit(MODULE.t2_fprint_enrollment_runtime.EnrollmentUpdate(
+                "enroll-failed", True, False, False
+            ))
+            return await original_stop()
+        client.stop = stop_with_terminal
+        device = make_device(enrollment_client=client)
+        device.EnrollStatus = lambda *_: None
+        with mock.patch.object(MODULE, "UNSTARTED_CLAIM_SECONDS", 0.01):
+            await claim(device)
+            await enroll_start(device, "finger-1")
+            await MODULE.FprintDevice.EnrollStop.__wrapped__(device)
+            await asyncio.sleep(0.03)
+            self.assertIsNone(device.claimed_user)
+
+    async def test_wrong_stop_preserves_completed_other_operation_expiry(self):
+        client = FakeEnrollmentClient()
+        device = make_device(enrollment_client=client)
+        device.EnrollStatus = lambda *_: None
+        with mock.patch.object(MODULE, "COMPLETED_CLAIM_SECONDS", 0.01):
+            await claim(device)
+            await enroll_start(device, "finger-1")
+            client.emit(MODULE.t2_fprint_enrollment_runtime.EnrollmentUpdate(
+                "enroll-completed", True, False, False, 100
+            ))
+            timer = device.claim_expiry_task
+            with self.assertRaises(MODULE.DBusError):
+                await MODULE.FprintDevice.VerifyStop.__wrapped__(device)
+            self.assertIs(device.claim_expiry_task, timer)
+            await asyncio.sleep(0.03)
+            self.assertIsNone(device.claimed_user)
 
     async def test_enrollment_refuses_malformed_projection(self):
         backend = FakeBackend()
