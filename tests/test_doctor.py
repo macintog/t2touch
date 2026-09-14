@@ -33,6 +33,24 @@ class DoctorTests(unittest.TestCase):
         with mock.patch.object(Path, "stat", return_value=info):
             self.assertFalse(doctor.private_regular_file(Path("ignored")))
 
+    def test_configuration_rejects_example_placeholders(self):
+        config = {
+            "T2_TOUCHID_USER": "test-user",
+            "T2_TOUCHID_HOST": "fe80::replace-with-the-t2-link-local-address",
+            "T2_TOUCHID_INTERFACE": "test0",
+            "T2_TOUCHID_PROJECT_DIR": "/opt/t2-touchid",
+        }
+        self.assertFalse(doctor.configuration_is_complete(config))
+
+    def test_configuration_accepts_link_local_ipv6(self):
+        config = {
+            "T2_TOUCHID_USER": "test-user",
+            "T2_TOUCHID_HOST": "fe80::1",
+            "T2_TOUCHID_INTERFACE": "test0",
+            "T2_TOUCHID_PROJECT_DIR": "/opt/t2-touchid",
+        }
+        self.assertTrue(doctor.configuration_is_complete(config))
+
     def test_service_check_accepts_active_success(self):
         completed = mock.Mock(
             returncode=0,

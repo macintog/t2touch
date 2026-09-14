@@ -24,6 +24,41 @@ from tests.test_identity_inventory import live_for
 
 
 class IdentityDeleteReconciliationTests(unittest.TestCase):
+    def test_clean_final_delete_keeps_catacomb_absent(self):
+        catacomb = {
+            "present": False,
+            "user_states": [
+                {
+                    "kind": "master",
+                    "user_id": 0xFFFFFFFF,
+                    "state": 3,
+                    "needs_save": False,
+                },
+                {
+                    "kind": "user",
+                    "user_id": 501,
+                    "state": 3,
+                    "needs_save": False,
+                },
+            ],
+        }
+        self.assertTrue(
+            reconciliation._clean_catacomb_after_delete(
+                catacomb,
+                catacomb["user_states"],
+                apple_user_id=501,
+                identity_count=0,
+            )
+        )
+        self.assertFalse(
+            reconciliation._clean_catacomb_after_delete(
+                catacomb,
+                catacomb["user_states"],
+                apple_user_id=501,
+                identity_count=1,
+            )
+        )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "delete.jsonl"
@@ -55,13 +90,17 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
                 {"user_id": item.user_id, "uuid": item.uuid, "entity": item.entity}
                 for item in self.after.identities
             ],
-            "master_enrollment_count": self.value["master_enrollment_count"],
+            "master_enrollment_count": self.value["master_enrollment_count"] - 1,
             "host_components": copy.deepcopy(self.value["host_components"]),
         }
         next(
             item for item in self.host["host_components"]
             if item["name"] == "user_000001f5.cat"
         )["sha256"] = "7" * 64
+        next(
+            item for item in self.host["host_components"]
+            if item["name"] == "master.cat"
+        )["sha256"] = "8" * 64
         self.live = live_for(self.after)
         self.live.update(
             {
@@ -108,7 +147,7 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
                 "identity_uuid": target.identity_uuid,
                 "request_sha256": hashlib.sha256(target.request).hexdigest(),
                 "command": 0x0D,
-                "protocol_version": 0,
+                "protocol_version": 1,
             },
         )
         self.append(
@@ -133,29 +172,80 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
                 "target_absent": True,
             },
         )
-        name = "user_000001f5.cat"
-        descriptor_hash = hashlib.sha256(
-            t2_catacomb_protocol.CatacombComponent.user(501).descriptor
-        ).hexdigest()
-        reference = {
-            "connection_generation": self.value["connection_generation"],
-            "batch_index": 0,
-            "component_index": 0,
-            "name": name,
-            "descriptor_sha256": descriptor_hash,
-        }
-        self.append("CATACOMB_PERSISTENCE_PLAN", {"connection_generation": self.value["connection_generation"], "batches": [[{"name": name, "descriptor_sha256": descriptor_hash}]]})
-        self.append("CATACOMB_PREPARE_INTENT", reference)
-        self.append("CATACOMB_PREPARED", {**reference, "status": 0, "expected_blob_length": 32})
-        self.append("CATACOMB_COMPLETE_INTENT", reference)
-        self.append("CATACOMB_SECURE_BLOB_CAPTURED", {**reference, "status": 0, "blob_length": 32, "secure_blob_sha256": "6" * 64})
-        self.append("CATACOMB_HOST_STAGED", {**reference, "secure_blob_sha256": "6" * 64, "final_file_sha256": "7" * 64})
-        snapshot = hashlib.sha256(mutation.canonical([{"name": name, "final_file_sha256": "7" * 64}])).hexdigest()
+        components = [
+            (
+                "user_000001f5.cat",
+                t2_catacomb_protocol.CatacombComponent.user(501).descriptor,
+                "6" * 64,
+                "7" * 64,
+            ),
+            (
+                "master.cat",
+                t2_catacomb_protocol.CatacombComponent.master().descriptor,
+                "5" * 64,
+                "8" * 64,
+            ),
+        ]
+        planned = [
+            {
+                "name": name,
+                "descriptor_sha256": hashlib.sha256(descriptor).hexdigest(),
+            }
+            for name, descriptor, _secure_hash, _final_hash in components
+        ]
+        self.append(
+            "CATACOMB_PERSISTENCE_PLAN",
+            {
+                "connection_generation": self.value["connection_generation"],
+                "batches": [planned],
+            },
+        )
+        references = []
+        staged = []
+        for component_index, (name, descriptor, secure_hash, final_hash) in enumerate(
+            components
+        ):
+            reference = {
+                "connection_generation": self.value["connection_generation"],
+                "batch_index": 0,
+                "component_index": component_index,
+                "name": name,
+                "descriptor_sha256": hashlib.sha256(descriptor).hexdigest(),
+            }
+            references.append(reference)
+            self.append("CATACOMB_PREPARE_INTENT", reference)
+            self.append(
+                "CATACOMB_PREPARED",
+                {**reference, "status": 0, "expected_blob_length": 32},
+            )
+            self.append("CATACOMB_COMPLETE_INTENT", reference)
+            self.append(
+                "CATACOMB_SECURE_BLOB_CAPTURED",
+                {
+                    **reference,
+                    "status": 0,
+                    "blob_length": 32,
+                    "secure_blob_sha256": secure_hash,
+                },
+            )
+            self.append(
+                "CATACOMB_HOST_STAGED",
+                {
+                    **reference,
+                    "secure_blob_sha256": secure_hash,
+                    "final_file_sha256": final_hash,
+                },
+            )
+            staged.append({"name": name, "final_file_sha256": final_hash})
+            if component_index + 1 < len(components):
+                self.append("CATACOMB_CONFIRM_INTENT", reference)
+                self.append("CATACOMB_CONFIRMED", {**reference, "status": 0})
+        snapshot = hashlib.sha256(mutation.canonical(staged)).hexdigest()
         batch = {"connection_generation": self.value["connection_generation"], "batch_index": 0, "staged_snapshot_sha256": snapshot}
         self.append("CATACOMB_HOST_BATCH_COMMIT_INTENT", batch)
         self.append("CATACOMB_HOST_BATCH_COMMITTED", batch)
-        self.append("CATACOMB_FINAL_CONFIRM_INTENT", reference)
-        self.append("CATACOMB_FINAL_CONFIRMED", {**reference, "status": 0})
+        self.append("CATACOMB_FINAL_CONFIRM_INTENT", references[-1])
+        self.append("CATACOMB_FINAL_CONFIRMED", {**references[-1], "status": 0})
 
     def classify(self, *, local=None, host=None, live=None):
         return reconciliation.classify(
@@ -176,7 +266,10 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
         with self.assertRaises(reconciliation.IdentityDeleteReconciliationError):
             self.classify(local=self.before)
         host = copy.deepcopy(self.host)
-        next(item for item in host["host_components"] if item["name"] == "master.cat")["sha256"] = "9" * 64
+        next(
+            item for item in host["host_components"]
+            if item["name"] == "biolockout.cat"
+        )["sha256"] = "9" * 64
         with self.assertRaisesRegex(reconciliation.IdentityDeleteReconciliationError, "unrelated"):
             self.classify(host=host)
         live = copy.deepcopy(self.live)
@@ -244,6 +337,7 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
         *,
         catacomb_hash="4" * 64,
         user_needs_save=False,
+        master_needs_save=False,
     ):
         live = live_for(local)
         live.update(
@@ -254,7 +348,11 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
                     "uuid": self.value["sep_catacomb"]["uuid"],
                     "hash": catacomb_hash,
                     "user_states": [
-                        {"kind": "master", "user_id": None, "needs_save": False},
+                        {
+                            "kind": "master",
+                            "user_id": None,
+                            "needs_save": master_needs_save,
+                        },
                         {
                             "kind": "user",
                             "user_id": 501,
@@ -404,7 +502,12 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
             history,
             local=self.before,
             host=self.baseline_host(),
-            live=self.fresh_live(self.after, 9203, user_needs_save=True),
+            live=self.fresh_live(
+                self.after,
+                9203,
+                user_needs_save=True,
+                master_needs_save=True,
+            ),
             mapping_generation=self.value["mapping_generation"],
         )
         self.assertEqual(observed.outcome, "forward-required")
@@ -424,28 +527,18 @@ class IdentityDeleteReconciliationTests(unittest.TestCase):
             t2_enrollment_persistence_journal.PersistencePhase.NOT_STARTED,
         )
 
-    def test_recovery_refreshes_committed_survivors_pending_sep_confirm(self):
+    def test_recovery_rejects_dirty_sep_after_paired_commit(self):
         history = self.recovery_intent()
-        observed = recovery.classify(
-            history,
-            local=self.after,
-            host=self.host,
-            live=self.fresh_live(self.after, 9204, user_needs_save=True),
-            mapping_generation=self.value["mapping_generation"],
-        )
-        self.assertEqual(observed.outcome, "forward-required")
-        self.assertEqual(observed.archive_state, "survivors")
-        final = recovery.append_observed(
-            self.path,
-            self.operation_id,
-            observed,
-            mapping_generation=self.value["mapping_generation"],
-        )
-        self.assertEqual(final.phase, journal.IdentityDeletePhase.SEP_DELETED)
-        self.assertEqual(
-            final.persistence_connection_generation,
-            str(uuid.UUID(int=9204)),
-        )
+        with self.assertRaisesRegex(
+            recovery.IdentityDeleteRecoveryError, "not a unique"
+        ):
+            recovery.classify(
+                history,
+                local=self.after,
+                host=self.host,
+                live=self.fresh_live(self.after, 9204, user_needs_save=True),
+                mapping_generation=self.value["mapping_generation"],
+            )
 
 
 if __name__ == "__main__":

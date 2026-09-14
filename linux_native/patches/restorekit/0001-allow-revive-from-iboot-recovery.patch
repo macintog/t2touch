@@ -1,0 +1,149 @@
+From: t2-touchid-linux contributors
+Subject: [PATCH] allow revive to start from iBoot recovery
+
+idevicerestore can enter the restore flow from iBoot recovery, but the
+RestoreKit CLI currently rejects every device not in DFU before it reaches
+that library code. Accept an identified recovery-mode device only for the
+non-erasing Revive operation. Keep Erase and Obliterate strictly DFU-only.
+
+This lets a Linux host issue the T2 restoreserviced one-shot recovery command
+and then continue with the update identity, without forcing the same physical
+machine through an externally hosted DFU transition.
+
+Based-on: fcjr/restorekit 7745cadad6b660dfb070504c8505bbe07f817e70
+---
+ crates/restorekit-cli/src/commands/dfu.rs      | 26 ++++++++++++++++++++------
+ crates/restorekit-cli/src/commands/restore.rs  | 11 ++++++-----
+ crates/restorekit/src/device.rs                | 10 ++++++++++
+ 3 files changed, 36 insertions(+), 11 deletions(-)
+
+diff --git i/crates/restorekit-cli/src/commands/dfu.rs w/crates/restorekit-cli/src/commands/dfu.rs
+index a42d4304ec6019634d9399fc1f6b9cccfbfe9967..21c440d67c60975a63095a94c22bb9e301b0e4bd 100644
+--- i/crates/restorekit-cli/src/commands/dfu.rs
++++ w/crates/restorekit-cli/src/commands/dfu.rs
+@@ -2,6 +2,7 @@ use std::io::{IsTerminal, Write};
+ use std::time::Duration;
+ 
+ use restorekit::progress::Event;
++use restorekit::restore::Mode;
+ use restorekit::{device, Device, DfuOutcome, DfuVia, Error, Result, Target};
+ 
+ use super::render;
+@@ -305,25 +306,31 @@ pub fn probe_ports(json: bool) -> Result<()> {
+     Ok(())
+ }
+ 
+-/// Ensure a Mac is in DFU mode: return it if already there (with the interactive
+-/// picker when several are present and no ECID pins one), otherwise trigger
+-/// entry via a dongle or the host and wait. Shared by `restore`.
++/// Ensure a Mac is ready to restore: a revive may use either DFU or iBoot
++/// recovery, while erasing modes remain DFU-only. Otherwise trigger DFU entry
++/// via a dongle or the host and wait. Shared by `restore`.
+ pub(crate) fn ensure_present(
+     json: bool,
+     timeout: Duration,
+     dongle: Option<String>,
+     ecid: Option<u64>,
++    mode: Mode,
+ ) -> Result<Device> {
+     // An explicit dongle always routes through it.
+     if let Some(id) = dongle {
+         return finish_trigger(json, DfuVia::Dongle(id), timeout, ecid);
+     }
+-    // Already in DFU? Use it without re-triggering.
++    // Already in a mode supported by this operation? Do not re-trigger it.
+     if let Some(e) = ecid {
+         let mut devices = device::list()?;
+         device::identify(&mut devices);
+         match devices.into_iter().find(|d| d.ecid == Some(e)) {
+-            Some(dev) if dev.in_dfu() => return Ok(dev),
++            Some(dev)
++                if (mode == Mode::Revive && dev.revivable())
++                    || (mode != Mode::Revive && dev.restorable()) =>
++            {
++                return Ok(dev)
++            }
+             Some(dev) if !json => {
+                 println!(
+                     "{} is in {} mode; putting it into DFU...",
+@@ -334,7 +341,14 @@ pub(crate) fn ensure_present(
+             _ => {}
+         }
+     } else {
+-        let present = dfu_devices()?;
++        let present = if mode == Mode::Revive {
++            device::list()?
++                .into_iter()
++                .filter(Device::revivable)
++                .collect()
++        } else {
++            dfu_devices()?
++        };
+         if !present.is_empty() {
+             return select_from(present, json);
+         }
+diff --git i/crates/restorekit-cli/src/commands/restore.rs w/crates/restorekit-cli/src/commands/restore.rs
+index 9031a5d54f1acd33b462ad61735eb8a36d903371..d18570571a636674a9cb6bbd5cd4985fe6119249 100644
+--- i/crates/restorekit-cli/src/commands/restore.rs
++++ w/crates/restorekit-cli/src/commands/restore.rs
+@@ -120,22 +120,25 @@ pub struct Opts {
+     pub verbose: bool,
+ }
+ 
+-/// Ensure a target is in DFU mode (triggering entry if the host can), then
+-/// resolve → download → restore it.
++/// Ensure a target is in a mode supported by the requested operation
++/// (triggering DFU entry if needed), then resolve → download → restore it.
+ pub fn run(opts: Opts) -> Result<()> {
++    let mode = opts.mode;
+     let device = super::dfu::ensure_present(
+         opts.json,
+         Duration::from_secs(120),
+         opts.dongle.clone(),
+         opts.ecid,
++        mode,
+     )?;
+     restore_device(&device, opts)
+ }
+ 
+ fn restore_device(device: &Device, opts: Opts) -> Result<()> {
++    let mode = opts.mode;
+     let json = opts.json;
+     // Every path into here (ensure_present, the picker, --ecid) selects a
+-    // DFU-mode device with a parsed serial, so the ECID and identity are set.
++    // restore-capable device with a parsed serial, so ECID and identity are set.
+     let identity = device
+         .identity
+         .as_ref()
+@@ -180,8 +183,6 @@ fn restore_device(device: &Device, opts: Opts) -> Result<()> {
+         path
+     };
+ 
+-    let mode = opts.mode;
+-
+     if !confirm(device, mode, opts.yes, json)? {
+         say(json, "Aborted.");
+         return Ok(());
+diff --git i/crates/restorekit/src/device.rs w/crates/restorekit/src/device.rs
+index 5e86b7c76975b184e67c719d34d1585d6432940c..05afbde8bf3c2cca630ed07803bd2e219ab90f31 100644
+--- i/crates/restorekit/src/device.rs
++++ w/crates/restorekit/src/device.rs
+@@ -760,6 +760,16 @@ impl Device {
+         self.in_dfu() && self.identity.is_some()
+     }
+ 
++    /// Whether a non-erasing revive can start from this device as-is.
++    ///
++    /// idevicerestore supports entering its restore flow from iBoot recovery,
++    /// so a revive does not need to force a device that is already there back
++    /// through DFU. Erasing restores deliberately keep the stricter
++    /// [`Self::restorable`] requirement.
++    pub fn revivable(&self) -> bool {
++        matches!(self.mode, UsbMode::Dfu | UsbMode::Recovery) && self.identity.is_some()
++    }
++
+     /// ECID formatted as idevicerestore expects it (hex with 0x prefix).
+     pub fn ecid_hex(&self) -> Option<String> {
+         self.ecid.map(|e| format!("0x{e:x}"))
+-- 
+2.51.0

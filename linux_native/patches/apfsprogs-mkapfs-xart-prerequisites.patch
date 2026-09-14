@@ -1,0 +1,565 @@
+diff --git i/mkapfs/btree.c w/mkapfs/btree.c
+index d813d21..8ee3cea 100644
+--- i/mkapfs/btree.c
++++ w/mkapfs/btree.c
+@@ -263,13 +263,26 @@ static void set_cat_info(struct apfs_btree_info *info)
+ 	int maxval = sizeof(struct apfs_inode_val) +
+ 		     sizeof(struct apfs_xf_blob) + sizeof(struct apfs_x_field) +
+ 		     ROUND_UP(strlen("private-dir") + 1, 8);
++	int key_count = 4;
++
++	if (param->seed_name) {
++		int seed_key = drec_keysz + strlen(param->seed_name) + 1;
++		int seed_val = sizeof(struct apfs_inode_val) +
++			       sizeof(struct apfs_xf_blob) +
++			       2 * sizeof(struct apfs_x_field) +
++			       ROUND_UP(strlen(param->seed_name) + 1, 8) +
++			       sizeof(struct apfs_dstream);
++		maxkey = maxkey > seed_key ? maxkey : seed_key;
++		maxval = maxval > seed_val ? maxval : seed_val;
++		key_count = 8;
++	}
+ 
+ 	info->bt_fixed.bt_flags = cpu_to_le32(APFS_BTREE_KV_NONALIGNED);
+ 	info->bt_fixed.bt_node_size = cpu_to_le32(param->blocksize);
+ 
+ 	info->bt_longest_key = cpu_to_le32(maxkey);
+ 	info->bt_longest_val = cpu_to_le32(maxval);
+-	info->bt_key_count = cpu_to_le64(4); /* Two records for each dir */
++	info->bt_key_count = cpu_to_le64(key_count);
+ 	info->bt_node_count = cpu_to_le64(1); /* Only one node: the root */
+ }
+ 
+@@ -292,7 +305,7 @@ void make_cat_root(u64 bno, u64 oid)
+ 	root->btn_flags = cpu_to_le16(APFS_BTNODE_ROOT | APFS_BTNODE_LEAF);
+ 
+ 	/* The two dentry records and their inodes */
+-	root->btn_nkeys = cpu_to_le32(4);
++	root->btn_nkeys = cpu_to_le32(param->seed_name ? 8 : 4);
+ 	toc_len = min_table_size(APFS_OBJECT_TYPE_FSTREE);
+ 	root->btn_table_space.off = 0;
+ 	root->btn_table_space.len = cpu_to_le16(toc_len);
+@@ -307,8 +320,19 @@ void make_cat_root(u64 bno, u64 oid)
+ 				key_area, &key, val_area_end, &val_end);
+ 	make_special_dir_inode(APFS_ROOT_DIR_INO_NUM, "root", &kvloc,
+ 			       key_area, &key, val_area_end, &val_end);
++	if (param->seed_name)
++		make_seed_file_dentry(&kvloc, key_area, &key,
++				      val_area_end, &val_end);
+ 	make_special_dir_inode(APFS_PRIV_DIR_INO_NUM, "private-dir", &kvloc,
+ 			       key_area, &key, val_area_end, &val_end);
++	if (param->seed_name) {
++		make_seed_file_inode(&kvloc, key_area, &key,
++				     val_area_end, &val_end);
++		make_seed_dstream_record(&kvloc, key_area, &key,
++					 val_area_end, &val_end);
++		make_seed_extent_record(&kvloc, key_area, &key,
++					val_area_end, &val_end);
++	}
+ 
+ 	key_len = key - key_area;
+ 	val_len = val_area_end - val_end;
+@@ -329,3 +353,52 @@ void make_cat_root(u64 bno, u64 oid)
+ 			  APFS_OBJECT_TYPE_FSTREE);
+ 	apfs_writeall(root, 1, bno);
+ }
++
++void make_seed_extref_root(u64 bno, u64 oid)
++{
++	struct apfs_btree_node_phys *root = get_zeroed_block();
++	struct apfs_btree_info *info;
++	struct apfs_kvloc *kvloc;
++	struct apfs_phys_ext_key *key;
++	struct apfs_phys_ext_val *val;
++	int head_len = sizeof(*root);
++	int info_len = sizeof(*info);
++	int toc_len = min_table_size(APFS_OBJECT_TYPE_BLOCKREFTREE);
++	int key_len = sizeof(*key), val_len = sizeof(*val), free_len;
++
++	root->btn_flags = cpu_to_le16(APFS_BTNODE_ROOT | APFS_BTNODE_LEAF);
++	root->btn_nkeys = cpu_to_le32(1);
++	root->btn_table_space.off = 0;
++	root->btn_table_space.len = cpu_to_le16(toc_len);
++	kvloc = (void *)root + head_len;
++	key = (void *)root + head_len + toc_len;
++	val = (void *)root + param->blocksize - info_len - val_len;
++	kvloc->k.off = 0;
++	kvloc->k.len = cpu_to_le16(key_len);
++	kvloc->v.off = cpu_to_le16(val_len);
++	kvloc->v.len = cpu_to_le16(val_len);
++	key->hdr.obj_id_and_type = cpu_to_le64(
++		((u64)APFS_TYPE_EXTENT << APFS_OBJ_TYPE_SHIFT) | seed_data_bno);
++	val->len_and_kind = cpu_to_le64(
++		((u64)APFS_KIND_NEW << APFS_PEXT_KIND_SHIFT) |
++		(param->seed_size / param->blocksize));
++	val->owning_obj_id = cpu_to_le64(APFS_MIN_USER_INO_NUM);
++	val->refcnt = cpu_to_le32(1);
++	free_len = param->blocksize - head_len - toc_len - key_len - val_len - info_len;
++	root->btn_free_space.off = cpu_to_le16(key_len);
++	root->btn_free_space.len = cpu_to_le16(free_len);
++	root->btn_key_free_list.off = cpu_to_le16(APFS_BTOFF_INVALID);
++	root->btn_val_free_list.off = cpu_to_le16(APFS_BTOFF_INVALID);
++	info = (void *)root + param->blocksize - info_len;
++	info->bt_fixed.bt_flags = cpu_to_le32(APFS_BTREE_PHYSICAL |
++					      APFS_BTREE_KV_NONALIGNED);
++	info->bt_fixed.bt_node_size = cpu_to_le32(param->blocksize);
++	info->bt_longest_key = cpu_to_le32(key_len);
++	info->bt_longest_val = cpu_to_le32(val_len);
++	info->bt_key_count = cpu_to_le64(1);
++	info->bt_node_count = cpu_to_le64(1);
++	set_object_header(&root->btn_o, param->blocksize, oid,
++			  APFS_OBJECT_TYPE_BTREE | APFS_OBJ_PHYSICAL,
++			  APFS_OBJECT_TYPE_BLOCKREFTREE);
++	apfs_writeall(root, 1, bno);
++}
+diff --git i/mkapfs/btree.h w/mkapfs/btree.h
+index 5c12e2d..13fbeae 100644
+--- i/mkapfs/btree.h
++++ w/mkapfs/btree.h
+@@ -8,6 +8,7 @@
+ #include <apfs/types.h>
+ 
+ extern void make_empty_btree_root(u64 bno, u64 oid, u32 subtype);
++extern void make_seed_extref_root(u64 bno, u64 oid);
+ extern void make_omap_btree(u64 bno, bool is_vol);
+ extern void make_cat_root(u64 bno, u64 oid);
+ 
+diff --git i/mkapfs/dir.c w/mkapfs/dir.c
+index 87a6086..dcf5c78 100644
+--- i/mkapfs/dir.c
++++ w/mkapfs/dir.c
+@@ -66,8 +66,12 @@ static int make_hashed_dentry_key(u64 ino, char *name,
+ 	len = strlen(name) + 1; /* The null termination is counted */
+ 
+ 	/* Special directories don't have unicode characters in their names */
+-	for (utf32 = *name; utf32; utf32 = *++name)
++	for (utf32 = (unsigned char)*name; utf32;
++	     utf32 = (unsigned char)*++name) {
++		if (!param->case_sensitive && utf32 >= 'A' && utf32 <= 'Z')
++			utf32 += 'a' - 'A';
+ 		hash = crc32c(hash, &utf32, sizeof(utf32));
++	}
+ 	hash = (hash & 0x3FFFFF) << 10;
+ 
+ 	key->name_len_and_hash = cpu_to_le32(hash | len);
+@@ -157,6 +161,8 @@ static int make_special_inode_val(u64 ino, char *name,
+ 	val->owner = cpu_to_le32(geteuid());
+ 	val->group = cpu_to_le32(getegid());
+ 	val->mode = cpu_to_le16(0755 | S_IFDIR);
++	if (ino == APFS_ROOT_DIR_INO_NUM && param->seed_name)
++		val->nchildren = cpu_to_le32(1);
+ 
+ 	xblob = (struct apfs_xf_blob *)val->xfields;
+ 	xblob->xf_num_exts = cpu_to_le16(1); /* Just the primary name */
+@@ -171,6 +177,122 @@ static int make_special_inode_val(u64 ino, char *name,
+ 	return i_len;
+ }
+ 
++static void add_record(struct apfs_kvloc **next_toc, void *key_area,
++		       void **key, int key_len, void *val_area_end,
++		       void **val_end, int val_len)
++{
++	struct apfs_kvloc *kvloc = *next_toc;
++
++	kvloc->k.off = cpu_to_le16(*key - key_area);
++	kvloc->k.len = cpu_to_le16(key_len);
++	*key += key_len;
++	kvloc->v.off = cpu_to_le16(val_area_end - *val_end + val_len);
++	kvloc->v.len = cpu_to_le16(val_len);
++	*val_end -= val_len;
++	++*next_toc;
++}
++
++void make_seed_file_dentry(struct apfs_kvloc **next_toc,
++			   void *key_area, void **key,
++			   void *val_area_end, void **val_end)
++{
++	struct apfs_drec_val *val;
++	int key_len = make_special_dentry_key(APFS_ROOT_DIR_INO_NUM,
++						param->seed_name, *key);
++	int val_len = sizeof(*val);
++
++	val = *val_end - val_len;
++	val->file_id = cpu_to_le64(APFS_MIN_USER_INO_NUM);
++	val->date_added = cpu_to_le64(get_timestamp());
++	val->flags = cpu_to_le16(S_IFREG >> 12);
++	add_record(next_toc, key_area, key, key_len,
++		   val_area_end, val_end, val_len);
++}
++
++void make_seed_file_inode(struct apfs_kvloc **next_toc,
++			  void *key_area, void **key,
++			  void *val_area_end, void **val_end)
++{
++	struct apfs_inode_val *val;
++	struct apfs_xf_blob *xblob;
++	struct apfs_x_field *xfield;
++	struct apfs_dstream *dstream;
++	int name_len = strlen(param->seed_name) + 1;
++	int padded_name_len = ROUND_UP(name_len, 8);
++	int values_len = padded_name_len + sizeof(*dstream);
++	int val_len = sizeof(*val) + sizeof(*xblob) +
++		      2 * sizeof(*xfield) + values_len;
++	int key_len = make_special_inode_key(APFS_MIN_USER_INO_NUM, *key);
++	char *value;
++
++	val = *val_end - val_len;
++	val->parent_id = cpu_to_le64(APFS_ROOT_DIR_INO_NUM);
++	val->private_id = cpu_to_le64(APFS_MIN_USER_INO_NUM);
++	val->create_time = val->mod_time = val->change_time =
++		val->access_time = cpu_to_le64(get_timestamp());
++	val->nlink = cpu_to_le32(1);
++	val->default_protection_class = cpu_to_le32(APFS_PROTECTION_CLASS_D);
++	val->owner = 0;
++	val->group = 0;
++	val->mode = cpu_to_le16(0600 | S_IFREG);
++
++	xblob = (struct apfs_xf_blob *)val->xfields;
++	xblob->xf_num_exts = cpu_to_le16(2);
++	xblob->xf_used_data = cpu_to_le16(values_len);
++	xfield = (struct apfs_x_field *)xblob->xf_data;
++	xfield[0].x_type = APFS_INO_EXT_TYPE_NAME;
++	xfield[0].x_flags = APFS_XF_DO_NOT_COPY;
++	xfield[0].x_size = cpu_to_le16(name_len);
++	xfield[1].x_type = APFS_INO_EXT_TYPE_DSTREAM;
++	xfield[1].x_flags = APFS_XF_SYSTEM_FIELD;
++	xfield[1].x_size = cpu_to_le16(sizeof(*dstream));
++
++	value = (char *)&xfield[2];
++	strcpy(value, param->seed_name);
++	value += padded_name_len;
++	dstream = (struct apfs_dstream *)value;
++	dstream->size = cpu_to_le64(param->seed_size);
++	dstream->alloced_size = cpu_to_le64(param->seed_size);
++
++	add_record(next_toc, key_area, key, key_len,
++		   val_area_end, val_end, val_len);
++}
++
++void make_seed_dstream_record(struct apfs_kvloc **next_toc,
++			      void *key_area, void **key,
++			      void *val_area_end, void **val_end)
++{
++	struct apfs_dstream_id_key *dkey = *key;
++	struct apfs_dstream_id_val *val;
++	int key_len, val_len = sizeof(*val);
++
++	set_key_header(APFS_MIN_USER_INO_NUM, APFS_TYPE_DSTREAM_ID, &dkey->hdr);
++	key_len = sizeof(*dkey);
++	val = *val_end - val_len;
++	val->refcnt = cpu_to_le32(1);
++	add_record(next_toc, key_area, key, key_len,
++		   val_area_end, val_end, val_len);
++}
++
++void make_seed_extent_record(struct apfs_kvloc **next_toc,
++			     void *key_area, void **key,
++			     void *val_area_end, void **val_end)
++{
++	struct apfs_file_extent_key *ekey = *key;
++	struct apfs_file_extent_val *val;
++	int key_len, val_len = sizeof(*val);
++
++	set_key_header(APFS_MIN_USER_INO_NUM, APFS_TYPE_FILE_EXTENT, &ekey->hdr);
++	ekey->logical_addr = 0;
++	key_len = sizeof(*ekey);
++	val = *val_end - val_len;
++	val->len_and_flags = cpu_to_le64(param->seed_size);
++	val->phys_block_num = cpu_to_le64(seed_data_bno);
++	val->crypto_id = 0;
++	add_record(next_toc, key_area, key, key_len,
++		   val_area_end, val_end, val_len);
++}
++
+ /**
+  * make_special_dir_inode - Make inode record for an empty special dir
+  * @ino:		inode number for the directory
+diff --git i/mkapfs/dir.h w/mkapfs/dir.h
+index ad6e24b..c4cedab 100644
+--- i/mkapfs/dir.h
++++ w/mkapfs/dir.h
+@@ -15,5 +15,17 @@ extern void make_special_dir_inode(u64 ino, char *name,
+ 				   struct apfs_kvloc **next_toc,
+ 				   void *key_area, void **key,
+ 				   void *val_area_end, void **val_end);
++extern void make_seed_file_dentry(struct apfs_kvloc **next_toc,
++				  void *key_area, void **key,
++				  void *val_area_end, void **val_end);
++extern void make_seed_file_inode(struct apfs_kvloc **next_toc,
++				 void *key_area, void **key,
++				 void *val_area_end, void **val_end);
++extern void make_seed_dstream_record(struct apfs_kvloc **next_toc,
++				     void *key_area, void **key,
++				     void *val_area_end, void **val_end);
++extern void make_seed_extent_record(struct apfs_kvloc **next_toc,
++				    void *key_area, void **key,
++				    void *val_area_end, void **val_end);
+ 
+ #endif	/* _DIR_H */
+diff --git i/mkapfs/mkapfs.8 w/mkapfs/mkapfs.8
+index 8ce80e3..3d4f3b9 100644
+--- i/mkapfs/mkapfs.8
++++ w/mkapfs/mkapfs.8
+@@ -14,6 +14,10 @@ mkapfs \- create an APFS filesystem
+ .IR UUID ]
+ [\-u
+ .IR UUID ]
++[\-r
++.IR role ]
++[\-f
++.IR name:size ]
+ [\-F
+ .IR tier2 ]
+ [\-B
+@@ -47,6 +51,15 @@ is chosen by /proc/sys/kernel/random/uuid.
+ Specify a UUID for the volume, in the standard format. By default the value
+ is chosen by /proc/sys/kernel/random/uuid.
+ .TP
++.BI \-r " role"
++Set the numeric APFS volume role. Decimal, octal and hexadecimal notation are
++accepted. By default the volume has no role.
++.TP
++.BI \-f " name:size"
++Create one root-owned, mode 0600 regular file in the volume root and
++preallocate a contiguous extent of the requested size. The name must be ASCII
++and the size must be a nonzero multiple of the filesystem block size.
++.TP
+ .B \-v
+ Print the version number of
+ .B mkapfs
+diff --git i/mkapfs/mkapfs.c w/mkapfs/mkapfs.c
+index 7e31fb4..f6b826f 100644
+--- i/mkapfs/mkapfs.c
++++ w/mkapfs/mkapfs.c
+@@ -27,7 +27,7 @@ static char *progname;
+ static void usage(void)
+ {
+ 	fprintf(stderr,
+-		"usage: %s [-L label] [-U UUID] [-u UUID] [-F tier2] [-B tier2-blocks] [-sv] "
++		"usage: %s [-L label] [-U UUID] [-u UUID] [-r role] [-f name:size] [-F tier2] [-B tier2-blocks] [-sv] "
+ 		"device [blocks]\n",
+ 		progname);
+ 	exit(EXIT_FAILURE);
+@@ -134,6 +134,43 @@ static char *get_random_uuid(void)
+ 	return uuid;
+ }
+ 
++/**
++ * parse_volume_role - Parse a numeric APFS volume role
++ * @string: role in decimal, octal or hexadecimal notation
++ */
++static u16 parse_volume_role(const char *string)
++{
++	unsigned long role;
++	char *end;
++
++	role = strtoul(string, &end, 0);
++	if (end == string || *end || role > UINT16_MAX)
++		fatal("invalid volume role");
++	return role;
++}
++
++static void parse_seed_file(char *string)
++{
++	char *separator, *end;
++	char *cursor;
++	unsigned long long size;
++
++	separator = strrchr(string, ':');
++	if (!separator || separator == string || !separator[1])
++		fatal("invalid seed file (expected name:size)");
++	*separator = 0;
++	if (strchr(string, '/') || strlen(string) > APFS_NAME_LEN)
++		fatal("invalid seed file name");
++	for (cursor = string; *cursor; ++cursor)
++		if ((unsigned char)*cursor >= 0x80)
++			fatal("seed file name must be ASCII");
++	size = strtoull(separator + 1, &end, 0);
++	if (end == separator + 1 || *end || !size)
++		fatal("invalid seed file size");
++	param->seed_name = string;
++	param->seed_size = size;
++}
++
+ /**
+  * complete_parameters - Set all uninitialized parameters to their defaults
+  *
+@@ -145,6 +182,8 @@ static void complete_parameters(void)
+ 
+ 	if (!param->blocksize)
+ 		param->blocksize = APFS_NX_DEFAULT_BLOCK_SIZE;
++	if (param->seed_name && param->seed_size % param->blocksize)
++		fatal("seed file size must be a multiple of the block size");
+ 
+ 	main_blkcnt_limit = get_main_device_size(param->blocksize);
+ 	tier2_blkcnt_limit = get_tier2_device_size(param->blocksize);
+@@ -191,7 +230,7 @@ int main(int argc, char *argv[])
+ 		system_error();
+ 
+ 	while (1) {
+-		int opt = getopt(argc, argv, "L:U:u:szvF:B:");
++		int opt = getopt(argc, argv, "L:U:u:r:f:szvF:B:");
+ 
+ 		if (opt == -1)
+ 			break;
+@@ -206,6 +245,12 @@ int main(int argc, char *argv[])
+ 		case 'u':
+ 			param->vol_uuid = optarg;
+ 			break;
++		case 'r':
++			param->vol_role = parse_volume_role(optarg);
++			break;
++		case 'f':
++			parse_seed_file(optarg);
++			break;
+ 		case 's':
+ 			param->case_sensitive = true;
+ 			break;
+diff --git i/mkapfs/mkapfs.h w/mkapfs/mkapfs.h
+index 5d15fca..ff141bc 100644
+--- i/mkapfs/mkapfs.h
++++ w/mkapfs/mkapfs.h
+@@ -21,6 +21,9 @@ struct parameters {
+ 	char		*main_uuid;	/* Container UUID in standard format */
+ 	char		*vol_uuid;	/* Volume UUID in standard format */
+ 	char		*fusion_uuid;	/* Fusion drive UUID in standard format */
++	u16		vol_role;	/* Volume role */
++	char		*seed_name;	/* Optional preallocated root file */
++	u64		seed_size;	/* Size of the preallocated root file */
+ 	bool		case_sensitive;	/* Is the filesystem case-sensitive? */
+ 	bool		norm_sensitive;	/* Is it normalization-sensitive? */
+ };
+@@ -29,6 +32,7 @@ struct parameters {
+ extern struct parameters *param;	/* Filesystem parameters */
+ extern int fd_main;			/* File descriptor for the main device */
+ extern int fd_tier2;			/* File descriptor for the tier 2 device, if any */
++extern u64 seed_data_bno;		/* First block of the optional seed file */
+ 
+ /* Hardcoded transaction ids */
+ #define MKFS_XID	1
+diff --git i/mkapfs/spaceman.c w/mkapfs/spaceman.c
+index a42b3f3..ffedd49 100644
+--- i/mkapfs/spaceman.c
++++ w/mkapfs/spaceman.c
+@@ -44,6 +44,8 @@ static struct spaceman_info {
+ 	u32 bm_free_next_off;	/* Offset of free_next in the spaceman */
+ } sm_info = {0};
+ 
++u64 seed_data_bno;
++
+ /**
+  * blocks_per_chunk - Calculate the number of blocks per chunk
+  */
+@@ -110,6 +112,7 @@ u32 spaceman_size(void)
+ static u32 count_used_blocks_in_chunk(struct device_info *dev, u64 chunkno)
+ {
+ 	u32 first_chunk_ip_blocks;
++	u64 chunk_start, chunk_end, tail_start, tail_end, overlap_start;
+ 
+ 	if (chunkno >= dev->used_chunks_end)
+ 		return 0;
+@@ -118,8 +121,14 @@ static u32 count_used_blocks_in_chunk(struct device_info *dev, u64 chunkno)
+ 	if (dev->used_blocks_end == 1)
+ 		return 1;
+ 
+-	/* The internal pool may not fit whole in the chunk */
+-	first_chunk_ip_blocks = MIN(sm_info.ip_blocks, blocks_per_chunk() - sm_info.ip_base);
++	chunk_start = chunkno * blocks_per_chunk();
++	chunk_end = MIN(chunk_start + blocks_per_chunk(), dev->block_count);
++	tail_start = sm_info.ip_base;
++	tail_end = param->seed_name ? seed_data_bno + param->seed_size / param->blocksize
++				    : sm_info.ip_base + sm_info.ip_blocks;
++	overlap_start = tail_start > chunk_start ? tail_start : chunk_start;
++	first_chunk_ip_blocks = MIN(tail_end, chunk_end) > overlap_start ?
++		MIN(tail_end, chunk_end) - overlap_start : 0;
+ 
+ 	if (chunkno == 0) {
+ 		u32 blocks = 0;
+@@ -138,12 +147,8 @@ static u32 count_used_blocks_in_chunk(struct device_info *dev, u64 chunkno)
+ 		return blocks;
+ 	}
+ 
+-	/* Later chunks are only needed for the rest of the internal pool */
+-	if (chunkno != dev->used_chunks_end - 1)
+-		return blocks_per_chunk();
+-
+-	/* Last chunk */
+-	return (sm_info.ip_blocks - first_chunk_ip_blocks) % blocks_per_chunk();
++	/* Later chunks contain the tail of the internal pool and seed file. */
++	return first_chunk_ip_blocks;
+ }
+ 
+ /**
+@@ -204,6 +209,9 @@ static void make_main_alloc_bitmap(void)
+ 	bmap_mark_as_used(bmap, IP_BMAP_BASE, sm_info.ip_bmap_blocks);
+ 	/* Internal pool blocks */
+ 	bmap_mark_as_used(bmap, sm_info.ip_base, sm_info.ip_blocks);
++	if (param->seed_name)
++		bmap_mark_as_used(bmap, seed_data_bno,
++				  param->seed_size / param->blocksize);
+ 	/* Fusion drive stuff */
+ 	if (fd_tier2 != -1) {
+ 		bmap_mark_as_used(bmap, FUSION_MT_BNO, 1);
+@@ -565,6 +573,12 @@ void set_spaceman_info(void)
+ 
+ 	/* Only the ip size matters, all other used blocks come before it */
+ 	main_dev->used_blocks_end = sm_info.ip_base + sm_info.ip_blocks;
++	seed_data_bno = main_dev->used_blocks_end;
++	if (param->seed_name) {
++		main_dev->used_blocks_end += param->seed_size / param->blocksize;
++		if (main_dev->used_blocks_end > main_dev->block_count)
++			fatal("main device is too small for seed file");
++	}
+ 	main_dev->used_chunks_end = DIV_ROUND_UP(main_dev->used_blocks_end, blocks_per_chunk());
+ 	/* Tier 2 is empty except for block zero */
+ 	tier2_dev->used_blocks_end = fd_tier2 != -1 ? 1 : 0;
+diff --git i/mkapfs/super.c w/mkapfs/super.c
+index 285feaa..164cde8 100644
+--- i/mkapfs/super.c
++++ w/mkapfs/super.c
+@@ -160,11 +160,14 @@ static void make_volume(u64 bno, u64 oid)
+ 	/* Encryption is not supported, but this still needs to be set */
+ 	set_meta_crypto(&vsb->apfs_meta_crypto);
+ 
+-	/* We won't create any user inodes */
+-	vsb->apfs_next_obj_id = cpu_to_le64(APFS_MIN_USER_INO_NUM);
++	vsb->apfs_next_obj_id = cpu_to_le64(APFS_MIN_USER_INO_NUM +
++					    (param->seed_name ? 1 : 0));
++	if (param->seed_name)
++		vsb->apfs_num_files = cpu_to_le64(1);
+ 
+ 	set_uuid(vsb->apfs_vol_uuid, param->vol_uuid);
+ 	vsb->apfs_fs_flags = cpu_to_le64(APFS_FS_UNENCRYPTED);
++	vsb->apfs_role = cpu_to_le16(param->vol_role);
+ 
+ 	assert(strlen(MKFS_ID_STRING) < sizeof(vsb->apfs_formatted_by.id));
+ 	strcpy((char *)vsb->apfs_formatted_by.id, MKFS_ID_STRING);
+@@ -188,15 +191,23 @@ static void make_volume(u64 bno, u64 oid)
+ 
+ 	/* The snapshot metadata and extent reference trees are empty */
+ 	vsb->apfs_extentref_tree_oid = cpu_to_le64(FIRST_VOL_EXTREF_ROOT_BNO);
+-	make_empty_btree_root(FIRST_VOL_EXTREF_ROOT_BNO,
+-			      FIRST_VOL_EXTREF_ROOT_BNO,
+-			      APFS_OBJECT_TYPE_BLOCKREFTREE);
++	if (param->seed_name)
++		make_seed_extref_root(FIRST_VOL_EXTREF_ROOT_BNO,
++				      FIRST_VOL_EXTREF_ROOT_BNO);
++	else
++		make_empty_btree_root(FIRST_VOL_EXTREF_ROOT_BNO,
++				      FIRST_VOL_EXTREF_ROOT_BNO,
++				      APFS_OBJECT_TYPE_BLOCKREFTREE);
+ 	vsb->apfs_snap_meta_tree_oid = cpu_to_le64(FIRST_VOL_SNAP_ROOT_BNO);
+ 	make_empty_btree_root(FIRST_VOL_SNAP_ROOT_BNO, FIRST_VOL_SNAP_ROOT_BNO,
+ 			      APFS_OBJECT_TYPE_SNAPMETATREE);
+ 
+ 	/* The root nodes of all four trees, plus the object map structure */
+-	vsb->apfs_fs_alloc_count = cpu_to_le64(5);
++	vsb->apfs_fs_alloc_count = cpu_to_le64(5 +
++		(param->seed_name ? param->seed_size / param->blocksize : 0));
++	if (param->seed_name)
++		apfs_writeall(get_zeroed_blocks(param->seed_size / param->blocksize),
++			      param->seed_size / param->blocksize, seed_data_bno);
+ 
+ 	set_object_header(&vsb->apfs_o, param->blocksize, oid,
+ 			  APFS_OBJ_VIRTUAL | APFS_OBJECT_TYPE_FS,
+

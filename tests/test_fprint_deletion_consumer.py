@@ -37,7 +37,7 @@ def local_inventory():
     renamed = codec.decode_user_catacomb(
         original.rename(
             original.identities[0].uuid,
-            "right-index-finger",
+            "finger-1",
         ),
         501,
     )
@@ -45,7 +45,7 @@ def local_inventory():
         renamed.add(
             identity_uuid=identifier(4),
             entity=1,
-            name="left-thumb",
+            name="finger-2",
         ),
         501,
     )
@@ -130,7 +130,7 @@ class Lease:
 class Live:
     runtime_generation = identifier(32)
 
-    def __init__(self, material, names=("right-index-finger", "left-thumb")):
+    def __init__(self, material, names=("finger-1", "finger-2")):
         self.material = material
         self.names = names
         self.inventory_calls = []
@@ -147,7 +147,7 @@ class Live:
             ],
             "local_live_reconciled": True,
             "selection_scope": "current-reconciled-list",
-            "fprintd_listing_is_compatibility_alias": True,
+            "finger_names_are_presentation_metadata": True,
             "identifiers_redacted": True,
         }
 
@@ -223,6 +223,7 @@ class FprintDeletionConsumerTests(unittest.TestCase):
         self.bridge = object()
         self.operation_calls = []
         self.persistence_calls = []
+        self.handle_reconciler = mock.Mock(return_value=2)
         self.final = mock.create_autospec(
             delete_journal.IdentityDeleteHistory, instance=True
         )
@@ -241,7 +242,7 @@ class FprintDeletionConsumerTests(unittest.TestCase):
 
     def make_consumer(self, **overrides):
         arguments = {
-            "finger_name": "left-thumb",
+            "finger_name": "finger-2",
             "mutation_root": self.root,
             "mutation_blocked": lambda _root: False,
             "store_factory": lambda _root, _uid: self.store,
@@ -249,20 +250,24 @@ class FprintDeletionConsumerTests(unittest.TestCase):
             "operation_runner": self.operation_run,
             "persistence_runner": self.persistence_run,
             "inventory_collector": lambda *_args: self.live_private,
+            "handle_reconciler": self.handle_reconciler,
         }
         arguments.update(overrides)
         return consumer.DeletionConsumer(**arguments)
 
     def test_runs_exact_named_delete_to_reconciled_completion(self):
         value = self.make_consumer()(self.current, self.live)
-        self.assertEqual(value.finger_name, "left-thumb")
+        self.assertEqual(value.finger_name, "finger-2")
         self.assertTrue(value.deleted)
         self.assertEqual(
             self.live.prepare_calls,
             [(self.current.selected, self.current.operation_id)],
         )
+        self.handle_reconciler.assert_called_once_with(
+            501, ("finger-1", "finger-2")
+        )
         operation = self.operation_calls[0][1]
-        self.assertEqual(operation["plan"].name, "left-thumb")
+        self.assertEqual(operation["plan"].name, "finger-2")
         self.assertIs(operation["local"], self.local)
         self.assertIs(operation["bridge"], self.bridge)
         self.assertEqual(
@@ -276,16 +281,94 @@ class FprintDeletionConsumerTests(unittest.TestCase):
         self.assertEqual(history.target_name_sha256, mock.ANY)
         self.assertFalse(history.baseline["password_fallback_verified"])
 
-    def test_rejects_blocked_incomplete_absent_or_final_inventory(self):
+    def test_runs_final_named_delete_to_empty_completion(self):
+        original = codec.decode_user_catacomb(fixture(), 501)
+        one = codec.decode_user_catacomb(
+            original.rename(original.identities[0].uuid, "finger-1"), 501
+        )
+        current = authority(one)
+        private = live_for(one)
+        private.update(
+            {
+                "connection_generation": identifier(32),
+                "bridge_boot_uuid": identifier(40),
+                "maximum_capacity": 5,
+            }
+        )
+        private["catacomb"].update(
+            {"uuid": identifier(41), "hash": "c" * 64}
+        )
+        host = {
+            "account_uuid": one.account_uuid,
+            "bag_uuid": one.keybag_uuid,
+            "identity_records": [
+                {
+                    "user_id": item.user_id,
+                    "uuid": item.uuid,
+                    "entity": item.entity,
+                }
+                for item in one.identities
+            ],
+            "master_enrollment_count": 1,
+            "host_components": [
+                {
+                    "name": name,
+                    "sha256": character * 64,
+                    "mode": 0o600,
+                    "uid": 0,
+                    "gid": 0,
+                }
+                for name, character in (
+                    ("master.cat", "d"),
+                    ("biolockout.cat", "e"),
+                    ("user_000001f5.cat", "f"),
+                )
+            ],
+            "archive_sha256": "9" * 64,
+        }
+        anchor = recovery_anchor.RecoveryAnchor(
+            live_reconciliation.RECOVERY_ANCHOR_ROOT
+            / f"{current.operation_id}.tar",
+            f"recovery-anchors/{current.operation_id}.tar",
+            "9" * 64,
+            host,
+        )
+        material = live_reconciliation.DeletionMaterial(
+            Lease(),
+            anchor,
+            one,
+            private,
+            501,
+            identifier(32),
+            live_reconciliation.STORE_ROOT,
+        )
+        attached = Live(material, ("finger-1",))
+
+        value = self.make_consumer(
+            finger_name="finger-1",
+            inventory_collector=lambda *_args: private,
+        )(current, attached)
+
+        self.assertEqual(value.finger_name, "finger-1")
+        self.assertTrue(value.deleted)
+        planned_empty = codec.decode_user_catacomb(
+            self.operation_calls[-1][1]["plan"].archive, 501
+        )
+        self.assertEqual(planned_empty.identities, ())
+        self.assertEqual(
+            self.handle_reconciler.call_args_list[-1],
+            mock.call(501, ("finger-1",)),
+        )
+
+    def test_rejects_blocked_incomplete_or_absent_inventory(self):
         blocked = self.make_consumer(mutation_blocked=lambda _root: True)
         with self.assertRaisesRegex(
             consumer.FprintDeletionConsumerError, "requires reconciliation"
         ):
             blocked(self.current, self.live)
         for names, message in (
-            (("Finger 1", "left-thumb"), "require migration"),
-            (("right-index-finger", "right-thumb"), "not currently enrolled"),
-            (("left-thumb",), "final fingerprint"),
+            (("Finger 1", "finger-2"), "require migration"),
+            (("finger-1", "finger-3"), "not currently enrolled"),
         ):
             current_live = Live(self.material, names)
             with self.subTest(names=names), self.assertRaisesRegex(

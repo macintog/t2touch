@@ -1,7 +1,46 @@
 # Linux-native T2 Touch ID management research
 
-Research-only ledger started 2026-08-28. No enrollment, deletion, or user-data
-command has been sent to the T2 during this work.
+Research ledger started 2026-08-28. Its historical sections preserve the
+pre-mutation investigation; D196-D200 now prove the first fully reconciled
+Linux-native fingerprint enrollment through different-boot E4 authority.
+
+## D204-D218: native matching, deletion, and continuous additional enrollment
+
+D204 and D205 accepted exact native version-1 positive and negative matcher
+results under D200 E4 authority. D217 then deleted exactly one selected identity,
+persisted the inseparable user/master pair, recovered a master-only dirty tail
+without replaying deletion, and verified the survivor on another boot.
+
+D218 completed one uninterrupted additional-enrollment ceremony. It verified
+D200, offered the explicit Add/Finish choice, proved the candidate distinct,
+captured to 100 percent, treated the extended version-1 completion only as a
+terminal witness, rolled to a fresh Bridge generation under the retained
+AKS/ACM lifetime, proved exactly one identity addition, persisted all components,
+reconciled two identities at E3, and immediately matched only the new identity.
+Its 56-record journal ends `addition-verified`; artifact/read-only snapshot
+`D218-continuous-second-finger-ceremony-20260913` verifies at manifest
+`52f960e06e35e462326c89109597c586b6bd5d3376fa91011d2a93660eb6dd25`.
+
+## D196-D200: first fully reconciled native T2 enrollment
+
+D196 produced the first complete Linux-native T2 capture: seven accepted
+brief-touch cycles reached 100 percent. Although the completion envelope did
+not fit the provisional version-1 20-byte parser, independent stable inventory
+proved one and only one new built-in identity and advanced save-dirty Catacomb
+state. This separates successful SEP enrollment from Linux result decoding.
+
+D197 recovered that identity through the already-conservative fresh-readback
+path, with no recapture, then persisted user, master, and BioLockout components
+and reconciled E3. First enrollment changes Catacomb identity from the absent
+all-zero bootstrap value to a present nonzero value; this transition is now
+accepted only for the exact Linux-native bootstrap baseline. The remaining
+different-boot E4 reload/read-back is now complete: schema-2 activation reached
+ready, host and SEP inventories matched E3, the Catacomb snapshot reconciled,
+and `linux-native-e4` authority was published from a 52-record
+`post-reboot-verified` journal. D200's read-only completion artifact verifies
+against manifest
+`6482cad77d24c8758d15b17a7b10c324a9c2d27566d4f9942f7283d762c3bc17`.
+A match operation comes afterward as a separate physical milestone.
 
 ## Objective
 
@@ -408,10 +447,11 @@ targeting.
 
 ## Provisional feasibility assessment
 
-- **Per-finger management for an existing, provisioned Apple/SEP user:**
-  protocol-feasible, but not yet safe to expose. Enrollment authorization,
-  start/continue, single-identity delete, enumeration, count, typed archive,
-  Catacomb save, and recovery boundaries are recovered.
+- **Per-finger management for the Linux-native reference user:** observed
+  end-to-end through enrollment, enumeration, persistence, positive/negative
+  matching, single-identity deletion/recovery, and continuous additional
+  enrollment. It is ready for broker/fprintd productization, but is not yet a
+  supported public management API.
 - **Multiple Linux accounts backed by multiple already-existing macOS/SEP
   users:** protocol-feasible under a serialized broker, conditional on a fully
   reconciled mapping and per-user bag/ACM/Catacomb lease.
@@ -430,9 +470,10 @@ targeting.
 2. APFS inheritance/xattr behavior only for optional synchronization of a
    Linux-local Catacomb back into macOS; it is not a Linux-local persistence
    or SEP protocol requirement.
-3. The final T2 biometric consumer's replay/one-shot treatment of the mode-0
-   ACM external form. Host-visible generic status 67 is already settled as
-   non-duplicate-specific and must map to `enroll-failed`.
+3. General replay/expiry behavior outside the proven retained-authority
+   ceremony. D196 and D218 settle successful mode-0 consumption for the exact
+   owned lifetime; ambiguous completion still fails closed and requires
+   inventory-led reconciliation rather than replay.
 4. Whether SEP snapshots the UID/keybag association at operation start or
    re-evaluates it during later Catacomb phases. Host-side evidence cannot
    distinguish the two, so the current protocol deliberately holds the same
@@ -596,6 +637,35 @@ before dispatch. Unknown envelopes are not enrollment outcomes; the daemon
 attempts legacy normalization or rejects them. A Linux bridge should preserve
 this two-level model (`envelope`, `ordinal`) and validate lengths before any
 state-machine transition.
+
+D183 supplied the first live Linux observation of `0xe3ff8009`: it arrived as
+version 1 after `ENROLL_START_OBSERVED`, with activation already `READY`, and
+the then-conservative reducer stopped outcome-unknown. The exact 24G830 x86_64
+case requires version 1, passes the decoded ordinal to
+`logSensorRecoveryReason:withTimestamp:`, does not inspect the accompanying
+data, and returns through the common path without changing operation state or
+sending a command. The matching bridgeOS packer independently confirms the
+common type/version/timestamp/ordinal/data-length record.
+
+D184 mirrors only that recovered boundary. A structurally valid version-1
+sensor-recovery event is a nonterminal auxiliary no-op: no identity selection,
+UI feedback, continue command, or state advancement. Wrong versions and
+truncated or length-inconsistent records remain terminal protocol ambiguity.
+This adapts T1Bridge's neutral treatment of non-enrollment messages, while the
+T2 envelope number, version, framing, and host semantics remain authoritative;
+T1 wire payloads and USB transport are rejected.
+
+The first D184 hardware run crossed the former unknown-envelope stop and then
+journaled generic terminal status 66, with no progress or identity event. That
+is cancellation in the exact host switch below, not an unrecovered protocol
+case. D185 preserves the result without changing the reducer: accepting status
+66 as progress or retry would conflict with the recovered implementation. The
+next fresh-boot discriminator is prompt operator finger contact after arming.
+
+D186 reproduced the same public stdout/stderr/exit-code hashes and the same
+four-record terminal-status-66 shape. That repetition confirms the cancellation
+boundary but cannot distinguish operator timing from sensor recognition. Do not
+spend another boot until the operator is physically ready at the sensor.
 
 ### Duplicate and capacity result mapping
 
@@ -2025,6 +2095,11 @@ device-stored-template reader:
   libfprint clear-storage is device-wide again and would affect every mapped
   macOS user, so none of these three operations may share an authorization or
   implementation path.
+- Exact 24G830 dispatch uses wrapper version 1, `inValue=0`, and a 20-byte
+  request ordered as little-endian UID followed by the 16 UUID bytes. A
+  successful deletion dirties both the selected user and master Catacombs.
+  Persistence is therefore a user/master pair with master last; saving only
+  user leaves the live state safely detectable as user-clean/master-dirty.
 - `EnrollStop`/cancellation must remain nonterminal until the SEP cancel reply
   or cancellation status is observed. Suspend is especially risky: libfprint
   permits a driver to finish, cancel, or resume an interactive action, but the
@@ -5478,7 +5553,13 @@ Before any mutating probe, require all of the following:
 6. One-command cancellation and a power-loss/reboot recovery plan.
 7. Explicit user approval for the exact mutating command and target identity.
 
-## Next research steps
+## Historical next research steps (superseded by D196-D218)
+
+The section below records the pre-hardware-validation research plan. Its mode-0
+consumer, mutation-journal, inventory, persistence, and deletion gates are now
+closed on the reference machine. The active next step is the broker,
+libfprint/fprintd, PAM, password-fallback, packaging, and broader-hardware work
+summarized at the top of this file.
 
 ### Remaining-unknown classification
 
@@ -5996,6 +6077,67 @@ query; or explicitly authorize a disposable-finger T2 experiment after the
 non-mutating broker and journal exist. Until one of those occurs, additional
 static prose refinement is not progress toward the remaining unknowns.
 
+## Live capture interaction finding (2026-09-12)
+
+D187 crossed Linux-native activation and accepted enrollment start, then
+recorded the first real sensor feedback on the clean-wipe target. The first
+touch was recognized; later events included finger-present, finger-removed,
+and retry-scan. The run stopped on an exact duplicate event after both the
+operator and automation responded to per-capture Enter prompts. That overlapping
+input ownership makes duplicate causality ambiguous and supplies no basis for
+weakening the conservative reducer. No identity or Catacomb delta followed.
+
+D188 removed the per-capture keyboard gate. Its one live run then recorded 42
+finger-present, 41 retry-scan, and 41 finger-removed records with no progress
+or completion before stopping fail-closed. This is material evidence that the
+next problem was interaction semantics: exact prior evidence identifies status
+63/64 as presence/absence, while the D188 TUI mislabeled 63 as captured and
+instructed a lift. Presence alone does not authorize that conclusion.
+
+D189 starts the already-authorized bounded operation without keyboard input.
+Its original sustained-hold guidance was later falsified by D191: the sensor
+expects fraction-of-a-second touches, not sustained contact. D192 cues
+immediate lift at presence without labeling it accepted progress and requests
+another brief touch after release. It adapts T1Bridge's
+minimal Enrollment/Retry/Success vocabulary, backend-owned progress,
+and auto-activation, while improving the beta reference with monotonic
+progress, explicit Q/Escape enrollment cancellation, and accessible sensor
+guidance. T2 retains fail-closed behavior if the safety-critical guidance path
+is lost during bring-up rather than adopting T1's cosmetic-failure
+independence. T2 event framing, duplicate protection,
+authorization, BioLockout, and persistence remain authoritative; T1 wire,
+secrets, USB transport, and Touch Bar-specific state transport remain rejected.
+
+D189's first no-Enter live launch also established the readiness boundary. With
+no operator contact, the exact event sequence reached accepted start status 0,
+then retry-scan, finger-removed, and raw terminal status 68 without progress.
+Exact host evidence classifies 68 as timeout. Latest locally fetched T1Bridge
+`02885e4b3c51` activates its overlay within an operation the user has already
+initiated. The transferable invariant is therefore not unattended start: it is
+automatic overlay activation after user intent and readiness already exist.
+For the automated T2 harness, the sole TUI launch must wait for explicit
+physical readiness; capture thereafter remains sensor-driven with no Enter.
+
+D190 exposed the next retained-identity lifecycle edge before sensor start. A
+clean reboot can leave the negative alias absent even though the saved positive
+keybag and protected mapping remain authoritative. The retained enrollment
+scope rejected that state before loading, although its purpose is to load the
+positive keybag and rebind the alias. D191 admits only clean `alias-absent` at
+that gate and preserves activation authority, UUID verification, bind,
+configuration, ACM unlock, unload, and independent ready read-back. This is the
+same persisted-user lifetime adapted from T1Bridge; quarantine classifications
+remain rejected.
+
+D191 then proved the corrected retained lifecycle live: it reached ready,
+armed enrollment, and accepted start status zero. Sustained-hold guidance
+produced 39 complete presence/retry/removal cycles and zero accepted progress.
+The bounded stop preserved an outcome-unknown journal without identity,
+Catacomb, or persistence. Operator evidence establishes that contact detection
+takes a fraction of a second and the finger is never held. D192 therefore
+adapts T1Bridge's event-driven Enrollment/Retry/Success presentation and rejects
+the invented hold phase while keeping T2 status-63 presence distinct from
+backend-owned accepted progress.
+
 ## Research conclusion (2026-08-28)
 
 | Capability | Evidence status | Feasibility decision |
@@ -6160,3 +6302,28 @@ fingerprint setup.
   https://fprint.freedesktop.org/libfprint-dev/FpDevice.html
 - libfprint's official on-device print representation:
   https://fprint.freedesktop.org/libfprint-dev/FpPrint.html
+
+## D193 live enrollment-readiness discriminator
+
+D192 proved that accepted command `0x03` and contact callbacks do not imply
+capture readiness. After its terminal timeout, fresh reads showed an empty
+identity list, secure-loaded selected user, and enabled protected policies, but
+command `0x28` reported calibration unloaded. The native enrollment path had
+omitted the existing T2 readiness/reset/sensor-info/calibration lifecycle.
+
+The corrected pre-dispatch order is: readiness `0x53`; bounded reset `0x02`
+value 2; sensor info `0x35`; daemon/calibration gate `0x28`; bridgeOS FDR
+method 11 with EEPROM method 5 fallback; conditional calibration load `0x20`
+and `0x28` readback; selected user `0x31`; bounded `0x28`/`0x3c` state refresh;
+empty per-user identity list `0x42`; repeated `0x28`/`0x3c`; and protected
+policy reads `0x43`/`0x2e`. Live execution of that full slice reached a
+calibrated, secure, empty, policy-ready state without dispatching enrollment.
+
+D194 supplied the missing temporal discriminator. The operation's terminal
+files were complete after 27 seconds, before the helper returned a sampled
+ready screen at 28.21 seconds. The enrollment journal contains accepted start
+followed immediately by status 66 and no physical event. After reset and
+calibration, the exact T2 startup lifecycle therefore requires its residual
+command-`0x0c` cancellation before a new enrollment operation. D195 adds that
+boundary and separates authorization-ready from the post-accepted-start
+`enrollment-active` handoff.

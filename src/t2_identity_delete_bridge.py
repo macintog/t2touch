@@ -84,7 +84,10 @@ class IdentityDeleteBridge:
         try:
             reply, events = self._lease.biometric_command(
                 0x0D,
-                version=0,
+                # Apple's performRemoveIdentityCommand: supplies zero as the
+                # distinct inValue argument.  The inner biometric command
+                # wrapper itself remains version 1.
+                version=1,
                 value=0,
                 data=request,
                 output_capacity=0,

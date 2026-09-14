@@ -5,18 +5,34 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
+import t2_native_post_reboot_reconciler
+import t2_post_reboot_diagnostic
 import t2_post_reboot_reconciler
 
 
 def main() -> int:
     try:
-        result = t2_post_reboot_reconciler.run()
-    except t2_post_reboot_reconciler.PostRebootReconcilerError:
+        mode = os.environ.get("T2_TOUCHID_AUTHORITY_MODE")
+        if mode == "linux-native":
+            result = t2_native_post_reboot_reconciler.run()
+            if result.state == "no-pending-mutation":
+                result = (
+                    t2_native_post_reboot_reconciler.reconcile_external_deletion_if_needed()
+                )
+        elif mode == "macos-control-oracle":
+            result = t2_post_reboot_reconciler.run()
+        else:
+            raise RuntimeError("configured authority mode is invalid")
+    except Exception as error:
         print(
-            "t2-touchid-post-reboot: reconciliation stopped; "
-            "inspect the private service journal",
+            json.dumps(
+                t2_post_reboot_diagnostic.redacted_failure(error),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             file=sys.stderr,
         )
         return 1

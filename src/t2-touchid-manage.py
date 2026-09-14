@@ -29,6 +29,10 @@ elif INSTALLED_SOURCE.is_dir():
     sys.path.insert(0, str(INSTALLED_SOURCE))
 
 import t2_baseline
+import t2_acm_device
+import t2_activation_bundle
+import t2_aks_transport
+import t2_biolockout_store
 import t2_bridge_connection
 import t2_bridge_inventory
 import t2_catacomb_bridge
@@ -38,9 +42,11 @@ import t2_catacomb_protocol
 import t2_catacomb_store
 import t2_catacomb_sync_journal
 import t2_enrollment_finalizer
+import t2_enrollment_journal
 import t2_enrollment_persistence_journal
 import t2_external_delete_reconcile
 import t2_fprint_projection
+import t2_fprint_sequence
 import t2_identity_delete
 import t2_identity_delete_bridge
 import t2_identity_delete_journal
@@ -57,16 +63,24 @@ import t2_identity_rename_recovery
 import t2_identity_rename_reconciliation
 import t2_mutation_journal
 import t2_mutation_registry
+import t2_native_state_restore
+import t2_native_caller_authorization
+import t2_user_activation_operation
+import t2_user_authority
 import t2_user_mapping
+import t2_user_policy
+import t2_user_readiness
 
 
 CONFIG = Path("/etc/t2-touchid.conf")
 KEYBAG_STATE = Path("/run/t2-touchid/keybag.env")
 PORT_CACHE = Path("/var/lib/t2-touchid/biometric-port")
 STATE_ROOT = Path("/var/lib/t2-touchid")
+RUN_ROOT = Path("/run/t2-touchid")
 BACKUP_ROOT = STATE_ROOT / "backups"
 STORE_ROOT = STATE_ROOT / "catacomb"
 MUTATION_ROOT = STATE_ROOT / "mutations"
+ACTIVATION_ROOT = STATE_ROOT / "activation"
 EXTERNAL_BACKUP_ROOT = STATE_ROOT / "external-reconciliation-backups"
 OPERATION_LOCK = Path("/run/t2-touchid/operation.lock")
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
@@ -108,6 +122,7 @@ def runtime_configuration() -> dict[str, object]:
             "T2_TOUCHID_INTERFACE",
             "T2_TOUCHID_MACOS_USER_ID",
             "T2_TOUCHID_SPECIAL_BAG",
+            "T2_TOUCHID_AUTHORITY_MODE",
         },
     )
     try:
@@ -125,6 +140,8 @@ def runtime_configuration() -> dict[str, object]:
         or not 0 <= int(apple_text) <= 0xFFFFFFFF
         or not re.fullmatch(r"-[0-9]+", special_text)
         or int(special_text) != -int(apple_text)
+        or values["T2_TOUCHID_AUTHORITY_MODE"]
+        not in {"linux-native", "macos-control-oracle"}
         or not values["T2_TOUCHID_HOST"]
         or not values["T2_TOUCHID_INTERFACE"]
     ):
@@ -167,6 +184,7 @@ def runtime_configuration() -> dict[str, object]:
         "protected_mapping_present": protected_mapping_present,
         "mapping_enabled": mapping_enabled,
         "mapping_capabilities": mapping_capabilities,
+        "authority_mode": values["T2_TOUCHID_AUTHORITY_MODE"],
     }
 
 
@@ -240,13 +258,277 @@ def select_backup() -> Path:
 
 
 def warm_sensor() -> None:
+    # Readiness is a shared prerequisite for fprintd, post-reboot recovery,
+    # and management.  Restarting it from a dependent management process
+    # causes systemd to terminate that very process through Requires=.  An
+    # idempotent start establishes the prerequisite for a standalone CLI and
+    # leaves an already-owned readiness instance intact.
     completed = subprocess.run(
-        ["/usr/bin/systemctl", "restart", "t2-biometric-ready.service"],
+        ["/usr/bin/systemctl", "start", "t2-biometric-ready.service"],
         check=False,
         timeout=60,
     )
     if completed.returncode:
         raise IdentityManagementError("BiometricKit warm-up failed")
+
+
+def _native_grant(
+    *,
+    action: str,
+    authority: t2_user_authority.RuntimeUserAuthority,
+    operation_id: str,
+    linux_boot_uuid: str,
+    runtime_generation: str,
+    now: int,
+) -> t2_user_policy.PolicyGrant:
+    selected = authority.selected
+    return t2_user_policy.PolicyGrant(
+        authorization_id=str(uuid.uuid4()),
+        action=action,
+        caller_linux_uid=selected.linux_uid,
+        linux_account_generation=selected.linux_account_generation,
+        target_linux_uid=selected.linux_uid,
+        mapping_generation=authority.mapping_set.generation,
+        operation_id=operation_id,
+        linux_boot_uuid=linux_boot_uuid,
+        runtime_generation=runtime_generation,
+        issued_monotonic_ns=now,
+        expires_monotonic_ns=now + 60 * 1_000_000_000,
+        authorized=True,
+    )
+
+
+def _authorize_native_management(
+    authority: t2_user_authority.RuntimeUserAuthority,
+    transport: t2_aks_transport.AKSActivationTransport,
+    *,
+    operation: str,
+    linux_boot_uuid: str,
+    operation_id: str | None = None,
+    operation_grant: t2_user_policy.PolicyGrant | None = None,
+    activation_grant: t2_user_policy.PolicyGrant | None = None,
+) -> tuple[t2_user_policy.UserPolicyDecision, str]:
+    policy = t2_user_policy.OPERATION_POLICIES[operation]
+    selected = authority.selected
+    operation_id = str(uuid.uuid4()) if operation_id is None else operation_id
+    now = time.monotonic_ns()
+    request = t2_user_policy.OperationRequest(
+        operation,
+        selected.linux_uid,
+        operation_id,
+        linux_boot_uuid,
+        transport.runtime_generation,
+        now,
+        policy.mutation,
+    )
+    caller = t2_user_policy.CallerEvidence(
+        selected.linux_uid,
+        selected.linux_account_generation,
+        True,
+        True,
+    )
+    decision = t2_user_policy.authorize(
+        authority.mapping_set,
+        request,
+        caller,
+        authority.persistent,
+        transport.observe_alias(selected.special_bag_alias),
+        operation_grant or _native_grant(
+            action=policy.action,
+            authority=authority,
+            operation_id=operation_id,
+            linux_boot_uuid=linux_boot_uuid,
+            runtime_generation=transport.runtime_generation,
+            now=now,
+        ),
+        activation_grant or _native_grant(
+            action=t2_user_policy.ACTIVATE_ACTION,
+            authority=authority,
+            operation_id=operation_id,
+            linux_boot_uuid=linux_boot_uuid,
+            runtime_generation=transport.runtime_generation,
+            now=now,
+        ),
+    )
+    if decision.state not in {"authorized", "activation-authorized"}:
+        raise IdentityManagementError(
+            "Linux-native identity management was not authorized"
+        )
+    return decision, operation_id
+
+
+@contextmanager
+def _native_management_lease(
+    configuration: dict[str, object], *, operation: str, restore_state: bool = True,
+    authorization_session: object | None = None,
+    operation_id: str | None = None,
+) -> Iterator[tuple[
+    t2_user_authority.RuntimeUserAuthority,
+    t2_catacomb_store.CatacombStore,
+    dict[str, object],
+    t2_catacomb_codec.UserCatacomb,
+    t2_bridge_connection.BridgeConnectionLease,
+    dict[str, object],
+]]:
+    """Hold Linux-native keybag authority across one management connection."""
+    authority = t2_user_authority.load(int(configuration["linux_uid"]))
+    selected = authority.selected
+    if (
+        authority.origin != "linux-native-e4"
+        or selected.apple_uid != configuration["apple_uid"]
+        or selected.activation_secret_path is None
+        or selected.activation_secret_sha256 is None
+    ):
+        raise IdentityManagementError(
+            "Linux-native E4 management authority is unavailable"
+        )
+    linux_boot_uuid = str(uuid.UUID(BOOT_ID.read_text(encoding="ascii").strip()))
+    policy = t2_user_policy.OPERATION_POLICIES[operation]
+    store = t2_catacomb_store.CatacombStore(STORE_ROOT, selected.apple_uid)
+    authority_history = t2_enrollment_journal.read(authority.enrollment_journal)
+    with (
+        t2_aks_transport.AKSActivationTransport() as transport,
+        t2_acm_device.ACMDevice() as acm_device,
+    ):
+        selected_operation_id = (
+            str(uuid.uuid4()) if operation_id is None else operation_id
+        )
+        caller_authorization = None
+        if authorization_session is not None:
+            caller_authorization = t2_native_caller_authorization.collect(
+                authorization_session,
+                authority,
+                operation=operation,
+                operation_id=selected_operation_id,
+                linux_boot_uuid=linux_boot_uuid,
+                runtime_generation=transport.runtime_generation,
+            )
+        decision, activation_id = _authorize_native_management(
+            authority,
+            transport,
+            operation=operation,
+            linux_boot_uuid=linux_boot_uuid,
+            operation_id=selected_operation_id,
+            operation_grant=(
+                caller_authorization.operation_grant
+                if caller_authorization is not None
+                else None
+            ),
+            activation_grant=(
+                caller_authorization.activation_grant
+                if caller_authorization is not None
+                else None
+            ),
+        )
+        activation_journal = ACTIVATION_ROOT / f"{activation_id}.jsonl"
+        with t2_activation_bundle.activation_secret(
+            Path(selected.activation_secret_path),
+            selected.activation_secret_sha256,
+        ) as activation_material:
+            with t2_user_activation_operation.retain_ready_identity_handle(
+                activation_journal,
+                authority.mapping_set,
+                selected,
+                policy.capability,
+                authority.persistent,
+                transport,
+                authorization=decision,
+                linux_boot_uuid=linux_boot_uuid,
+            ) as retained_state:
+                if retained_state in {"device-locked", "before-first-unlock"}:
+                    t2_user_activation_operation.prepare_retained_identity(
+                        activation_journal, selected, transport
+                    )
+                final_policy = None
+                try:
+                    with t2_acm_device.identity_authorized_context(
+                        acm_device,
+                        selected.apple_uid,
+                        activation_material,
+                        transport.bind_loaded_identity_secret_to_acm_context,
+                        include_authorization_context=True,
+                    ) as proof:
+                        if len(proof) != 4:
+                            raise IdentityManagementError(
+                                "native management authorization omitted its output context"
+                            )
+                        _initial, final_policy, identity_reference, _output_context = proof
+                        if retained_state in {"device-locked", "before-first-unlock"}:
+                            t2_user_activation_operation.unlock_retained_identity(
+                                activation_journal,
+                                selected,
+                                policy.capability,
+                                authority.persistent,
+                                transport,
+                                identity_reference,
+                            )
+                        with t2_bridge_connection.BridgeConnectionLease.connect(
+                            str(configuration["host"]),
+                            str(configuration["interface"]),
+                            _port(),
+                            timeout=60,
+                            defer_client_version=True,
+                        ) as lease:
+                            t2_bridge_inventory.attest_preclient_protocol(
+                                lease, selected.apple_uid
+                            )
+                            lease.select_client_version()
+                            restored_count = None
+                            if restore_state:
+                                restored_count = t2_native_state_restore.restore_for_enrollment(
+                                    lease,
+                                    apple_user_id=selected.apple_uid,
+                                    catacomb_store=store,
+                                    biolockout_store=t2_biolockout_store.BioLockoutStore(
+                                        str(STATE_ROOT / "biolockout")
+                                    ),
+                                )
+                            host = t2_enrollment_finalizer.read_local_host_snapshot(
+                                store, authority_history.baseline
+                            )
+                            components = store.read_committed_components()
+                            local = t2_catacomb_codec.decode_user_catacomb(
+                                components[f"user_{selected.apple_uid:08x}.cat"],
+                                selected.apple_uid,
+                            )
+                            live = t2_bridge_inventory.collect_stable_private_inventory(
+                                lease, selected.apple_uid
+                            )
+                            reconciled = (
+                                t2_identity_inventory.summarize(local, live)
+                                if restore_state
+                                else None
+                            )
+                            if restore_state and (
+                                restored_count != len(local.identities)
+                                or reconciled["identity_count"] != len(local.identities)
+                                or host.get("account_uuid") != selected.account_uuid
+                                or host.get("bag_uuid") != selected.bag_uuid
+                            ):
+                                raise IdentityManagementError(
+                                    "Linux-native management inventory did not reconcile"
+                                )
+                            if (
+                                caller_authorization is not None
+                                and not caller_authorization.dispatch_allowed()
+                            ):
+                                raise IdentityManagementError(
+                                    "caller authority expired before native handoff"
+                                )
+                            yield authority, store, host, local, lease, live
+                except t2_acm_device.ACMContextCleanupError as error:
+                    if error.primary_error is not None:
+                        t2_acm_device.raise_primary_after_identity_cleanup_close(
+                            error, acm_device
+                        )
+                    else:
+                        t2_acm_device.reconcile_identity_cleanup_after_close(
+                            error, acm_device
+                        )
+                if final_policy is None or final_policy.satisfied is not True:
+                    raise IdentityManagementError(
+                        "Linux-native management policy was not satisfied"
+                    )
 
 
 def _sleep_inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
@@ -276,6 +558,18 @@ def _sleep_inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
 
 @contextmanager
 def operation_lock() -> Iterator[None]:
+    try:
+        RUN_ROOT.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    root_info = RUN_ROOT.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != 0
+        or root_info.st_gid != 0
+        or root_info.st_mode & 0o077
+    ):
+        raise IdentityManagementError("management runtime directory is not private")
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -407,6 +701,22 @@ def delete_journals() -> list[tuple[Path, object]]:
     return found
 
 
+def enrollment_journals() -> list[tuple[Path, object]]:
+    _private_root_owned(MUTATION_ROOT, directory=True)
+    found = []
+    for entry in sorted(MUTATION_ROOT.iterdir(), key=lambda value: value.name):
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl",
+            entry.name,
+        ) or not t2_mutation_journal.secure_regular_file(entry):
+            raise IdentityManagementError("mutation journal directory is unsafe")
+        records = t2_mutation_journal.read(entry)
+        evidence = records[0].get("evidence") if records else None
+        if isinstance(evidence, dict) and evidence.get("operation_kind") == "enroll":
+            found.append((entry, t2_enrollment_journal.validate_history(records)))
+    return found
+
+
 def external_delete_journals() -> list[tuple[Path, object]]:
     _private_root_owned(MUTATION_ROOT, directory=True)
     found = []
@@ -498,6 +808,8 @@ def status() -> dict[str, object]:
 def run_rename(
     configuration: dict[str, object], *, slot: int, new_name: str
 ) -> dict[str, object]:
+    if configuration.get("authority_mode", "macos-control-oracle") == "linux-native":
+        return run_rename_native(configuration, slot=slot, new_name=new_name)
     require_mapping_capability(configuration, "identity-management")
     if t2_mutation_registry.blocks_new_mutation(MUTATION_ROOT):
         raise IdentityManagementError(
@@ -524,6 +836,9 @@ def run_rename(
         )
         renamed_projection = t2_fprint_projection.project(
             t2_identity_inventory.summarize(renamed_local, live)
+        )
+        t2_fprint_sequence.reconcile(
+            configuration["apple_uid"], renamed_projection.finger_names
         )
         baseline = t2_baseline.build_baseline(
             host=host,
@@ -620,6 +935,128 @@ def run_rename(
         "fprint_duplicate_name_count": (
             renamed_projection.duplicate_finger_name_count
         ),
+        "post_reboot_verification_required": True,
+        "identifiers_redacted": True,
+    }
+
+
+def run_rename_native(
+    configuration: dict[str, object], *, slot: int, new_name: str
+) -> dict[str, object]:
+    require_mapping_capability(configuration, "identity-management")
+    if t2_mutation_registry.blocks_new_mutation(MUTATION_ROOT):
+        raise IdentityManagementError(
+            "an earlier biometric mutation is unfinished or awaits verification"
+        )
+    if os.path.lexists(STORE_ROOT / "prepare") or os.path.lexists(
+        STORE_ROOT / "commit"
+    ):
+        raise IdentityManagementError("a local Catacomb transaction needs recovery")
+    with _native_management_lease(
+        configuration, operation="rename"
+    ) as (authority, store, host, local, lease, live):
+        selected = authority.selected
+        plan = t2_identity_rename.plan(local, live, slot=slot, new_name=new_name)
+        renamed_local = t2_catacomb_codec.decode_user_catacomb(
+            plan.archive, selected.apple_uid
+        )
+        renamed_projection = t2_fprint_projection.project(
+            t2_identity_inventory.summarize(renamed_local, live)
+        )
+        t2_fprint_sequence.reconcile(
+            selected.apple_uid, renamed_projection.finger_names
+        )
+        authority_history = t2_enrollment_journal.read(authority.enrollment_journal)
+        baseline = t2_baseline.build_linux_native_existing_baseline(
+            host=host,
+            live=live,
+            caller_linux_uid=selected.linux_uid,
+            target_linux_uid=selected.linux_uid,
+            linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+            mapping_generation=authority.mapping_set.generation,
+            account_uuid=selected.account_uuid,
+            bag_uuid=selected.bag_uuid,
+            authority_reference="linux-native-e4:" + authority_history.operation_id,
+            authority_sha256=authority_history.head_hash,
+            password_fallback_verified=False,
+        )
+        operation_id = str(uuid.uuid4())
+        journal_path = MUTATION_ROOT / f"{operation_id}.jsonl"
+        t2_mutation_journal.create(
+            journal_path, "rename", baseline, operation_id=operation_id
+        )
+        t2_identity_rename_journal.append_checked(
+            journal_path,
+            operation_id,
+            "RENAME_INTENT",
+            {
+                "connection_generation": lease.connection_generation,
+                "user_id": selected.apple_uid,
+                "identity_uuid": plan.identity_uuid,
+                "entity": plan.entity,
+                "previous_name_sha256": hashlib.sha256(
+                    plan.previous_name.encode("utf-8")
+                ).hexdigest(),
+                "new_name_sha256": hashlib.sha256(
+                    plan.new_name.encode("utf-8")
+                ).hexdigest(),
+                "mapping_generation": authority.mapping_set.generation,
+            },
+        )
+        transport = t2_catacomb_bridge.CatacombBridgeTransport(
+            lease,
+            protocol_version=2,
+            connection_generation=lease.connection_generation,
+        )
+
+        def readback() -> t2_identity_rename_operation.RenameReadbackAttestation:
+            observed_live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, selected.apple_uid
+            )
+            observed_host = t2_enrollment_finalizer.read_local_host_snapshot(
+                store, baseline
+            )
+            components = store.read_committed_components()
+            observed_local = t2_catacomb_codec.decode_user_catacomb(
+                components[f"user_{selected.apple_uid:08x}.cat"], selected.apple_uid
+            )
+            attestation = t2_identity_rename_reconciliation.classify(
+                t2_identity_rename_journal.read(journal_path),
+                plan,
+                local=observed_local,
+                host=observed_host,
+                live=observed_live,
+                mapping_generation=authority.mapping_set.generation,
+            )
+            return t2_identity_rename_operation.RenameReadbackAttestation(
+                attestation.connection_generation,
+                attestation.snapshot_sha256,
+                attestation.identity_count,
+                attestation.identity_set_unchanged,
+                attestation.label_updated,
+                attestation.local_live_equal,
+            )
+
+        final = t2_identity_rename_operation.run(
+            journal_path,
+            operation_id,
+            plan=plan,
+            transport=transport,
+            store=store,
+            mapping_generation=authority.mapping_set.generation,
+            readback=readback,
+        )
+    if final.phase is not t2_identity_rename_journal.IdentityRenamePhase.RECONCILED:
+        raise IdentityManagementError("rename did not reach reconciled state")
+    return {
+        "schema_version": 1,
+        "rename_succeeded": True,
+        "slot": slot,
+        "name": new_name,
+        "identity_count": len(baseline["identity_records"]),
+        "fprint_projection_complete": renamed_projection.complete,
+        "fprint_unassigned_identity_count": renamed_projection.unassigned_identity_count,
+        "fprint_duplicate_name_count": renamed_projection.duplicate_finger_name_count,
         "post_reboot_verification_required": True,
         "identifiers_redacted": True,
     }
@@ -1110,6 +1547,8 @@ def _external_reconciliation_readback(
 
 def run_external_delete_reconciliation(
     configuration: dict[str, object],
+    *,
+    if_needed: bool = False,
 ) -> dict[str, object]:
     """Prune one local-only identity after an external SEP deletion."""
 
@@ -1123,18 +1562,52 @@ def run_external_delete_reconciliation(
     ):
         raise IdentityManagementError("a local Catacomb transaction needs recovery")
     _private_root_owned(EXTERNAL_BACKUP_ROOT, directory=True)
-    keybag_runtime(configuration["special_bag"])
-    store, _host, local, _backup = current_host_and_local(configuration)
-    components = store.read_committed_components()
-    user_name = f'user_{configuration["apple_uid"]:08x}.cat'
     operation_id = str(uuid.uuid4())
     journal_path = MUTATION_ROOT / f"{operation_id}.jsonl"
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
+    if configuration.get("authority_mode") == "linux-native":
+        lease_context = _native_management_lease(
+            configuration,
+            operation="delete-one",
+            restore_state=False,
+            operation_id=operation_id,
         )
+    else:
+        keybag_runtime(configuration["special_bag"])
+
+        @contextmanager
+        def compatibility_context():
+            store, host, local, _backup = current_host_and_local(configuration)
+            with t2_bridge_connection.BridgeConnectionLease.connect(
+                configuration["host"],
+                configuration["interface"],
+                _port(),
+                timeout=60,
+            ) as lease:
+                live = t2_bridge_inventory.collect_stable_private_inventory(
+                    lease, configuration["apple_uid"]
+                )
+                yield None, store, host, local, lease, live
+
+        lease_context = compatibility_context()
+    with lease_context as (_authority, store, _host, local, lease, live):
+        components = store.read_committed_components()
+        user_name = f'user_{configuration["apple_uid"]:08x}.cat'
+        if if_needed:
+            try:
+                inventory = t2_identity_inventory.summarize(local, live)
+            except t2_identity_inventory.IdentityInventoryError:
+                pass
+            else:
+                return {
+                    "schema_version": 1,
+                    "external_deletion_reconciliation_needed": False,
+                    "external_deletion_reconciled": False,
+                    "identity_count": inventory["identity_count"],
+                    "backup_created": False,
+                    "local_catacomb_mutated": False,
+                    "sep_mutation_performed": False,
+                    "identifiers_redacted": True,
+                }
         plan = t2_external_delete_reconcile.plan(local, live)
         backup = t2_external_delete_reconcile.create_backup(
             EXTERNAL_BACKUP_ROOT, operation_id, components
@@ -1426,10 +1899,10 @@ def run_external_delete_recovery(
 def require_fprint_name(name: object) -> str:
     if (
         not isinstance(name, str)
-        or name not in t2_fprint_projection.FINGER_NAME_SET
+        or not t2_fprint_projection.is_finger_name(name)
     ):
         raise IdentityManagementError(
-            "fprint migration requires one canonical anatomical finger name"
+            "fprint migration requires one neutral numbered finger handle"
         )
     return name
 
@@ -1449,26 +1922,43 @@ def run_fprint_rename_preflight(
         STORE_ROOT / "commit"
     ):
         raise IdentityManagementError("a local Catacomb transaction needs recovery")
-    keybag_runtime(configuration["special_bag"])
-    _store, _host, local, _backup = current_host_and_local(configuration)
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
-        )
-        current = t2_fprint_projection.project(
-            t2_identity_inventory.summarize(local, live)
-        )
-        plan = t2_identity_rename.plan(
-            local, live, slot=slot, new_name=new_name
-        )
-        renamed_local = t2_catacomb_codec.decode_user_catacomb(
-            plan.archive, configuration["apple_uid"]
-        )
-        projected = t2_fprint_projection.project(
-            t2_identity_inventory.summarize(renamed_local, live)
-        )
+    if configuration.get("authority_mode", "macos-control-oracle") == "linux-native":
+        with _native_management_lease(
+            configuration, operation="inventory"
+        ) as (_authority, _store, _host, local, _lease, live):
+            current = t2_fprint_projection.project(
+                t2_identity_inventory.summarize(local, live)
+            )
+            plan = t2_identity_rename.plan(
+                local, live, slot=slot, new_name=new_name
+            )
+            renamed_local = t2_catacomb_codec.decode_user_catacomb(
+                plan.archive, configuration["apple_uid"]
+            )
+            projected = t2_fprint_projection.project(
+                t2_identity_inventory.summarize(renamed_local, live)
+            )
+    else:
+        keybag_runtime(configuration["special_bag"])
+        _store, _host, local, _backup = current_host_and_local(configuration)
+        with t2_bridge_connection.BridgeConnectionLease.connect(
+            configuration["host"], configuration["interface"], _port(), timeout=60
+        ) as lease:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, configuration["apple_uid"]
+            )
+            current = t2_fprint_projection.project(
+                t2_identity_inventory.summarize(local, live)
+            )
+            plan = t2_identity_rename.plan(
+                local, live, slot=slot, new_name=new_name
+            )
+            renamed_local = t2_catacomb_codec.decode_user_catacomb(
+                plan.archive, configuration["apple_uid"]
+            )
+            projected = t2_fprint_projection.project(
+                t2_identity_inventory.summarize(renamed_local, live)
+            )
     return {
         "schema_version": 1,
         "fprint_rename_preflight_succeeded": True,
@@ -1497,6 +1987,7 @@ def _persist_delete(
     journal_path: Path,
     operation_id: str,
     plan: t2_identity_delete.IdentityDeletePlan,
+    master_only: bool = False,
 ) -> t2_identity_delete_journal.IdentityDeleteHistory:
     return t2_identity_delete_pipeline.persist(
         lease=lease,
@@ -1506,10 +1997,372 @@ def _persist_delete(
         plan=plan,
         apple_uid=configuration["apple_uid"],
         mapping_generation=configuration["mapping_generation"],
+        master_only=master_only,
     )
 
 
+def _normalize_delete_recovery_resume(
+    path: Path,
+    history: t2_identity_delete_journal.IdentityDeleteHistory,
+) -> tuple[t2_identity_delete_journal.IdentityDeleteHistory, bool]:
+    """Make a stopped forward-recovery observation retryable on a new lease."""
+
+    stranded_before_persistence = (
+        history.phase
+        is t2_identity_delete_journal.IdentityDeletePhase.SEP_DELETED
+        and history.recovery_action is not None
+        and history.persistence.phase
+        is t2_enrollment_persistence_journal.PersistencePhase.NOT_STARTED
+        and history.persistence_connection_generation
+        != history.baseline["connection_generation"]
+    )
+    if stranded_before_persistence:
+        history = t2_identity_delete_journal.append_checked(
+            path,
+            history.operation_id,
+            "DELETE_OUTCOME_UNKNOWN",
+            {
+                "connection_generation": history.persistence_connection_generation,
+                "stage": "persistence",
+                "reason": "process-interrupted",
+                "mutation_possible": True,
+            },
+        )
+    retrying_forward_recovery = (
+        history.recovery_action is not None
+        and history.phase
+        is t2_identity_delete_journal.IdentityDeletePhase.OUTCOME_UNKNOWN
+        and history.persistence_connection_generation
+        != history.baseline["connection_generation"]
+    )
+    return history, retrying_forward_recovery
+
+
+def _pending_unverified_addition() -> tuple[
+    Path, t2_enrollment_journal.EnrollmentHistory
+]:
+    candidates = [
+        (path, history)
+        for path, history in enrollment_journals()
+        if (
+            history.phase is t2_enrollment_journal.EnrollmentPhase.RECONCILED
+            and history.baseline.get("baseline_version") == 1
+            and history.terminal_identity_uuid is not None
+        )
+    ]
+    blockers = [
+        entry
+        for entry in t2_mutation_registry.scan(MUTATION_ROOT)
+        if entry.blocks_new_mutation
+    ]
+    if (
+        len(candidates) != 1
+        or len(blockers) != 1
+        or blockers[0].kind != "enroll"
+        or blockers[0].phase
+        != t2_enrollment_journal.EnrollmentPhase.RECONCILED.value
+    ):
+        raise IdentityManagementError(
+            "unverified addition rollback requires one sole pending enrollment"
+        )
+    return candidates[0]
+
+
+def _rollback_delete_for(
+    enrollment: t2_enrollment_journal.EnrollmentHistory,
+) -> t2_identity_delete_journal.IdentityDeleteHistory | None:
+    baseline_records = enrollment.baseline.get("identity_records")
+    if not isinstance(baseline_records, list):
+        raise IdentityManagementError("unverified addition baseline is malformed")
+    baseline_pairs = {
+        (record.get("user_id"), record.get("uuid"), record.get("entity"))
+        for record in baseline_records
+        if isinstance(record, dict)
+    }
+    if len(baseline_pairs) != len(baseline_records):
+        raise IdentityManagementError("unverified addition baseline is malformed")
+    matches = []
+    for _path, history in delete_journals():
+        delete_records = history.baseline.get("identity_records")
+        delete_pairs = {
+            (record.get("user_id"), record.get("uuid"), record.get("entity"))
+            for record in delete_records
+            if isinstance(record, dict)
+        } if isinstance(delete_records, list) else set()
+        target_pairs = {
+            pair
+            for pair in delete_pairs
+            if pair[1] == enrollment.terminal_identity_uuid
+        }
+        if (
+            history.phase is t2_identity_delete_journal.IdentityDeletePhase.RECONCILED
+            and history.target_identity_uuid == enrollment.terminal_identity_uuid
+            and history.baseline.get("apple_uid")
+            == enrollment.baseline.get("apple_uid")
+            and history.baseline.get("mapping_generation")
+            == enrollment.baseline.get("mapping_generation")
+            and delete_pairs - target_pairs == baseline_pairs
+            and len(target_pairs) == 1
+            and len(delete_pairs) == len(baseline_pairs) + 1
+        ):
+            matches.append(history)
+    if len(matches) > 1:
+        raise IdentityManagementError(
+            "multiple deletions claim the unverified addition"
+        )
+    return matches[0] if matches else None
+
+
+def _close_unverified_addition_rollback(
+    enrollment_path: Path,
+    enrollment: t2_enrollment_journal.EnrollmentHistory,
+    deletion: t2_identity_delete_journal.IdentityDeleteHistory,
+) -> t2_enrollment_journal.EnrollmentHistory:
+    if (
+        deletion.phase is not t2_identity_delete_journal.IdentityDeletePhase.RECONCILED
+        or deletion.target_identity_uuid != enrollment.terminal_identity_uuid
+        or deletion.reconciled_linux_boot_uuid is None
+        or deletion.reconciled_snapshot_sha256 is None
+    ):
+        raise IdentityManagementError(
+            "unverified addition deletion is not reconciled"
+        )
+    baseline_count = len(enrollment.baseline["identity_records"])
+    return t2_enrollment_journal.append_checked(
+        enrollment_path,
+        enrollment.operation_id,
+        "ADDITION_ROLLED_BACK",
+        {
+            "linux_boot_uuid": deletion.reconciled_linux_boot_uuid,
+            "identity_uuid": enrollment.terminal_identity_uuid,
+            "delete_operation_id": deletion.operation_id,
+            "delete_journal_head_sha256": deletion.head_hash,
+            "baseline_identity_count": baseline_count,
+            "identity_count": baseline_count,
+            "target_absent": True,
+            "local_live_equal": True,
+            "account_bindings_preserved": True,
+        },
+    )
+
+
+def run_unverified_addition_rollback(
+    configuration: dict[str, object],
+) -> dict[str, object]:
+    """Remove only the newly observed identity that failed exact matching."""
+
+    require_mapping_capability(configuration, "identity-management")
+    enrollment_path, enrollment = _pending_unverified_addition()
+    completed = _rollback_delete_for(enrollment)
+    if completed is None:
+        deletion = run_delete(
+            configuration,
+            target_identity_uuid=enrollment.terminal_identity_uuid,
+            rollback_enrollment=(enrollment_path, enrollment),
+        )
+        if deletion.get("delete_succeeded") is not True:
+            raise IdentityManagementError(
+                "unverified addition remains present after rollback"
+            )
+        completed = _rollback_delete_for(enrollment)
+        if completed is None:
+            raise IdentityManagementError(
+                "unverified addition deletion was not durably reconciled"
+            )
+    final = _close_unverified_addition_rollback(
+        enrollment_path, enrollment, completed
+    )
+    if final.phase is not t2_enrollment_journal.EnrollmentPhase.ADDITION_ROLLED_BACK:
+        raise IdentityManagementError("unverified addition rollback did not close")
+    return {
+        "schema_version": 1,
+        "unverified_addition_rolled_back": True,
+        "identity_count": len(enrollment.baseline["identity_records"]),
+        "fingerprint_mutation_performed": True,
+        "local_catacomb_reconciled": True,
+        "identifiers_redacted": True,
+    }
+
+
 def run_delete(
+    configuration: dict[str, object], *, slot: int | None = None,
+    finger_name: str | None = None,
+    target_identity_uuid: str | None = None,
+    rollback_enrollment: tuple[
+        Path, t2_enrollment_journal.EnrollmentHistory
+    ] | None = None,
+    authorization_session: object | None = None,
+) -> dict[str, object]:
+    ordinary_selector = (slot is not None) ^ (finger_name is not None)
+    rollback_selector = (
+        slot is None
+        and finger_name is None
+        and target_identity_uuid is not None
+        and rollback_enrollment is not None
+    )
+    if ordinary_selector == rollback_selector:
+        raise IdentityManagementError("exactly one deletion selector is required")
+    if configuration.get("authority_mode", "macos-control-oracle") == (
+        "macos-control-oracle"
+    ):
+        if slot is None:
+            raise IdentityManagementError(
+                "compatibility deletion requires a reconciled slot"
+            )
+        return run_delete_compatibility(configuration, slot=slot)
+    require_mapping_capability(configuration, "identity-management")
+    if rollback_selector:
+        enrollment_path, enrollment_history = rollback_enrollment
+        if (
+            enrollment_history.phase
+            is not t2_enrollment_journal.EnrollmentPhase.RECONCILED
+            or enrollment_history.baseline.get("baseline_version") != 1
+            or enrollment_history.terminal_identity_uuid != target_identity_uuid
+            or enrollment_path.parent != MUTATION_ROOT
+        ):
+            raise IdentityManagementError(
+                "unverified addition rollback binding is invalid"
+            )
+    elif t2_mutation_registry.blocks_new_mutation(MUTATION_ROOT):
+        raise IdentityManagementError(
+            "an earlier biometric mutation is unfinished or awaits verification"
+        )
+    if os.path.lexists(STORE_ROOT / "prepare") or os.path.lexists(
+        STORE_ROOT / "commit"
+    ):
+        raise IdentityManagementError("a local Catacomb transaction needs recovery")
+    operation_id = str(uuid.uuid4())
+    with _native_management_lease(
+        configuration,
+        operation="delete-one",
+        authorization_session=authorization_session,
+        operation_id=operation_id,
+    ) as (authority, store, host, local, lease, live):
+        selected = authority.selected
+        native_configuration = {
+            **configuration,
+            "mapping_generation": authority.mapping_set.generation,
+        }
+        if rollback_selector:
+            expected = {
+                (record["user_id"], record["uuid"], record["entity"])
+                for record in enrollment_history.baseline["identity_records"]
+            }
+            observed = {
+                (identity.user_id, identity.uuid, identity.entity)
+                for identity in local.identities
+            }
+            target_pairs = {
+                pair for pair in observed if pair[1] == target_identity_uuid
+            }
+            if (
+                observed - target_pairs != expected
+                or len(target_pairs) != 1
+                or len(observed) != len(expected) + 1
+            ):
+                raise IdentityManagementError(
+                    "unverified addition is not the sole inventory delta"
+                )
+            plan = t2_identity_delete.plan_target(local, target_identity_uuid)
+        else:
+            plan = (
+                t2_identity_delete.plan(local, live, slot=slot)
+                if slot is not None
+                else t2_identity_delete.plan_named(
+                    local, live, finger_name=finger_name
+                )
+            )
+            current_projection = t2_fprint_projection.project(
+                t2_identity_inventory.summarize(local, live)
+            )
+            t2_fprint_sequence.reconcile(
+                selected.apple_uid, current_projection.finger_names
+            )
+        authority_history = t2_enrollment_journal.read(
+            authority.enrollment_journal
+        )
+        baseline = t2_baseline.build_linux_native_existing_baseline(
+            host=host,
+            live=live,
+            caller_linux_uid=selected.linux_uid,
+            target_linux_uid=selected.linux_uid,
+            linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+            mapping_generation=authority.mapping_set.generation,
+            account_uuid=selected.account_uuid,
+            bag_uuid=selected.bag_uuid,
+            authority_reference="linux-native-e4:" + authority_history.operation_id,
+            authority_sha256=authority_history.head_hash,
+            password_fallback_verified=False,
+        )
+        journal_path = MUTATION_ROOT / f"{operation_id}.jsonl"
+        t2_mutation_journal.create(
+            journal_path, "delete-one", baseline, operation_id=operation_id
+        )
+        t2_identity_delete_journal.append_checked(
+            journal_path,
+            operation_id,
+            "DELETE_INTENT",
+            {
+                "connection_generation": lease.connection_generation,
+                "user_id": selected.apple_uid,
+                "identity_uuid": plan.identity_uuid,
+                "entity": plan.entity,
+                "target_name_sha256": hashlib.sha256(
+                    plan.name.encode("utf-8")
+                ).hexdigest(),
+                "request_sha256": hashlib.sha256(plan.request).hexdigest(),
+                "request_length": len(plan.request),
+                "survivor_snapshot_sha256": plan.survivor_snapshot_sha256,
+                "survivor_count": len(local.identities) - 1,
+                "mapping_generation": authority.mapping_set.generation,
+            },
+        )
+        bridge = t2_identity_delete_bridge.IdentityDeleteBridge(
+            lease, connection_generation=lease.connection_generation
+        )
+        result = t2_identity_delete_operation.run(
+            journal_path,
+            operation_id,
+            plan=plan,
+            local=local,
+            bridge=bridge,
+            collect_inventory=lambda: (
+                t2_bridge_inventory.collect_stable_private_inventory(
+                    lease, configuration["apple_uid"]
+                )
+            ),
+        )
+        if result.outcome == "not-deleted":
+            return {
+                "schema_version": 1,
+                "delete_succeeded": False,
+                "outcome": "not-deleted",
+                "identity_count": len(local.identities),
+                "post_reboot_verification_required": False,
+                "identifiers_redacted": True,
+            }
+        final = _persist_delete(
+            native_configuration,
+            lease=lease,
+            store=store,
+            journal_path=journal_path,
+            operation_id=operation_id,
+            plan=plan,
+        )
+    if final.phase is not t2_identity_delete_journal.IdentityDeletePhase.RECONCILED:
+        raise IdentityManagementError("identity deletion did not reconcile")
+    return {
+        "schema_version": 1,
+        "delete_succeeded": True,
+        "slot": slot,
+        "finger_name": plan.name,
+        "identity_count": len(baseline["identity_records"]) - 1,
+        "post_reboot_verification_required": False,
+        "identifiers_redacted": True,
+    }
+
+
+def run_delete_compatibility(
     configuration: dict[str, object], *, slot: int
 ) -> dict[str, object]:
     require_mapping_capability(configuration, "identity-management")
@@ -1529,6 +2382,12 @@ def run_delete(
         live = t2_bridge_inventory.collect_stable_private_inventory(
             lease, configuration["apple_uid"]
         )
+        current_projection = t2_fprint_projection.project(
+            t2_identity_inventory.summarize(local, live)
+        )
+        t2_fprint_sequence.reconcile(
+            configuration["apple_uid"], current_projection.finger_names
+        )
         plan = t2_identity_delete.plan(local, live, slot=slot)
         baseline = t2_baseline.build_baseline(
             host=host,
@@ -1538,9 +2397,6 @@ def run_delete(
             linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
             mapping_generation=configuration["mapping_generation"],
             backup_reference=backup.name,
-            # Single deletion is credential-free.  The operation is bound by
-            # its mapping, target, live inventory, and journal—not by a
-            # password check this process never performs.
             password_fallback_verified=False,
         )
         operation_id = str(uuid.uuid4())
@@ -1576,10 +2432,8 @@ def run_delete(
             plan=plan,
             local=local,
             bridge=bridge,
-            collect_inventory=lambda: (
-                t2_bridge_inventory.collect_stable_private_inventory(
-                    lease, configuration["apple_uid"]
-                )
+            collect_inventory=lambda: t2_bridge_inventory.collect_stable_private_inventory(
+                lease, configuration["apple_uid"]
             ),
         )
         if result.outcome == "not-deleted":
@@ -1606,7 +2460,7 @@ def run_delete(
         "delete_succeeded": True,
         "slot": slot,
         "identity_count": len(baseline["identity_records"]) - 1,
-        "post_reboot_verification_required": True,
+        "post_reboot_verification_required": False,
         "identifiers_redacted": True,
     }
 
@@ -1623,15 +2477,21 @@ def run_delete_preflight(
         STORE_ROOT / "commit"
     ):
         raise IdentityManagementError("a local Catacomb transaction needs recovery")
-    keybag_runtime(configuration["special_bag"])
-    _store, _host, local, _backup = current_host_and_local(configuration)
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
-        )
-        plan = t2_identity_delete.plan(local, live, slot=slot)
+    if configuration.get("authority_mode", "macos-control-oracle") == "linux-native":
+        with _native_management_lease(
+            configuration, operation="inventory"
+        ) as (_authority, _store, _host, local, _lease, live):
+            plan = t2_identity_delete.plan(local, live, slot=slot)
+    else:
+        keybag_runtime(configuration["special_bag"])
+        _store, _host, local, _backup = current_host_and_local(configuration)
+        with t2_bridge_connection.BridgeConnectionLease.connect(
+            configuration["host"], configuration["interface"], _port(), timeout=60
+        ) as lease:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, configuration["apple_uid"]
+            )
+            plan = t2_identity_delete.plan(local, live, slot=slot)
     return {
         "schema_version": 1,
         "delete_preflight_succeeded": True,
@@ -1641,7 +2501,7 @@ def run_delete_preflight(
         "identity_count_before": len(local.identities),
         "identity_count_after": len(local.identities) - 1,
         "last_identity_deletion_refused": True,
-        "post_reboot_verification_required_after_delete": True,
+        "post_reboot_verification_required_after_delete": False,
         "selection_scope": "current-reconciled-list",
         "identifiers_redacted": True,
     }
@@ -1661,37 +2521,59 @@ def run_post_reboot_verification(
             "post-reboot verification requires exactly one reconciled rename"
         )
     path, history = candidates[0]
-    if (
-        history.baseline["apple_uid"] != configuration["apple_uid"]
-        or history.baseline["mapping_generation"]
-        != configuration["mapping_generation"]
-    ):
-        raise IdentityManagementError("rename journal belongs to another mapping")
-    keybag_runtime(configuration["special_bag"])
-    store = t2_catacomb_store.CatacombStore(
-        STORE_ROOT, configuration["apple_uid"]
-    )
-    host = t2_enrollment_finalizer.read_local_host_snapshot(store, history.baseline)
-    components = store.read_committed_components()
-    local = t2_catacomb_codec.decode_user_catacomb(
-        components[f'user_{configuration["apple_uid"]:08x}.cat'],
-        configuration["apple_uid"],
-    )
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
+    if configuration.get("authority_mode", "macos-control-oracle") == "linux-native":
+        with _native_management_lease(
+            configuration, operation="inventory"
+        ) as (authority, _store, host, local, _lease, live):
+            mapping_generation = authority.mapping_set.generation
+            apple_uid = authority.selected.apple_uid
+            if (
+                history.baseline["apple_uid"] != apple_uid
+                or history.baseline["mapping_generation"] != mapping_generation
+            ):
+                raise IdentityManagementError(
+                    "rename journal belongs to another native mapping"
+                )
+            final = t2_identity_rename_reconciliation.append_post_reboot_verified(
+                path,
+                history.operation_id,
+                local=local,
+                host=host,
+                live=live,
+                linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                mapping_generation=mapping_generation,
+            )
+    else:
+        mapping_generation = configuration["mapping_generation"]
+        apple_uid = configuration["apple_uid"]
+        if (
+            history.baseline["apple_uid"] != apple_uid
+            or history.baseline["mapping_generation"] != mapping_generation
+        ):
+            raise IdentityManagementError("rename journal belongs to another mapping")
+        store = t2_catacomb_store.CatacombStore(STORE_ROOT, apple_uid)
+        host = t2_enrollment_finalizer.read_local_host_snapshot(
+            store, history.baseline
         )
-        final = t2_identity_rename_reconciliation.append_post_reboot_verified(
-            path,
-            history.operation_id,
-            local=local,
-            host=host,
-            live=live,
-            linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
-            mapping_generation=configuration["mapping_generation"],
+        components = store.read_committed_components()
+        local = t2_catacomb_codec.decode_user_catacomb(
+            components[f"user_{apple_uid:08x}.cat"], apple_uid
         )
+        with t2_bridge_connection.BridgeConnectionLease.connect(
+            configuration["host"], configuration["interface"], _port(), timeout=60
+        ) as lease:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, apple_uid
+            )
+            final = t2_identity_rename_reconciliation.append_post_reboot_verified(
+                path,
+                history.operation_id,
+                local=local,
+                host=host,
+                live=live,
+                linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                mapping_generation=mapping_generation,
+            )
     if final.phase is not (
         t2_identity_rename_journal.IdentityRenamePhase.POST_REBOOT_VERIFIED
     ):
@@ -1718,37 +2600,60 @@ def run_delete_post_reboot_verification(
             "post-reboot verification requires exactly one reconciled deletion"
         )
     path, history = candidates[0]
-    if (
-        history.baseline["apple_uid"] != configuration["apple_uid"]
-        or history.baseline["mapping_generation"]
-        != configuration["mapping_generation"]
-    ):
-        raise IdentityManagementError("delete journal belongs to another mapping")
-    keybag_runtime(configuration["special_bag"])
-    store = t2_catacomb_store.CatacombStore(
-        STORE_ROOT, configuration["apple_uid"]
-    )
-    host = t2_enrollment_finalizer.read_local_host_snapshot(store, history.baseline)
-    components = store.read_committed_components()
-    local = t2_catacomb_codec.decode_user_catacomb(
-        components[f'user_{configuration["apple_uid"]:08x}.cat'],
-        configuration["apple_uid"],
-    )
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
+    if configuration.get("authority_mode", "macos-control-oracle") == "linux-native":
+        with _native_management_lease(
+            configuration, operation="inventory"
+        ) as (authority, _store, host, local, _lease, live):
+            mapping_generation = authority.mapping_set.generation
+            apple_uid = authority.selected.apple_uid
+            if (
+                history.baseline["apple_uid"] != apple_uid
+                or history.baseline["mapping_generation"] != mapping_generation
+            ):
+                raise IdentityManagementError(
+                    "delete journal belongs to another native mapping"
+                )
+            final = t2_identity_delete_reconciliation.append_post_reboot_verified(
+                path,
+                history.operation_id,
+                local=local,
+                host=host,
+                live=live,
+                linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                mapping_generation=mapping_generation,
+            )
+    else:
+        mapping_generation = configuration["mapping_generation"]
+        apple_uid = configuration["apple_uid"]
+        if (
+            history.baseline["apple_uid"] != apple_uid
+            or history.baseline["mapping_generation"] != mapping_generation
+        ):
+            raise IdentityManagementError("delete journal belongs to another mapping")
+        keybag_runtime(configuration["special_bag"])
+        store = t2_catacomb_store.CatacombStore(STORE_ROOT, apple_uid)
+        host = t2_enrollment_finalizer.read_local_host_snapshot(
+            store, history.baseline
         )
-        final = t2_identity_delete_reconciliation.append_post_reboot_verified(
-            path,
-            history.operation_id,
-            local=local,
-            host=host,
-            live=live,
-            linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
-            mapping_generation=configuration["mapping_generation"],
+        components = store.read_committed_components()
+        local = t2_catacomb_codec.decode_user_catacomb(
+            components[f"user_{apple_uid:08x}.cat"], apple_uid
         )
+        with t2_bridge_connection.BridgeConnectionLease.connect(
+            configuration["host"], configuration["interface"], _port(), timeout=60
+        ) as lease:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, apple_uid
+            )
+            final = t2_identity_delete_reconciliation.append_post_reboot_verified(
+                path,
+                history.operation_id,
+                local=local,
+                host=host,
+                live=live,
+                linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                mapping_generation=mapping_generation,
+            )
     if final.phase is not (
         t2_identity_delete_journal.IdentityDeletePhase.POST_REBOOT_VERIFIED
     ):
@@ -1799,13 +2704,24 @@ def run_recovery(configuration: dict[str, object]) -> dict[str, object]:
             "rename recovery requires exactly one interrupted rename"
         )
     path, history = candidates[0]
+    native_authority = None
+    if configuration.get("authority_mode", "macos-control-oracle") == "linux-native":
+        native_authority = t2_user_authority.load(int(configuration["linux_uid"]))
+        if (
+            native_authority.origin != "linux-native-e4"
+            or native_authority.selected.apple_uid != configuration["apple_uid"]
+        ):
+            raise IdentityManagementError(
+                "Linux-native E4 recovery authority is unavailable"
+            )
+        mapping_generation = native_authority.mapping_set.generation
+    else:
+        mapping_generation = configuration["mapping_generation"]
     if (
         history.baseline["apple_uid"] != configuration["apple_uid"]
-        or history.baseline["mapping_generation"]
-        != configuration["mapping_generation"]
+        or history.baseline["mapping_generation"] != mapping_generation
     ):
         raise IdentityManagementError("rename recovery belongs to another mapping")
-    keybag_runtime(configuration["special_bag"])
     store = t2_catacomb_store.CatacombStore(
         STORE_ROOT, configuration["apple_uid"]
     )
@@ -1841,7 +2757,7 @@ def run_recovery(configuration: dict[str, object]) -> dict[str, object]:
             "RENAME_RECOVERY_INTENT",
             {
                 "action": observed_action,
-                "mapping_generation": configuration["mapping_generation"],
+                "mapping_generation": mapping_generation,
                 "host_commit_possible": observed_action != "prepare-discarded",
                 "mutation_possible": True,
             },
@@ -1867,33 +2783,55 @@ def run_recovery(configuration: dict[str, object]) -> dict[str, object]:
             "journal expects no local transaction but one is present"
         )
 
-    host = t2_enrollment_finalizer.read_local_host_snapshot(
-        store, history.baseline
-    )
-    components = store.read_committed_components()
-    local = t2_catacomb_codec.decode_user_catacomb(
-        components[f'user_{configuration["apple_uid"]:08x}.cat'],
-        configuration["apple_uid"],
-    )
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
+    if native_authority is not None:
+        with _native_management_lease(
+            configuration, operation="rename", restore_state=False
+        ) as (recovery_authority, _store, host, local, _lease, live):
+            if recovery_authority.mapping_set.generation != mapping_generation:
+                raise IdentityManagementError(
+                    "native recovery mapping changed during authorization"
+                )
+            observed = t2_identity_rename_recovery.classify(
+                t2_identity_rename_journal.read(path),
+                local=local,
+                host=host,
+                live=live,
+                mapping_generation=mapping_generation,
+            )
+            final = t2_identity_rename_recovery.append_reconciled(
+                path,
+                history.operation_id,
+                observed,
+                mapping_generation=mapping_generation,
+            )
+    else:
+        host = t2_enrollment_finalizer.read_local_host_snapshot(
+            store, history.baseline
         )
-        observed = t2_identity_rename_recovery.classify(
-            t2_identity_rename_journal.read(path),
-            local=local,
-            host=host,
-            live=live,
-            mapping_generation=configuration["mapping_generation"],
+        components = store.read_committed_components()
+        local = t2_catacomb_codec.decode_user_catacomb(
+            components[f'user_{configuration["apple_uid"]:08x}.cat'],
+            configuration["apple_uid"],
         )
-        final = t2_identity_rename_recovery.append_reconciled(
-            path,
-            history.operation_id,
-            observed,
-            mapping_generation=configuration["mapping_generation"],
-        )
+        with t2_bridge_connection.BridgeConnectionLease.connect(
+            configuration["host"], configuration["interface"], _port(), timeout=60
+        ) as lease:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, configuration["apple_uid"]
+            )
+            observed = t2_identity_rename_recovery.classify(
+                t2_identity_rename_journal.read(path),
+                local=local,
+                host=host,
+                live=live,
+                mapping_generation=mapping_generation,
+            )
+            final = t2_identity_rename_recovery.append_reconciled(
+                path,
+                history.operation_id,
+                observed,
+                mapping_generation=mapping_generation,
+            )
     expected_phase = (
         t2_identity_rename_journal.IdentityRenamePhase.RECONCILED
         if observed.outcome == "committed"
@@ -1931,15 +2869,40 @@ def run_delete_recovery(configuration: dict[str, object]) -> dict[str, object]:
             "delete recovery requires exactly one interrupted deletion"
         )
     path, history = candidates[0]
+    native_mode = (
+        configuration.get("authority_mode", "macos-control-oracle")
+        == "linux-native"
+    )
+    authority = None
+    if native_mode:
+        authority = t2_user_authority.load(int(configuration["linux_uid"]))
+        selected = authority.selected
+        if (
+            authority.origin != "linux-native-e4"
+            or selected.apple_uid != configuration["apple_uid"]
+        ):
+            raise IdentityManagementError(
+                "Linux-native E4 recovery authority is unavailable"
+            )
+        mapping_generation = authority.mapping_set.generation
+    else:
+        selected = None
+        mapping_generation = configuration["mapping_generation"]
+        keybag_runtime(configuration["special_bag"])
+    recovery_configuration = {
+        **configuration,
+        "mapping_generation": mapping_generation,
+    }
     if (
         history.baseline["apple_uid"] != configuration["apple_uid"]
-        or history.baseline["mapping_generation"]
-        != configuration["mapping_generation"]
+        or history.baseline["mapping_generation"] != mapping_generation
     ):
         raise IdentityManagementError("delete recovery belongs to another mapping")
-    keybag_runtime(configuration["special_bag"])
     store = t2_catacomb_store.CatacombStore(
         STORE_ROOT, configuration["apple_uid"]
+    )
+    history, retrying_forward_recovery = _normalize_delete_recovery_resume(
+        path, history
     )
     prepare_pending = os.path.lexists(STORE_ROOT / "prepare")
     commit_pending = os.path.lexists(STORE_ROOT / "commit")
@@ -1966,15 +2929,7 @@ def run_delete_recovery(configuration: dict[str, object]) -> dict[str, object]:
                 "delete commit recovery lacks a complete journaled boundary"
             )
     action = history.recovery_action
-    retrying_forward_transaction = (
-        action is not None
-        and history.phase
-        is t2_identity_delete_journal.IdentityDeletePhase.OUTCOME_UNKNOWN
-        and history.persistence_connection_generation
-        != history.baseline["connection_generation"]
-        and (prepare_pending or commit_pending)
-    )
-    if action is None or retrying_forward_transaction:
+    if action is None or retrying_forward_recovery:
         history = t2_identity_delete_journal.append_checked(
             path,
             history.operation_id,
@@ -1982,7 +2937,7 @@ def run_delete_recovery(configuration: dict[str, object]) -> dict[str, object]:
             {
                 "action": observed_action,
                 "linux_boot_uuid": BOOT_ID.read_text(encoding="ascii").strip(),
-                "mapping_generation": configuration["mapping_generation"],
+                "mapping_generation": mapping_generation,
                 "host_commit_possible": observed_action != "prepare-discarded",
                 "mutation_possible": True,
             },
@@ -2005,34 +2960,30 @@ def run_delete_recovery(configuration: dict[str, object]) -> dict[str, object]:
             "journal expects no local transaction but one is present"
         )
 
-    host = t2_enrollment_finalizer.read_local_host_snapshot(
-        store, history.baseline
-    )
-    components = store.read_committed_components()
-    local = t2_catacomb_codec.decode_user_catacomb(
-        components[f'user_{configuration["apple_uid"]:08x}.cat'],
-        configuration["apple_uid"],
-    )
-    with t2_bridge_connection.BridgeConnectionLease.connect(
-        configuration["host"], configuration["interface"], _port(), timeout=60
-    ) as lease:
-        live = t2_bridge_inventory.collect_stable_private_inventory(
-            lease, configuration["apple_uid"]
-        )
+    def reconcile_observation(
+        recovery_store: t2_catacomb_store.CatacombStore,
+        host: dict[str, object],
+        local: t2_catacomb_codec.UserCatacomb,
+        lease: t2_bridge_connection.BridgeConnectionLease,
+        live: dict[str, object],
+    ) -> tuple[object, t2_identity_delete_journal.IdentityDeleteHistory]:
         observed = t2_identity_delete_recovery.classify(
             t2_identity_delete_journal.read(path),
             local=local,
             host=host,
             live=live,
-            mapping_generation=configuration["mapping_generation"],
+            mapping_generation=mapping_generation,
         )
         final = t2_identity_delete_recovery.append_observed(
             path,
             history.operation_id,
             observed,
-            mapping_generation=configuration["mapping_generation"],
+            mapping_generation=mapping_generation,
         )
-        if observed.outcome == "forward-required":
+        if observed.outcome in {
+            "forward-required",
+            "master-forward-required",
+        }:
             if observed.archive_state == "baseline":
                 plan = t2_identity_delete.plan_target(
                     local, history.target_identity_uuid
@@ -2051,12 +3002,48 @@ def run_delete_recovery(configuration: dict[str, object]) -> dict[str, object]:
                     "delete recovery archive state is invalid"
                 )
             final = _persist_delete(
-                configuration,
+                recovery_configuration,
                 lease=lease,
-                store=store,
+                store=recovery_store,
                 journal_path=path,
                 operation_id=history.operation_id,
                 plan=plan,
+                master_only=(
+                    observed.outcome == "master-forward-required"
+                ),
+            )
+        return observed, final
+
+    if native_mode:
+        assert authority is not None
+        with _native_management_lease(
+            configuration, operation="delete-one", restore_state=False
+        ) as (recovery_authority, recovery_store, host, local, lease, live):
+            if recovery_authority.mapping_set.generation != mapping_generation:
+                raise IdentityManagementError(
+                    "native recovery mapping changed during authorization"
+                )
+            observed, final = reconcile_observation(
+                recovery_store, host, local, lease, live
+            )
+    else:
+        recovery_store = store
+        host = t2_enrollment_finalizer.read_local_host_snapshot(
+            recovery_store, history.baseline
+        )
+        components = recovery_store.read_committed_components()
+        local = t2_catacomb_codec.decode_user_catacomb(
+            components[f'user_{configuration["apple_uid"]:08x}.cat'],
+            configuration["apple_uid"],
+        )
+        with t2_bridge_connection.BridgeConnectionLease.connect(
+            configuration["host"], configuration["interface"], _port(), timeout=60
+        ) as lease:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, configuration["apple_uid"]
+            )
+            observed, final = reconcile_observation(
+                recovery_store, host, local, lease, live
             )
     expected_phase = (
         t2_identity_delete_journal.IdentityDeletePhase.ABORTED
@@ -2073,12 +3060,11 @@ def run_delete_recovery(configuration: dict[str, object]) -> dict[str, object]:
         "outcome": observed.outcome,
         "identity_count": (
             observed.identity_count
-            if observed.outcome != "forward-required"
+            if observed.outcome
+            not in {"forward-required", "master-forward-required"}
             else len(history.baseline["identity_records"]) - 1
         ),
-        "post_reboot_verification_required": (
-            observed.outcome != "no-change"
-        ),
+        "post_reboot_verification_required": False,
         "identifiers_redacted": True,
     }
 
@@ -2160,6 +3146,14 @@ def main() -> int:
     )
     external_delete.add_argument(
         "--acknowledge-local-catacomb-reconciliation", action="store_true"
+    )
+    subparsers.add_parser(
+        "reconcile-external-deletion-if-needed",
+        help="automatically reconcile one exact stable external deletion",
+    )
+    subparsers.add_parser(
+        "rollback-unverified-addition",
+        help="remove the sole newly added identity that failed exact matching",
     )
     recover_external = subparsers.add_parser(
         "recover-external-deletion",
@@ -2270,9 +3264,17 @@ def main() -> int:
             elif args.command == "reconcile-external-deletion":
                 with sleep_inhibitor():
                     result = run_external_delete_reconciliation(configuration)
+            elif args.command == "reconcile-external-deletion-if-needed":
+                with sleep_inhibitor():
+                    result = run_external_delete_reconciliation(
+                        configuration, if_needed=True
+                    )
             elif args.command == "recover-external-deletion":
                 with sleep_inhibitor():
                     result = run_external_delete_recovery(configuration)
+            elif args.command == "rollback-unverified-addition":
+                with sleep_inhibitor():
+                    result = run_unverified_addition_rollback(configuration)
             elif args.command == "delete":
                 with sleep_inhibitor():
                     result = run_delete(configuration, slot=args.slot)
@@ -2288,7 +3290,11 @@ def main() -> int:
         OSError,
         UnicodeError,
         subprocess.SubprocessError,
+        t2_acm_device.ACMDeviceError,
+        t2_activation_bundle.ActivationBundleError,
+        t2_aks_transport.AKSActivationTransportError,
         t2_baseline.BaselineError,
+        t2_biolockout_store.BioLockoutStoreError,
         t2_bridge_connection.BridgeConnectionError,
         t2_bridge_inventory.BridgeInventoryError,
         t2_catacomb_bridge.CatacombBridgeError,
@@ -2313,6 +3319,11 @@ def main() -> int:
         t2_identity_rename_reconciliation.IdentityRenameReconciliationError,
         t2_mutation_journal.JournalError,
         t2_mutation_registry.MutationRegistryError,
+        t2_native_state_restore.NativeStateRestoreError,
+        t2_user_activation_operation.UserActivationOperationError,
+        t2_user_authority.UserAuthorityError,
+        t2_user_policy.UserPolicyError,
+        t2_user_readiness.UserReadinessError,
     ) as error:
         print(f"t2-touchid-manage: {error}", file=sys.stderr)
         return 1

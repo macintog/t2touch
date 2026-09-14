@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import platform
@@ -66,6 +67,28 @@ def private_regular_file(path: Path) -> bool:
         and info.st_uid == 0
         and not (info.st_mode & 0o077)
     )
+
+
+def configuration_is_complete(config: dict[str, str]) -> bool:
+    required = (
+        "T2_TOUCHID_USER",
+        "T2_TOUCHID_HOST",
+        "T2_TOUCHID_INTERFACE",
+        "T2_TOUCHID_PROJECT_DIR",
+    )
+    if any(not config.get(key, "").strip() for key in required):
+        return False
+    if any(
+        marker in config[key]
+        for key in required
+        for marker in ("replace-with-", "your-linux-user")
+    ):
+        return False
+    try:
+        host = ipaddress.IPv6Address(config["T2_TOUCHID_HOST"])
+    except ipaddress.AddressValueError:
+        return False
+    return host.is_link_local and Path(config["T2_TOUCHID_PROJECT_DIR"]).is_absolute()
 
 
 def service_check(service: str) -> Check:
@@ -267,6 +290,23 @@ def acm_transport_check(enabled: bool) -> Check:
 def collect() -> list[Check]:
     checks: list[Check] = []
 
+    config: dict[str, str] = {}
+    try:
+        config = read_assignments(CONFIG)
+        valid = configuration_is_complete(config) and private_regular_file(CONFIG)
+        checks.append(
+            Check(
+                "pass" if valid else "fail",
+                "configuration",
+                "complete and private" if valid else "missing, incomplete, or permissive",
+            )
+        )
+    except PermissionError:
+        checks.append(Check("warn", "configuration", "not readable; run as root"))
+    except (OSError, UnicodeError):
+        checks.append(Check("fail", "configuration", "missing or malformed"))
+    native_mode = config.get("T2_TOUCHID_AUTHORITY_MODE") == "linux-native"
+
     checks.append(
         Check(
             "pass" if Path("/sys/module/t2_sep_transport").exists() else "fail",
@@ -283,7 +323,14 @@ def collect() -> list[Check]:
     )
     credential_configured = CREDENTIAL.exists()
     for service in SERVICES:
-        if not credential_configured and service in (
+        if native_mode and service in (
+            "t2-keybag-load.service",
+            "t2-credential-unlock.service",
+        ):
+            checks.append(
+                Check("pass", service, "not used by Linux-native activation")
+            )
+        elif not native_mode and not credential_configured and service in (
             "t2-credential-unlock.service",
             "t2-biometric-ready.service",
         ):
@@ -295,51 +342,42 @@ def collect() -> list[Check]:
     checks.append(dkms_check())
     checks.append(module_build_check())
 
-    config: dict[str, str] = {}
-    try:
-        config = read_assignments(CONFIG)
-        required = {
-            "T2_TOUCHID_USER",
-            "T2_TOUCHID_HOST",
-            "T2_TOUCHID_INTERFACE",
-            "T2_TOUCHID_PROJECT_DIR",
-        }
-        valid = required <= config.keys() and private_regular_file(CONFIG)
-        checks.append(
-            Check(
-                "pass" if valid else "fail",
-                "configuration",
-                "complete and private" if valid else "missing, incomplete, or permissive",
-            )
-        )
-    except PermissionError:
-        checks.append(Check("warn", "configuration", "not readable; run as root"))
-    except (OSError, UnicodeError):
-        checks.append(Check("fail", "configuration", "missing or malformed"))
-
     checks.append(
         acm_transport_check(
             config.get("T2_TOUCHID_ENABLE_ACM_RESEARCH", "0") == "1"
         )
     )
 
-    try:
-        state = read_assignments(STATE)
-        valid_state = (
-            state.get("T2_KEYBAG_SESSION", "").isdigit()
-            and re.fullmatch(r"-?[0-9]+", state.get("T2_KEYBAG_HANDLE", ""))
-            and re.fullmatch(r"-?[0-9]+", state.get("T2_KEYBAG_SPECIAL", ""))
-            and private_regular_file(STATE)
-        )
+    if native_mode:
         checks.append(
             Check(
-                "pass" if valid_state else "fail",
+                "pass",
                 "keybag-runtime-state",
-                "valid and private" if valid_state else "invalid or permissive",
+                "compatibility runtime state is not used by Linux-native activation",
             )
         )
-    except (OSError, UnicodeError):
-        checks.append(Check("warn", "keybag-runtime-state", "not readable; run as root"))
+    else:
+        try:
+            state = read_assignments(STATE)
+            valid_state = (
+                state.get("T2_KEYBAG_SESSION", "").isdigit()
+                and re.fullmatch(r"-?[0-9]+", state.get("T2_KEYBAG_HANDLE", ""))
+                and re.fullmatch(r"-?[0-9]+", state.get("T2_KEYBAG_SPECIAL", ""))
+                and private_regular_file(STATE)
+            )
+            checks.append(
+                Check(
+                    "pass" if valid_state else "fail",
+                    "keybag-runtime-state",
+                    "valid and private" if valid_state else "invalid or permissive",
+                )
+            )
+        except FileNotFoundError:
+            checks.append(Check("warn", "keybag-runtime-state", "missing"))
+        except PermissionError:
+            checks.append(Check("warn", "keybag-runtime-state", "not readable; run as root"))
+        except (OSError, UnicodeError):
+            checks.append(Check("fail", "keybag-runtime-state", "unreadable or malformed"))
 
     try:
         credential_ok = private_regular_file(CREDENTIAL) and CREDENTIAL.stat().st_size > 0
@@ -372,8 +410,12 @@ def collect() -> list[Check]:
                 "valid and private" if cache_ok else "invalid or permissive",
             )
         )
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        checks.append(Check("warn", "port-cache", "missing"))
+    except PermissionError:
         checks.append(Check("warn", "port-cache", "not readable; run as root"))
+    except (OSError, ValueError):
+        checks.append(Check("fail", "port-cache", "unreadable or malformed"))
 
     if config and cached_port:
         checks.append(network_check(config, cached_port))

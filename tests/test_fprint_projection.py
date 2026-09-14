@@ -22,31 +22,30 @@ def inventory(names):
         ],
         "local_live_reconciled": True,
         "selection_scope": "current-reconciled-list",
-        "fprintd_listing_is_compatibility_alias": True,
+        "finger_names_are_presentation_metadata": True,
         "identifiers_redacted": True,
     }
 
 
 class FprintProjectionTests(unittest.TestCase):
-    def test_complete_projection_uses_upstream_finger_order(self):
+    def test_complete_projection_uses_neutral_numeric_order(self):
         result = projection.project(
-            inventory(["right-index-finger", "left-thumb"])
+            inventory(["finger-2", "finger-1"])
         )
         self.assertTrue(result.complete)
         self.assertEqual(
             result.finger_names,
-            ("left-thumb", "right-index-finger"),
+            ("finger-1", "finger-2"),
         )
         self.assertEqual(result.reconciled_identity_count, 2)
         self.assertEqual(result.unassigned_identity_count, 0)
         self.assertEqual(result.duplicate_finger_name_count, 0)
-        self.assertFalse(result.public()["compatibility_alias_required"])
 
     def test_unknown_or_duplicate_label_never_produces_partial_listing(self):
         cases = (
-            (["Finger 1", "right-index-finger"], 1, 0),
-            (["right-index-finger", "right-index-finger"], 0, 1),
-            (["Finger 1", "Linux enrolled finger"], 2, 0),
+            (["Finger 1", "finger-1"], 1, 0),
+            (["finger-1", "finger-1"], 0, 1),
+            (["right-index-finger", "Linux enrolled finger"], 2, 0),
         )
         for names, unassigned, duplicates in cases:
             with self.subTest(names=names):
@@ -57,12 +56,9 @@ class FprintProjectionTests(unittest.TestCase):
                 self.assertEqual(
                     result.duplicate_finger_name_count, duplicates
                 )
-                self.assertTrue(
-                    result.public()["compatibility_alias_required"]
-                )
 
     def test_projection_is_identifier_free_and_labels_are_not_authority(self):
-        result = projection.project(inventory(["left-thumb"]))
+        result = projection.project(inventory(["finger-1"]))
         rendered = json.dumps(result.public(), sort_keys=True)
         self.assertIn("finger_names_are_presentation_metadata", rendered)
         for forbidden in (
@@ -76,7 +72,7 @@ class FprintProjectionTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_malformed_or_nonreconciled_inventory_is_rejected(self):
-        values = (None, inventory([]), inventory(["left-thumb"]))
+        values = (None, inventory([]), inventory(["finger-1"]))
         values[1]["identity_count"] = 1
         values[2]["local_live_reconciled"] = False
         for value in values:
@@ -85,10 +81,16 @@ class FprintProjectionTests(unittest.TestCase):
             ):
                 projection.project(value)
 
-    def test_upstream_vocabulary_is_exact_and_excludes_any(self):
-        self.assertEqual(len(projection.FINGER_NAMES), 10)
-        self.assertEqual(len(set(projection.FINGER_NAMES)), 10)
-        self.assertNotIn("any", projection.FINGER_NAME_SET)
+    def test_neutral_handles_are_five_stable_slots_and_exclude_anatomy(self):
+        self.assertEqual(
+            projection.FINGER_NAMES,
+            tuple(f"finger-{value}" for value in range(1, 6)),
+        )
+        self.assertTrue(projection.is_finger_name("finger-5"))
+        self.assertFalse(projection.is_finger_name("finger-6"))
+        self.assertFalse(projection.is_finger_name("finger-01"))
+        self.assertFalse(projection.is_finger_name("right-index-finger"))
+        self.assertFalse(projection.is_finger_name("any"))
 
 
 if __name__ == "__main__":

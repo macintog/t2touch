@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "hardware": "MacBookPro16,1 / J152fAP",
+    "bridgeos_build": "23P6068",
+    "host_artifacts": [
+      "25G83",
+      "24G830"
+    ]
+  },
+  "findings": [
+    {
+      "id": "sep-routes",
+      "reference": "sep-architecture.md#host-routes-and-internal-services",
+      "evidence": "firmware-analysis-and-mmio",
+      "finding": "Host endpoint numbers and internal service handles select distinct routes; raw Intel endpoint 16 reaches AMDM."
+    },
+    {
+      "id": "aks-framing",
+      "reference": "sep-architecture.md#mailbox-and-out-of-line-data",
+      "evidence": "host-analysis-and-implementation",
+      "finding": "AKS has 0x48-byte v1 and 0x50-byte v2 envelopes; capability negotiation begins with v1."
+    },
+    {
+      "id": "create-export",
+      "reference": "identity-and-authorization.md#creation-layers-and-encoding",
+      "evidence": "host-and-sep-analysis-and-hardware",
+      "finding": "Create-v5 returns a live handle and optional KEK material; operation 0x02 separately exports the reloadable keybag."
+    },
+    {
+      "id": "activation-input",
+      "reference": "identity-and-authorization.md#the-retained-creation-input",
+      "evidence": "sep-analysis-and-hardware",
+      "finding": "Creation flags 6 use the raw 16-byte ACM external reference as derivation input; save it before creation and supply it as type-5 data during later verification."
+    },
+    {
+      "id": "authorization-lifetime",
+      "reference": "identity-and-authorization.md#the-retained-creation-input",
+      "evidence": "host-analysis-and-hardware",
+      "finding": "Operation 0x21 authorizes a distinct target; operation 0x18 carries the fresh input context reference while that target remains live."
+    },
+    {
+      "id": "keybag-derivation",
+      "reference": "identity-and-authorization.md#inside-the-matched-sep-derivation-path",
+      "evidence": "sep-analysis",
+      "finding": "Matched sks stores salt at bag +0xcc, work factor at +0xe0, and links credential records at +0x2a0; these are in-memory offsets."
+    },
+    {
+      "id": "primary-inventory",
+      "reference": "identity-and-authorization.md#inventory-and-ownership",
+      "evidence": "analysis-and-hardware",
+      "finding": "AKS 0x51 suboperation 0 reads primary identity; definite absence is status -3 and does not recover a lost saved keybag."
+    },
+    {
+      "id": "efi-boot-state",
+      "reference": "boot-and-storage.md#publishing-boot-state",
+      "evidence": "efi-analysis-and-hardware",
+      "finding": "The successful startup publishes typed EFI/SMC boot state and then establishes AKS application readiness."
+    },
+    {
+      "id": "xart-record-path",
+      "reference": "boot-and-storage.md#xart-and-gigalocker",
+      "evidence": "sep-and-bridgeos-analysis",
+      "finding": "sks durable loading sends internal command 0x271b through the xART service handle; xART constructs a master opcode-5 backing request."
+    },
+    {
+      "id": "xart-command8",
+      "reference": "boot-and-storage.md#why-host-endpoint-16-command-8-failed",
+      "evidence": "dispatcher-analysis-and-mmio",
+      "finding": "Endpoint-16 status 0x2d came from unsupported AMDM command dispatch, correcting the earlier gigalocker-I/O interpretation."
+    },
+    {
+      "id": "embedded-storage",
+      "reference": "boot-and-storage.md#embedded-nvme-is-separate-from-host-storage",
+      "evidence": "bridgeos-analysis",
+      "finding": "Embedded PCI 106b:2002 namespaces differ from host ANS2 106b:2005; namespace type at Identify Namespace +0x180 differs from NSID."
+    },
+    {
+      "id": "first-catacomb",
+      "reference": "fingerprint-lifecycle.md#constructing-the-first-catacomb",
+      "evidence": "host-analysis-and-hardware",
+      "finding": "First enrollment supplies the results needed to construct native user, master, and BioLockout archives without an imported prototype."
+    },
+    {
+      "id": "restore-order",
+      "reference": "fingerprint-lifecycle.md#restoring-on-another-boot",
+      "evidence": "implementation-and-hardware",
+      "finding": "Restore master, selected user, and latest rolling BioLockout state; reconcile the selected account and actual identities."
+    },
+    {
+      "id": "native-lifecycle",
+      "reference": "fingerprint-lifecycle.md#matching-adding-and-deleting",
+      "evidence": "hardware",
+      "finding": "Recorded results include cross-boot restore, positive and negative matching, exact deletion with survivor verification, and a continuous second-finger enrollment."
+    },
+    {
+      "id": "installed-native-lifecycle",
+      "reference": "integration-followup.md#what-the-later-observations-establish",
+      "evidence": "recorded-installed-hardware",
+      "finding": "Installed native standard-fprintd first and additional enrollment, verification, selected deletion, durable rename, and automatic reboot reconciliation were exercised on the greenfield authority."
+    },
+    {
+      "id": "mutable-identity-authority",
+      "reference": "integration-followup.md#account-proof-and-the-current-identity-set",
+      "evidence": "implementation-and-offline-regression",
+      "finding": "Immutable first-enrollment account proof must be paired with the reconciled current identity set and completed mutation history, without requiring the original fingerprint to remain enrolled."
+    },
+    {
+      "id": "durable-identity-names",
+      "reference": "integration-followup.md#names-survive-deletion",
+      "evidence": "implementation-and-recorded-migration",
+      "finding": "Neutral names are five stable enrollment slots backed by private UUIDs; deleting one never renumbers survivors, and the next successful enrollment takes the lowest vacancy."
+    },
+    {
+      "id": "delete-forward-recovery",
+      "reference": "integration-followup.md#completion-and-interrupted-deletion",
+      "evidence": "implementation-and-recorded-hardware",
+      "finding": "After SEP removed a selected identity, recovery supplied the committed master Catacomb and completed persistence without replaying the delete command, followed by reboot and survivor checks."
+    },
+    {
+      "id": "direct-client-lifecycle",
+      "reference": "integration-followup.md#service-ownership-and-startup",
+      "evidence": "implementation-and-offline-regression",
+      "finding": "Direct D-Bus clients must handle service loss, latch completed results, and bound cleanup waits while preserving uncertainty about hardware completion."
+    },
+    {
+      "id": "post-deletion-addition",
+      "reference": "integration-followup.md#names-survive-deletion",
+      "evidence": "implementation-and-recorded-installed-hardware",
+      "finding": "A historical post-deletion addition was retained as finger-4 and survived reboot reconciliation; the product allocator was subsequently corrected to reuse the lowest vacant one of five stable slots."
+    },
+    {
+      "id": "pam-and-password-fallback",
+      "reference": "integration-followup.md#service-ownership-and-startup",
+      "evidence": "recorded-installed-hardware",
+      "finding": "Unattended biometric/fprintd startup and real sudo fingerprint authentication succeeded; a separate fprintd-unavailable transaction timed out biometric verification and accepted the Linux password."
+    }
+  ]
+}

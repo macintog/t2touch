@@ -21,7 +21,7 @@ class DeletionCompletion:
     mutation_performed: bool
 
     def __post_init__(self) -> None:
-        if self.finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_projection.is_finger_name(self.finger_name):
             raise FprintDeletionRuntimeError(
                 "deletion completion finger name is invalid"
             )
@@ -40,7 +40,7 @@ class DeletionCompletion:
         if not (
             self.deleted
             and self.reconciled
-            and self.post_reboot_pending
+            and not self.post_reboot_pending
             and self.mutation_performed
         ):
             raise FprintDeletionRuntimeError(

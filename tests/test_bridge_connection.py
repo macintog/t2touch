@@ -1,6 +1,7 @@
 import json
 import plistlib
 import socket
+import struct
 import sys
 import threading
 import unittest
@@ -81,6 +82,95 @@ class ScriptedPeer:
 
 
 class BridgeConnectionTests(unittest.TestCase):
+    def test_deferred_client_selection_follows_only_protocol_preflight(self):
+        client, peer_socket = socket.socketpair()
+        peer_error: list[BaseException] = []
+
+        def run_peer() -> None:
+            try:
+                send_frame(
+                    peer_socket,
+                    wire.TYPE_HELO,
+                    {
+                        "BridgeXPCVersion": 39,
+                        "BootSessionUUID": str(uuid.UUID(int=32)),
+                    },
+                )
+                frame_type, _body = wire.receive_frame(peer_socket)
+                self.assertEqual(frame_type, wire.TYPE_HELO)
+                version = receive_message(peer_socket)
+                reply_to(peer_socket, version, [0, 3])
+                protocol = receive_message(peer_socket)
+                self.assertEqual(protocol[3][0:2], [3, 0])
+                self.assertEqual(
+                    wire.BIOMETRIC_COMMAND_HEADER.unpack_from(protocol[3][2]),
+                    (wire.BIOMETRIC_COMMAND_MAGIC, 0x01, 1, 0),
+                )
+                reply_to(peer_socket, protocol, [0, b"\x02\x00\x00\x00"])
+                component = receive_message(peer_socket)
+                self.assertEqual(component[3][0:2], [3, 0])
+                header = wire.BIOMETRIC_COMMAND_HEADER.unpack_from(component[3][2])
+                self.assertEqual(
+                    header, (wire.BIOMETRIC_COMMAND_MAGIC, 0x31, 1, 0)
+                )
+                self.assertEqual(
+                    component[3][2][8:], struct.pack("<I", 0xFFFFFFFF)
+                )
+                reply_to(peer_socket, component, [0])
+                set_version = receive_message(peer_socket)
+                self.assertEqual(set_version[3], [10, 2])
+                reply_to(peer_socket, set_version, [0])
+            except BaseException as error:
+                peer_error.append(error)
+            finally:
+                peer_socket.close()
+
+        thread = threading.Thread(target=run_peer)
+        thread.start()
+        lease = connection.BridgeConnectionLease(
+            client,
+            connection_generation=GENERATION,
+            defer_client_version=True,
+        )
+        self.assertEqual(lease.client_version, 0)
+        with self.assertRaisesRegex(
+            connection.BridgeConnectionError, "service preflight commands"
+        ):
+            lease.biometric_command(
+                0x38,
+                version=1,
+                value=0,
+                data=b"\x00" * 4,
+                output_capacity=16,
+            )
+        self.assertEqual(lease.state, connection.BridgeConnectionState.ACTIVE)
+        self.assertEqual(
+            lease.biometric_command(
+                0x01,
+                version=1,
+                value=0,
+                data=b"",
+                output_capacity=4,
+            ),
+            ([0, b"\x02\x00\x00\x00"], []),
+        )
+        self.assertEqual(
+            lease.biometric_command(
+                0x31,
+                version=1,
+                value=0,
+                data=struct.pack("<I", 0xFFFFFFFF),
+                output_capacity=0,
+            ),
+            ([0], []),
+        )
+        self.assertEqual(lease.select_client_version(), 2)
+        lease.close()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        if peer_error:
+            raise peer_error[0]
+
     def test_initialization_command_and_async_event_share_one_socket(self):
         raw_event = b"event-data"
 

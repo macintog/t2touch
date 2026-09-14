@@ -16,22 +16,22 @@ import t2_fprint_deletion_runtime as runtime
 class FprintDeletionRuntimeTests(unittest.TestCase):
     def test_exact_reconciled_completion_is_accepted(self):
         value = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
-        self.assertEqual(value.finger_name, "left-thumb")
+        self.assertEqual(value.finger_name, "finger-2")
         self.assertTrue(value.reconciled)
 
     def test_invalid_name_or_incomplete_proof_is_rejected(self):
         valid = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
         candidates = (
-            ("any", True, True, True, True),
-            ("left-thumb", False, True, True, True),
-            ("left-thumb", True, False, True, True),
-            ("left-thumb", True, True, False, True),
-            ("left-thumb", True, True, True, False),
-            ("left-thumb", 1, True, True, True),
+            ("any", True, True, False, True),
+            ("finger-2", False, True, False, True),
+            ("finger-2", True, False, False, True),
+            ("finger-2", True, True, True, True),
+            ("finger-2", True, True, False, False),
+            ("finger-2", 1, True, False, True),
         )
         for candidate in candidates:
             with self.subTest(candidate=candidate), self.assertRaises(
@@ -39,7 +39,7 @@ class FprintDeletionRuntimeTests(unittest.TestCase):
             ):
                 runtime.DeletionCompletion(*candidate)
         with self.assertRaises(runtime.FprintDeletionRuntimeError):
-            replace(valid, post_reboot_pending=False)
+            replace(valid, post_reboot_pending=True)
 
 
 if __name__ == "__main__":

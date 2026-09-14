@@ -213,12 +213,89 @@ class BaselineTests(unittest.TestCase):
                 {"present": False, "uuid": None, "hash": None},
             )
 
+            external_host = dict(host)
+            external_host["identity_records"] = []
+            external_live = live_inventory()
+            external_live["per_user_identity_records"] = []
+            external_live["global_identity_records"] = []
+            external_live["catacomb"] = {
+                "uuid": CATACOMB_UUID,
+                "present": False,
+                "hash": "0" * 64,
+                "global_state": "00" * 16,
+                "user_states": [
+                    {
+                        "kind": "master",
+                        "user_id": 0xFFFFFFFF,
+                        "state": 3,
+                        "needs_save": False,
+                    },
+                    {
+                        "kind": "user",
+                        "user_id": 501,
+                        "state": 3,
+                        "needs_save": False,
+                    },
+                ],
+            }
+            external = t2_baseline.build_baseline(
+                host=external_host,
+                live=external_live,
+                caller_linux_uid=1000,
+                target_linux_uid=1000,
+                linux_boot_uuid="00000000-0000-0000-0000-000000000021",
+                mapping_generation="b" * 64,
+                backup_reference="backup-1",
+                password_fallback_verified=True,
+            )
+            t2_mutation_journal.validate_baseline(external)
+            self.assertEqual(external["capacity"]["used"], 0)
+            self.assertFalse(external["sep_catacomb"]["present"])
+
     def test_rejects_wrong_archive_user(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "capture.tar.gz"
             write_archive(path)
             with self.assertRaises(t2_baseline.BaselineError):
                 t2_baseline.read_host_archive(path, 502)
+
+    def test_linux_native_empty_baseline_has_no_imported_state(self):
+        live = live_inventory()
+        live["per_user_identity_records"] = []
+        live["catacomb"] = {
+            "uuid": CATACOMB_UUID,
+            "present": False,
+            "hash": "0" * 64,
+            "global_state": "00" * 16,
+            "user_states": [
+                {
+                    "kind": "master",
+                    "user_id": 0xFFFFFFFF,
+                    "state": 1,
+                    "needs_save": False,
+                },
+                {
+                    "kind": "user",
+                    "user_id": 501,
+                    "state": 1,
+                    "needs_save": False,
+                },
+            ],
+        }
+        baseline = t2_baseline.build_linux_native_empty_baseline(
+            live=live,
+            caller_linux_uid=1000,
+            target_linux_uid=1000,
+            linux_boot_uuid="00000000-0000-0000-0000-000000000021",
+            mapping_generation="b" * 64,
+            account_uuid=ACCOUNT_UUID,
+            bag_uuid=BAG_UUID,
+            password_fallback_verified=True,
+        )
+        t2_mutation_journal.validate_baseline(baseline)
+        self.assertEqual(baseline["baseline_version"], 2)
+        self.assertEqual(baseline["host_components"], [])
+        self.assertEqual(baseline["backup_references"], [])
 
 
 if __name__ == "__main__":

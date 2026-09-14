@@ -107,6 +107,11 @@ class SuspendPolicyTests(unittest.TestCase):
             "register_ool=1 probe_capabilities=1",
             loader,
         )
+        self.assertIn("register_acm=1", loader)
+        self.assertIn("aks_platform_proc_uniqueid=1", loader)
+        self.assertIn("enable_identity_provisioning=1", loader)
+        self.assertIn("enable_identity_replacement=1", loader)
+        self.assertIn("loaded without creating /dev/t2-acm", loader)
 
 
 if __name__ == "__main__":

@@ -13,17 +13,28 @@ import t2_acm_protocol as protocol
 class FakeDevice:
     def __init__(
         self,
-        response: bytes,
+        response: bytes | list[bytes],
         *,
         policy_response: bytes | list[bytes] = b"",
         fail_delete: bool = False,
         fail_externalize: bool = False,
+        fail_set_secret: bool = False,
     ):
         self.response = response
         self.policy_response = policy_response
         self.fail_delete = fail_delete
         self.fail_externalize = fail_externalize
+        self.fail_set_secret = fail_set_secret
         self.commands = []
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
     def exchange(self, command: bytes, response_capacity: int) -> bytes:
         opcode = protocol.validate_command(command)
@@ -36,10 +47,19 @@ class FakeDevice:
             if self.fail_externalize:
                 raise device.ACMDeviceError("synthetic externalization failure")
             return b""
+        if opcode == protocol.OP_IDENTITY_SECRET_SET:
+            if self.fail_set_secret:
+                raise device.ACMDeviceError("synthetic secret-set failure")
+            return b""
         if opcode == protocol.OP_VERIFY_POLICY:
             if isinstance(self.policy_response, list):
                 return self.policy_response.pop(0)
             return self.policy_response
+        if opcode in {
+            protocol.OP_CONTEXT_CREATE,
+            protocol.OP_CONTEXT_CREATE_TRACKING,
+        } and isinstance(self.response, list):
+            return self.response.pop(0)
         return self.response
 
 
@@ -134,6 +154,51 @@ class ACMDeviceTests(unittest.TestCase):
             device.policy_preflight_test(fake, 501)
         self.assertEqual(fake.commands[-1][0], protocol.OP_CONTEXT_DELETE)
 
+    def test_identity_secret_command_copy_is_wiped(self):
+        context = bytes(range(16))
+        fake = FakeDevice(context + b"\x00" * 4 + b"\x01")
+        secret = bytearray(b"password")
+        commands = []
+
+        def capture(command: bytes | bytearray, capacity: int) -> bytes:
+            commands.append(command)
+            return FakeDevice.exchange(fake, command, capacity)
+
+        fake.exchange = capture  # type: ignore[method-assign]
+        handle = protocol.ContextHandle(context, 0, True, 1)
+        device.set_identity_secret(fake, handle, secret)
+        self.assertEqual(fake.commands, [(protocol.OP_IDENTITY_SECRET_SET, 0)])
+        self.assertEqual(commands[0], bytearray(len(commands[0])))
+        self.assertEqual(secret, bytearray(b"password"))
+
+    def test_identity_secret_lifecycle_externalizes_and_deletes(self):
+        context = bytes(range(16))
+        fake = FakeDevice(context + b"\x00" * 4 + b"\x01")
+        result = device.identity_secret_lifecycle_test(
+            fake, 501, bytearray(b"password")
+        )
+        self.assertEqual(
+            fake.commands,
+            [
+                (protocol.OP_CONTEXT_CREATE_TRACKING, 21),
+                (protocol.OP_IDENTITY_SECRET_SET, 0),
+                (protocol.OP_CONTEXT_EXTERNALIZE, 0),
+                (protocol.OP_CONTEXT_DELETE, 0),
+            ],
+        )
+        self.assertTrue(result["mutation_reconciled"])
+        self.assertFalse(result["keybag_mutation_performed"])
+        self.assertNotIn(context.hex(), str(result))
+
+    def test_identity_secret_failure_still_deletes_context(self):
+        context = bytes(range(16))
+        fake = FakeDevice(
+            context + b"\x00" * 4 + b"\x01", fail_set_secret=True
+        )
+        with self.assertRaisesRegex(device.ACMDeviceError, "context was cleaned up"):
+            device.identity_secret_lifecycle_test(fake, 501, bytearray(b"password"))
+        self.assertEqual(fake.commands[-1][0], protocol.OP_CONTEXT_DELETE)
+
     def test_authorization_binds_password_retries_policy_and_cleans_up(self):
         context = bytes(range(16))
         requirement = (
@@ -160,6 +225,139 @@ class ACMDeviceTests(unittest.TestCase):
                 (protocol.OP_VERIFY_POLICY, protocol.POLICY_RESPONSE_CAPACITY),
                 (protocol.OP_CONTEXT_EXTERNALIZE, 0),
                 (protocol.OP_VERIFY_POLICY, protocol.POLICY_RESPONSE_CAPACITY),
+                (protocol.OP_CONTEXT_DELETE, 0),
+            ],
+        )
+
+    def test_identity_authorization_separates_input_and_policy_references(self):
+        identity_reference = bytes(range(16))
+        authorization_context = bytes(range(16, 32))
+        requirement = (
+            b"\x00\x00\x00\x00"
+            + b"\x01\x00\x00\x00"
+            + b"\x01\x00\x00\x00"
+            + b"\x01\x00\x00\x00"
+            + b"\x00\x00\x00\x00"
+        )
+        fake = FakeDevice(
+            [
+                identity_reference + b"\x00" * 4 + b"\x01",
+                authorization_context + b"\x00" * 4 + b"\x01",
+            ],
+            policy_response=[requirement, b"\x01\x00\x00\x00"],
+        )
+        bound = []
+        with device.identity_authorized_context(
+            fake,
+            501,
+            bytearray(b"password"),
+            lambda source, target: bound.append((source, target)),
+            include_authorization_context=True,
+        ) as proof:
+            self.assertEqual(proof[2], identity_reference)
+            self.assertEqual(proof[3], authorization_context)
+        self.assertEqual(bound, [(identity_reference, authorization_context)])
+        self.assertEqual(
+            fake.commands,
+            [
+                (protocol.OP_CONTEXT_CREATE_TRACKING, 21),
+                (protocol.OP_IDENTITY_SECRET_SET, 0),
+                (protocol.OP_CONTEXT_EXTERNALIZE, 0),
+                (protocol.OP_CONTEXT_CREATE_TRACKING, 21),
+                (protocol.OP_VERIFY_POLICY, protocol.POLICY_RESPONSE_CAPACITY),
+                (protocol.OP_CONTEXT_EXTERNALIZE, 0),
+                (protocol.OP_VERIFY_POLICY, protocol.POLICY_RESPONSE_CAPACITY),
+                (protocol.OP_CONTEXT_DELETE, 0),
+                (protocol.OP_CONTEXT_DELETE, 0),
+            ],
+        )
+
+    def test_cleanup_only_failure_can_be_reconciled_by_bounded_close(self):
+        identity_reference = bytes(range(16))
+        authorization_context = bytes(range(16, 32))
+        requirement = (
+            b"\x00\x00\x00\x00"
+            + b"\x01\x00\x00\x00"
+            + b"\x01\x00\x00\x00"
+            + b"\x01\x00\x00\x00"
+            + b"\x00\x00\x00\x00"
+        )
+        active = FakeDevice(
+            [
+                identity_reference + b"\x00" * 4 + b"\x01",
+                authorization_context + b"\x00" * 4 + b"\x01",
+            ],
+            policy_response=[requirement, b"\x01\x00\x00\x00"],
+            fail_delete=True,
+        )
+        with self.assertRaises(device.ACMContextCleanupError) as raised:
+            with device.identity_authorized_context(
+                active,
+                501,
+                bytearray(b"password"),
+                lambda _source, _target: None,
+            ):
+                pass
+        self.assertIsNone(raised.exception.primary_error)
+        probes = []
+
+        def probe_factory():
+            probe = FakeDevice(b"")
+            probes.append(probe)
+            return probe
+
+        device.reconcile_identity_cleanup_after_close(
+            raised.exception, active, device_factory=probe_factory
+        )
+        self.assertEqual(len(probes), 1)
+
+    def test_consumer_failure_survives_bounded_close_cleanup(self):
+        active = FakeDevice(b"")
+        active.closed = False
+        active.close = lambda: setattr(active, "closed", True)
+        primary = RuntimeError("synthetic Mesa failure")
+        cleanup = device.ACMContextCleanupError(
+            "cleanup failed",
+            primary_error=primary,
+            cleanup_errors=(RuntimeError("delete failed"),),
+        )
+        probes = []
+
+        def probe_factory():
+            probe = FakeDevice(b"")
+            probes.append(probe)
+            return probe
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic Mesa failure") as raised:
+            device.raise_primary_after_identity_cleanup_close(
+                cleanup, active, device_factory=probe_factory
+            )
+        self.assertIs(raised.exception, primary)
+        self.assertTrue(active.closed)
+        self.assertEqual(len(probes), 1)
+
+    def test_identity_verification_only_uses_one_live_input_and_cleans_it(self):
+        identity_reference = bytes(range(16))
+        fake = FakeDevice(identity_reference + b"\x00" * 4 + b"\x01")
+        bound = []
+        with self.assertRaisesRegex(
+            device.ACMDeviceError,
+            "verification-complete; context was cleaned up",
+        ):
+            with device.identity_verification_only_context(
+                fake,
+                501,
+                bytearray(b"password"),
+                lambda source, target: bound.append((source, target)),
+            ):
+                self.fail("verify-only discriminator must not yield authorization")
+        self.assertEqual(bound, [(identity_reference, b"")])
+        self.assertEqual(
+            fake.commands,
+            [
+                (protocol.OP_CONTEXT_CREATE_TRACKING, 21),
+                (protocol.OP_IDENTITY_SECRET_SET, 0),
+                (protocol.OP_CONTEXT_EXTERNALIZE, 0),
                 (protocol.OP_CONTEXT_DELETE, 0),
             ],
         )

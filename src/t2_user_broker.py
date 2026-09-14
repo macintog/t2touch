@@ -22,6 +22,7 @@ from typing import Protocol, TypeVar
 import t2_ipc_session
 import t2_user_mapping
 import t2_user_mapping_admin
+import t2_user_authority
 import t2_user_policy
 import t2_user_readiness
 import t2_user_reconciliation_live
@@ -207,6 +208,24 @@ def _keybag(
     return digest
 
 
+def _stable_compatibility_authority(
+    target_uid: int,
+    expected: t2_user_authority.RuntimeUserAuthority | None,
+) -> None:
+    if expected is None:
+        return
+    try:
+        current = t2_user_authority.load_compatibility(target_uid)
+    except t2_user_authority.UserAuthorityError as error:
+        raise UserBrokerError(
+            "compatibility runtime authority became unavailable"
+        ) from error
+    if current != expected:
+        raise UserBrokerError(
+            "compatibility runtime authority changed during authorization"
+        )
+
+
 def run_self_service(
     connection: socket.socket | None,
     *,
@@ -281,13 +300,31 @@ def run_self_service(
             target_uid = authorization.caller.linux_uid
             directory, name = t2_user_mapping_admin._open_parent(mapping_path)
             mapping_lock = t2_user_mapping_admin._open_lock(directory, name)
-            mapping_set = t2_user_mapping_admin._load_optional(directory, name)
-            if mapping_set is None:
+            protected_mapping_set = t2_user_mapping_admin._load_optional(
+                directory, name
+            )
+            if protected_mapping_set is None:
                 raise UserBrokerError("protected mapping does not exist")
             policy = t2_user_policy.OPERATION_POLICIES[operation]
+            runtime_authority = None
             try:
+                mapping_set = protected_mapping_set
+                if (
+                    os.environ.get(t2_user_authority.AUTHORITY_MODE)
+                    == t2_user_authority.COMPATIBILITY_MODE
+                ):
+                    if mapping_path != t2_user_mapping_admin.DEFAULT_MAPPING_PATH:
+                        raise UserBrokerError(
+                            "compatibility authority path is not canonical"
+                        )
+                    runtime = t2_user_authority.load_compatibility(target_uid)
+                    runtime_authority = runtime
+                    mapping_set = runtime.mapping_set
                 selected = mapping_set.resolve(target_uid, policy.capability)
-            except t2_user_mapping.UserMappingError as error:
+            except (
+                t2_user_mapping.UserMappingError,
+                t2_user_authority.UserAuthorityError,
+            ) as error:
                 raise UserBrokerError(
                     "caller has no enabled mapping for this operation"
                 ) from error
@@ -362,7 +399,8 @@ def run_self_service(
                     )
 
                 authorization.revalidate()
-                _stable_mapping(directory, name, mapping_set)
+                _stable_mapping(directory, name, protected_mapping_set)
+                _stable_compatibility_authority(target_uid, runtime_authority)
                 if authorization.account.generation != selected.linux_account_generation:
                     raise UserBrokerError(
                         "caller account changed during authorization"
@@ -408,7 +446,8 @@ def run_self_service(
                     return BrokerResult(decision, False, None)
 
                 authorization.revalidate()
-                _stable_mapping(directory, name, mapping_set)
+                _stable_mapping(directory, name, protected_mapping_set)
+                _stable_compatibility_authority(target_uid, runtime_authority)
                 _keybag(selected, keybag_reader)
                 third = _live_collect(
                     live,
@@ -421,7 +460,8 @@ def run_self_service(
                         "live target changed before operation handoff"
                     )
                 authorization.revalidate()
-                _stable_mapping(directory, name, mapping_set)
+                _stable_mapping(directory, name, protected_mapping_set)
+                _stable_compatibility_authority(target_uid, runtime_authority)
                 _keybag(selected, keybag_reader)
                 activation = decision.state == "activation-authorized"
                 try:
@@ -445,7 +485,10 @@ def run_self_service(
                 def dispatch_allowed() -> bool:
                     try:
                         authorization.revalidate()
-                        _stable_mapping(directory, name, mapping_set)
+                        _stable_mapping(directory, name, protected_mapping_set)
+                        _stable_compatibility_authority(
+                            target_uid, runtime_authority
+                        )
                         _keybag(selected, keybag_reader)
                         if live.runtime_generation != runtime_generation:
                             return False

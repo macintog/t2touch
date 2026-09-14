@@ -77,8 +77,8 @@ def plan_named(
     finger_name: str,
 ) -> IdentityDeletePlan:
     """Resolve one canonical fprint name inside a reconciled private snapshot."""
-    if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
-        raise IdentityDeleteError("delete finger name is not canonical")
+    if not t2_fprint_projection.is_finger_name(finger_name):
+        raise IdentityDeleteError("delete finger handle is not canonical")
     try:
         t2_identity_inventory.summarize(local, live)
     except t2_identity_inventory.IdentityInventoryError as error:
@@ -100,10 +100,6 @@ def plan_target(
     """Rebuild a journal-bound target plan without trusting an ephemeral slot."""
     if not isinstance(local, t2_catacomb_codec.UserCatacomb):
         raise IdentityDeleteError("local identity archive is not validated")
-    if len(local.identities) <= 1:
-        raise IdentityDeleteError(
-            "single deletion would leave an unverified zero-identity component"
-        )
     matches = [
         identity for identity in local.identities if identity.uuid == identity_uuid
     ]
@@ -111,7 +107,11 @@ def plan_target(
         raise IdentityDeleteError("delete target is not unique in the local archive")
     selected = matches[0]
     try:
-        archive = local.delete(selected.uuid)
+        # The archive is only a plan here. IdentityDeleteOperation requires a
+        # stable post-command SEP double-read equal to this exact survivor set
+        # before IdentityDeletePersistence can commit it, including when the
+        # selected identity is the last enrolled slot.
+        archive = local.plan_delete(selected.uuid)
         decoded = t2_catacomb_codec.decode_user_catacomb(
             archive, selected.user_id
         )
@@ -127,9 +127,7 @@ def plan_target(
         raise IdentityDeleteError("delete plan did not remove exactly its target")
     if any(after[identity_uuid] != before[identity_uuid] for identity_uuid in after):
         raise IdentityDeleteError("delete plan changed surviving identity metadata")
-    request = uuid.UUID(selected.uuid).bytes + struct.pack(
-        "<I", selected.user_id
-    )
+    request = struct.pack("<I", selected.user_id) + uuid.UUID(selected.uuid).bytes
     if len(request) != 20:
         raise IdentityDeleteError("delete request is not the recovered 20-byte form")
     return IdentityDeletePlan(
@@ -170,13 +168,12 @@ def recovery_plan(
         or not isinstance(entity, int)
         or isinstance(entity, bool)
         or not 0 <= entity <= 0xFFFFFFFF
-        or not local.identities
         or identity_uuid in {identity.uuid for identity in local.identities}
         or survivor_snapshot_sha256(local.identities)
         != expected_survivor_sha256
     ):
         raise IdentityDeleteError("recovery survivor set differs from the journal")
-    request = parsed.bytes + struct.pack("<I", local.expected_user_id)
+    request = struct.pack("<I", local.expected_user_id) + parsed.bytes
     archive = local.replace_secure_data(local.secure_data)
     verified = t2_catacomb_codec.decode_user_catacomb(
         archive, local.expected_user_id

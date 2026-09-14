@@ -35,12 +35,12 @@ def inventory():
         "schema_version": 1,
         "identity_count": 2,
         "identities": [
-            {"slot": 1, "name": "left-thumb", "live": True},
-            {"slot": 2, "name": "right-index-finger", "live": True},
+            {"slot": 1, "name": "finger-2", "live": True},
+            {"slot": 2, "name": "finger-1", "live": True},
         ],
         "local_live_reconciled": True,
         "selection_scope": "current-reconciled-list",
-        "fprintd_listing_is_compatibility_alias": True,
+        "finger_names_are_presentation_metadata": True,
         "identifiers_redacted": True,
     }
 

@@ -70,7 +70,7 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         def worker():
             request, descriptor = protocol.receive_start(self.worker_socket)
             os.close(descriptor)
-            self.assertEqual(request.finger_name, "left-thumb")
+            self.assertEqual(request.finger_name, "finger-2")
             protocol.send_update(
                 self.worker_socket,
                 runtime.EnrollmentUpdate(None, False, False, True),
@@ -78,7 +78,7 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
             protocol.send_update(
                 self.worker_socket,
                 runtime.EnrollmentUpdate(
-                    "enroll-completed", True, False, False
+                    "enroll-completed", True, False, False, 100
                 ),
             )
 
@@ -90,7 +90,7 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(claim.ClaimEvidence, "revalidate") as revalidate:
             task = lifecycle.start(
-                "left-thumb", self.caller, self.evidence, updates.append
+                "finger-2", self.caller, self.evidence, updates.append
             )
             final = await task
             self.assertEqual(final.status, "enroll-completed")
@@ -130,7 +130,7 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(claim.ClaimEvidence, "revalidate"):
             lifecycle.start(
-                "right-thumb", self.caller, self.evidence, updates.append
+                "finger-3", self.caller, self.evidence, updates.append
             )
             await asyncio.to_thread(started.wait)
             final = await lifecycle.stop()
@@ -152,11 +152,11 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
             lambda _uid: None,
         )
         with self.assertRaises(client.FprintWorkerClientError):
-            lifecycle.start("left-thumb", self.caller, wrong, lambda _update: None)
+            lifecycle.start("finger-2", self.caller, wrong, lambda _update: None)
         updates = []
         with mock.patch.object(claim.ClaimEvidence, "revalidate"):
             final = await lifecycle.start(
-                "left-thumb", self.caller, self.evidence, updates.append
+                "finger-2", self.caller, self.evidence, updates.append
             )
         self.assertEqual(final.status, "enroll-unknown-error")
         self.assertEqual(len(updates), 1)
@@ -183,7 +183,7 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.object(claim.ClaimEvidence, "revalidate"):
             task = lifecycle.start(
-                "left-index-finger",
+                "finger-4",
                 self.caller,
                 self.evidence,
                 lambda _update: None,
@@ -199,4 +199,3 @@ class FprintWorkerClientTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

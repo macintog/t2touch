@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -26,7 +27,7 @@ import t2_user_broker as broker
 def request():
     subject = polkit.read_process_subject(os.getpid(), os.getuid())
     return protocol.DeleteRequest(
-        "left-thumb",
+        "finger-2",
         subject,
         account.AccountEvidence(subject.uid, "a" * 64),
         ipc.SessionEvidence(
@@ -67,7 +68,7 @@ class FprintDeleteWorkerTests(unittest.TestCase):
     def test_success_hands_exact_claim_to_delete_one_broker(self):
         authorization = Authorization()
         expected = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
         observed = {}
 
@@ -129,7 +130,7 @@ class FprintDeleteWorkerTests(unittest.TestCase):
     def test_completed_mutation_never_falls_back_to_failure_packet(self):
         authorization = Authorization()
         expected = runtime.DeletionCompletion(
-            "left-thumb", True, True, True, True
+            "finger-2", True, True, False, True
         )
 
         def authorization_factory(_peer, **_arguments):
@@ -166,6 +167,54 @@ class FprintDeleteWorkerTests(unittest.TestCase):
             thread.join(timeout=5)
         send_failure.assert_not_called()
         self.assertIsInstance(result[0], worker.FprintDeleteWorkerError)
+        self.assertTrue(authorization.closed)
+
+    def test_native_mode_uses_named_manager_without_compatibility_broker(self):
+        authorization = Authorization()
+        observed = {}
+        native = SimpleNamespace(
+            runtime_configuration=mock.Mock(return_value={"authority_mode": "linux-native"}),
+            operation_lock=lambda: nullcontext(),
+            sleep_inhibitor=lambda: nullcontext(),
+        )
+
+        def run_delete(configuration, **arguments):
+            observed["configuration"] = configuration
+            observed.update(arguments)
+            return {
+                "delete_succeeded": True,
+                "post_reboot_verification_required": False,
+            }
+
+        native.run_delete = run_delete
+        broker_runner = mock.Mock(side_effect=AssertionError("compatibility broker used"))
+
+        def authorization_factory(_peer, **_arguments):
+            return authorization
+
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        with (
+            mock.patch.dict(
+                os.environ, {"T2_TOUCHID_AUTHORITY_MODE": "linux-native"}
+            ),
+            mock.patch.object(worker, "_native_management_module", return_value=native),
+        ):
+            thread, result = self.run_worker(
+                right,
+                authorization_factory=authorization_factory,
+                broker_runner=broker_runner,
+            )
+            self.send_request(left)
+            completion = protocol.receive_completion(left)
+            thread.join(timeout=5)
+        self.assertEqual(completion.finger_name, "finger-2")
+        self.assertTrue(completion.deleted)
+        self.assertEqual(result, [completion])
+        self.assertEqual(observed["finger_name"], "finger-2")
+        self.assertIs(observed["authorization_session"], authorization)
+        broker_runner.assert_not_called()
         self.assertTrue(authorization.closed)
 
 

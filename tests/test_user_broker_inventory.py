@@ -71,7 +71,7 @@ def summary():
         ],
         "local_live_reconciled": True,
         "selection_scope": "current-reconciled-list",
-        "fprintd_listing_is_compatibility_alias": True,
+        "finger_names_are_presentation_metadata": True,
         "identifiers_redacted": True,
     }
 

@@ -30,17 +30,36 @@ class FprintEnrollmentRuntimeTests(unittest.TestCase):
             transition(protocol.EnrollmentAction.PROGRESS, progress=23)
         )
         self.assertEqual(
-            (progress.status, progress.done), ("enroll-stage-passed", False)
+            (progress.status, progress.done, progress.progress_percent),
+            ("enroll-stage-passed", False, 23),
         )
         duplicate = state.accept(
             transition(protocol.EnrollmentAction.PROGRESS, progress=23)
         )
         self.assertIsNone(duplicate.status)
+        self.assertEqual(duplicate.progress_percent, 23)
         removed = state.accept(
             transition(protocol.EnrollmentAction.FINGER_REMOVED)
         )
         self.assertEqual(
-            (removed.finger_present, removed.finger_needed), (False, True)
+            (
+                removed.finger_present,
+                removed.finger_needed,
+                removed.progress_percent,
+            ),
+            (False, True, 23),
+        )
+        delayed_progress = state.accept(
+            transition(protocol.EnrollmentAction.PROGRESS, progress=47)
+        )
+        self.assertEqual(
+            (
+                delayed_progress.status,
+                delayed_progress.finger_present,
+                delayed_progress.finger_needed,
+                delayed_progress.progress_percent,
+            ),
+            ("enroll-stage-passed", False, True, 47),
         )
 
     def test_quality_feedback_uses_only_documented_statuses(self):
@@ -59,6 +78,31 @@ class FprintEnrollmentRuntimeTests(unittest.TestCase):
                 state = runtime.EnrollmentRuntime()
                 self.assertEqual(state.accept(transition(action)).status, status)
 
+        state = runtime.EnrollmentRuntime()
+        state.accept(transition(protocol.EnrollmentAction.FINGER_PRESENT))
+        retry = state.accept(transition(protocol.EnrollmentAction.RETRY_SCAN))
+        self.assertEqual(
+            (retry.status, retry.finger_present, retry.finger_needed),
+            ("enroll-retry-scan", True, False),
+        )
+        removed = state.accept(
+            transition(protocol.EnrollmentAction.FINGER_REMOVED)
+        )
+        self.assertEqual(
+            (removed.finger_present, removed.finger_needed),
+            (False, True),
+        )
+        retry_after_removal = runtime.EnrollmentRuntime().accept(
+            transition(protocol.EnrollmentAction.REMOVE_AND_RETRY)
+        )
+        self.assertEqual(
+            (
+                retry_after_removal.finger_present,
+                retry_after_removal.finger_needed,
+            ),
+            (False, True),
+        )
+
     def test_only_reconciled_success_is_completed(self):
         state = runtime.EnrollmentRuntime()
         success = coordinator.EnrollmentCoordinatorResult(
@@ -66,7 +110,9 @@ class FprintEnrollmentRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(
             state.finish(success),
-            runtime.EnrollmentUpdate("enroll-completed", True, False, False),
+            runtime.EnrollmentUpdate(
+                "enroll-completed", True, False, False, 100
+            ),
         )
         with self.assertRaises(runtime.FprintEnrollmentRuntimeError):
             state.fail_unknown()
@@ -110,10 +156,15 @@ class FprintEnrollmentRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(state.finish(ambiguous).status, "enroll-unknown-error")
 
-    def test_regression_malformed_and_terminal_feedback_fail_closed(self):
+    def test_regression_is_clamped_but_malformed_and_terminal_feedback_fail(self):
         state = runtime.EnrollmentRuntime()
         state.accept(transition(protocol.EnrollmentAction.PROGRESS, progress=50))
-        for value in (49, None, True, 101):
+        regressed = state.accept(
+            transition(protocol.EnrollmentAction.PROGRESS, progress=49)
+        )
+        self.assertIsNone(regressed.status)
+        self.assertEqual(regressed.progress_percent, 50)
+        for value in (None, True, 101):
             with self.subTest(value=value), self.assertRaises(
                 runtime.FprintEnrollmentRuntimeError
             ):

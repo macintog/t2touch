@@ -71,9 +71,9 @@ class EnrollmentWorkerClient:
             raise FprintWorkerClientError(
                 "an enrollment worker is already active"
             )
-        if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_projection.is_finger_name(finger_name):
             raise FprintWorkerClientError(
-                "worker enrollment requires a canonical finger name"
+                "worker enrollment requires a canonical finger handle"
             )
         if (
             not isinstance(caller, t2_dbus_identity.PinnedDBusCaller)

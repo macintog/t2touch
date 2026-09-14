@@ -1,0 +1,39 @@
+Corrected-cadence control and host-layer parity (2026-09-03)
+
+Preserved run: 20260903T131130470997Z
+
+The run contains 13 complete capture attempts, 79 valid status records and 53
+valid statistics records. Every attempt follows the same acquisition path:
+90, statistics types 4/35/25, 81, 63, 91, 78, 64, statistics type 30. It
+contains no match-result record. Command 4 and command 0x0c returned status
+zero; match cleanup and Bridge-v3 transaction release are valid. The TUI stayed
+alive. There are no malformed callbacks or non-event diagnostic lines.
+
+The embedded event clock is 24 MHz. Compared with the old 025834 premature-lift
+UI control, 81->63 and 63->91 are unchanged. Median 63->78 lengthened from
+237.7 ms to 677.5 ms; the corrected range is 336.5-4404.9 ms. Median 91->78
+lengthened from 106.1 ms to 541.3 ms. Status 78->64 remains effectively
+immediate at a corrected median of 0.114 ms, so 64 cannot be a physical
+response to a post-78 lift prompt. Keeping contact longer materially changed
+duration but never changed the rejection outcome.
+
+The 36-byte auxiliary detail is byte-identical across all 81, 63, 78 and 64
+records in both runs. It is not a per-capture quality score or rejection
+subtype. Exact BKMatchOperation maps status 81 to optional
+presenceDetectedInLockout value 2 and issues no sensor follow-up. Mesa analytics
+types 35, 25 and 30 are device type, finger-detect end time and request-finger-
+off end time respectively; current evidence does not prove type 4.
+
+All callbacks are acknowledged with exact Bridge reply [0] before parsing or
+UI work. Status 78 takes the daemon's generic forwarding path at
+0x10003df67-0x10003e7a4 and the Mesa client forwarding path at
+0x10003995c-0x100039a89; it issues no follow-up biometric command.
+
+No proven host-controlled divergence remains. Command 4 is exact flags 0x4001,
+user 501, 60 zero bytes, count one and the refreshed 20-byte identity. Sensor
+readiness/reset/info, command-0x28 calibration bypass, Catacomb state 3,
+BioLockout, display, awake and Bridge transaction lifecycle all succeeded.
+Further Linux finger attempts or speculative host commands are not justified.
+The next useful evidence boundary is the Mesa/SEP firmware site that emits
+ordinal 78 or a paired successful native-macOS command/event trace exposing
+hidden T2 state.

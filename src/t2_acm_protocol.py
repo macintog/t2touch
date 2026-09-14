@@ -20,8 +20,11 @@ OP_CONTEXT_DELETE = 0x02
 OP_VERIFY_POLICY = 0x03
 OP_CONTEXT_EXTERNALIZE = 0x13
 OP_CONTEXT_CREATE_TRACKING = 0x24
+OP_IDENTITY_SECRET_SET = 0x28
 ENROLLMENT_POLICY = b"TouchIdEnrollment"
 POLICY_RESPONSE_CAPACITY = 0x1000
+IDENTITY_SECRET_TYPE = 5
+IDENTITY_SECRET_MAX_SIZE = 0x80
 SIMPLE_REQUIREMENT_TYPES = frozenset(
     {1, 2, 3, 6, *range(8, 16), *range(18, 29)}
 )
@@ -73,6 +76,7 @@ def _header(opcode: int) -> bytes:
         OP_VERIFY_POLICY,
         OP_CONTEXT_EXTERNALIZE,
         OP_CONTEXT_CREATE_TRACKING,
+        OP_IDENTITY_SECRET_SET,
     }:
         raise ACMProtocolError("opcode is outside the lifecycle allowlist")
     return MAGIC + bytes((opcode, 0, 0, VERSION))
@@ -112,6 +116,23 @@ def build_externalize(handle: ContextHandle) -> bytes:
     if not isinstance(handle, ContextHandle):
         raise ACMProtocolError("handle must be a ContextHandle")
     return _header(OP_CONTEXT_EXTERNALIZE) + handle.context
+
+
+def build_identity_secret(handle: ContextHandle, secret: bytearray) -> bytearray:
+    """Build request-10's fixed type-5, empty-parameter ACM data command."""
+    if not isinstance(handle, ContextHandle):
+        raise ACMProtocolError("handle must be a ContextHandle")
+    if type(secret) is not bytearray:
+        raise ACMProtocolError("identity secret must be a wipeable bytearray")
+    if not 1 <= len(secret) <= IDENTITY_SECRET_MAX_SIZE:
+        raise ACMProtocolError("identity secret length is outside the fixed bound")
+    return bytearray(
+        _header(OP_IDENTITY_SECRET_SET)
+        + handle.context
+        + struct.pack("<II", IDENTITY_SECRET_TYPE, len(secret))
+        + secret
+        + struct.pack("<I", 0)  # empty ACM parameter array
+    )
 
 
 def build_enrollment_policy(handle: ContextHandle, *, preflight: bool) -> bytes:
@@ -165,9 +186,9 @@ def parse_policy_response(response: bytes) -> PolicyResult:
     )
 
 
-def validate_command(command: bytes) -> int:
+def validate_command(command: bytes | bytearray) -> int:
     """Validate and return the opcode for this narrow lifecycle subset."""
-    if type(command) is not bytes or len(command) < HEADER_SIZE:
+    if type(command) not in (bytes, bytearray) or len(command) < HEADER_SIZE:
         raise ACMProtocolError("command is shorter than the ACM header")
     if command[:4] != MAGIC or command[5:8] != b"\x00\x00\x01":
         raise ACMProtocolError("command header is invalid")
@@ -179,7 +200,17 @@ def validate_command(command: bytes) -> int:
         OP_CONTEXT_EXTERNALIZE: 24,
         OP_VERIFY_POLICY: 51,
     }.get(opcode)
-    if expected is None or len(command) != expected:
+    if opcode == OP_IDENTITY_SECRET_SET:
+        if not 36 + 1 <= len(command) <= 36 + IDENTITY_SECRET_MAX_SIZE:
+            raise ACMProtocolError("identity-secret command length is invalid")
+        secret_length = struct.unpack_from("<I", command, 28)[0]
+        if (
+            struct.unpack_from("<I", command, 24)[0] != IDENTITY_SECRET_TYPE
+            or secret_length != len(command) - 36
+            or command[-4:] != b"\x00" * 4
+        ):
+            raise ACMProtocolError("identity-secret command is not the fixed form")
+    elif expected is None or len(command) != expected:
         raise ACMProtocolError("command opcode or length is not allowed")
     if opcode == OP_VERIFY_POLICY:
         fixed = command[24:]

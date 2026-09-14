@@ -19,7 +19,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 ROOT_UID = 0
 MAX_FILE_SIZE = 1024 * 1024
 MAX_MAPPINGS = 64
@@ -72,11 +73,32 @@ def _canonical_uuid(value: Any, label: str) -> str:
     return value
 
 
-def _keybag_path(value: Any, linux_uid: int) -> str:
+def _legacy_keybag_path(value: Any, linux_uid: int) -> str:
     expected = KEYBAG_ROOT / str(linux_uid) / "user.kb"
     if not isinstance(value, str) or PurePosixPath(value) != expected:
         raise UserMappingError(
             "keybag path must use the target UID's private canonical location"
+        )
+    return value
+
+
+def _bundle_path(
+    value: Any,
+    linux_uid: int,
+    bundle_generation: str,
+    filename: str,
+    label: str,
+) -> str:
+    expected = (
+        KEYBAG_ROOT
+        / str(linux_uid)
+        / "identities"
+        / bundle_generation
+        / filename
+    )
+    if not isinstance(value, str) or PurePosixPath(value) != expected:
+        raise UserMappingError(
+            f"{label} must use the target UID's private canonical generation"
         )
     return value
 
@@ -93,6 +115,10 @@ class UserMapping:
     unlock_mode: str
     capabilities: frozenset[str]
     enabled: bool
+    bundle_generation: str | None = None
+    activation_secret_path: str | None = None
+    activation_secret_sha256: str | None = None
+    activation_secret_length: int | None = None
 
     @property
     def special_bag_alias(self) -> int:
@@ -110,6 +136,7 @@ class UserMapping:
 class UserMappingSet:
     generation: str
     mappings: tuple[UserMapping, ...]
+    schema_version: int = LEGACY_SCHEMA_VERSION
 
     def resolve(self, linux_uid: int, capability: str) -> UserMapping:
         _unsigned(linux_uid, "target Linux UID", minimum=1)
@@ -124,7 +151,7 @@ class UserMappingSet:
 
     def redacted_summary(self) -> dict[str, object]:
         return {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "mapping_count": len(self.mappings),
             "enabled_mapping_count": sum(item.enabled for item in self.mappings),
             "password_on_demand_count": sum(
@@ -138,8 +165,8 @@ class UserMappingSet:
         }
 
 
-def _parse_mapping(value: Any) -> UserMapping:
-    fields = {
+def _parse_mapping(value: Any, schema_version: int) -> UserMapping:
+    legacy_fields = {
         "linux_uid",
         "linux_account_generation",
         "apple_uid",
@@ -151,7 +178,18 @@ def _parse_mapping(value: Any) -> UserMapping:
         "capabilities",
         "enabled",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    activation_fields = {
+        "bundle_generation",
+        "activation_secret_path",
+        "activation_secret_sha256",
+        "activation_secret_length",
+    }
+    expected_fields = (
+        legacy_fields
+        if schema_version == LEGACY_SCHEMA_VERSION
+        else legacy_fields | activation_fields
+    )
+    if not isinstance(value, dict) or set(value) != expected_fields:
         raise UserMappingError("mapping entry fields are incomplete or unsupported")
     linux_uid = _unsigned(value["linux_uid"], "Linux UID", minimum=1)
     apple_uid = _unsigned(value["apple_uid"], "Apple UID", minimum=10)
@@ -171,19 +209,56 @@ def _parse_mapping(value: Any) -> UserMapping:
         raise UserMappingError("capabilities must be a sorted unique supported list")
     if type(value["enabled"]) is not bool:
         raise UserMappingError("mapping enabled state must be Boolean")
+    account_uuid = _canonical_uuid(value["account_uuid"], "Apple account UUID")
+    bundle_generation = None
+    activation_secret_path = None
+    activation_secret_sha256 = None
+    activation_secret_length = None
+    if schema_version == SCHEMA_VERSION:
+        bundle_generation = _canonical_uuid(
+            value["bundle_generation"], "activation bundle generation"
+        )
+        activation_secret_path = _bundle_path(
+            value["activation_secret_path"],
+            linux_uid,
+            bundle_generation,
+            "activation.secret",
+            "activation secret path",
+        )
+        activation_secret_sha256 = _sha256(
+            value["activation_secret_sha256"], "activation secret digest"
+        )
+        if value["activation_secret_length"] != 16 or type(
+            value["activation_secret_length"]
+        ) is not int:
+            raise UserMappingError("activation secret length must be exactly 16")
+        activation_secret_length = 16
+        keybag_path = _bundle_path(
+            value["keybag_path"],
+            linux_uid,
+            bundle_generation,
+            "user.kb",
+            "keybag path",
+        )
+    else:
+        keybag_path = _legacy_keybag_path(value["keybag_path"], linux_uid)
     return UserMapping(
         linux_uid=linux_uid,
         linux_account_generation=_sha256(
             value["linux_account_generation"], "Linux account generation"
         ),
         apple_uid=apple_uid,
-        account_uuid=_canonical_uuid(value["account_uuid"], "Apple account UUID"),
+        account_uuid=account_uuid,
         bag_uuid=_canonical_uuid(value["bag_uuid"], "AKS bag UUID"),
-        keybag_path=_keybag_path(value["keybag_path"], linux_uid),
+        keybag_path=keybag_path,
         keybag_sha256=_sha256(value["keybag_sha256"], "keybag digest"),
         unlock_mode=unlock_mode,
         capabilities=frozenset(capabilities),
         enabled=value["enabled"],
+        bundle_generation=bundle_generation,
+        activation_secret_path=activation_secret_path,
+        activation_secret_sha256=activation_secret_sha256,
+        activation_secret_length=activation_secret_length,
     )
 
 
@@ -199,24 +274,36 @@ def parse(data: bytes) -> UserMappingSet:
     if (
         not isinstance(document, dict)
         or set(document) != {"schema_version", "mappings"}
-        or document["schema_version"] != SCHEMA_VERSION
         or type(document["schema_version"]) is not int
+        or document["schema_version"]
+        not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}
         or not isinstance(document["mappings"], list)
         or len(document["mappings"]) > MAX_MAPPINGS
     ):
         raise UserMappingError("mapping document schema is unsupported")
-    mappings = tuple(_parse_mapping(item) for item in document["mappings"])
-    for attribute, label in (
+    schema_version = document["schema_version"]
+    mappings = tuple(
+        _parse_mapping(item, schema_version) for item in document["mappings"]
+    )
+    unique_fields = [
         ("linux_uid", "Linux UID"),
         ("apple_uid", "Apple UID"),
         ("account_uuid", "Apple account UUID"),
         ("bag_uuid", "AKS bag UUID"),
         ("keybag_path", "keybag path"),
-    ):
+    ]
+    if schema_version == SCHEMA_VERSION:
+        unique_fields.extend(
+            [
+                ("bundle_generation", "activation bundle generation"),
+                ("activation_secret_path", "activation secret path"),
+            ]
+        )
+    for attribute, label in unique_fields:
         values = [getattr(item, attribute) for item in mappings]
         if len(values) != len(set(values)):
             raise UserMappingError(f"{label} is mapped more than once")
-    return UserMappingSet(hashlib.sha256(data).hexdigest(), mappings)
+    return UserMappingSet(hashlib.sha256(data).hexdigest(), mappings, schema_version)
 
 
 def serialize(mappings: tuple[UserMapping, ...]) -> bytes:
@@ -228,23 +315,55 @@ def serialize(mappings: tuple[UserMapping, ...]) -> bytes:
         raise UserMappingError("mapping serialization input is invalid")
     try:
         ordered = tuple(sorted(mappings, key=lambda item: item.linux_uid))
+        activation_rows = tuple(
+            all(
+                value is not None
+                for value in (
+                    item.bundle_generation,
+                    item.activation_secret_path,
+                    item.activation_secret_sha256,
+                    item.activation_secret_length,
+                )
+            )
+            for item in ordered
+        )
+        if any(activation_rows) and not all(activation_rows):
+            raise UserMappingError(
+                "legacy and activation mappings cannot share one document"
+            )
+        schema_version = (
+            SCHEMA_VERSION
+            if activation_rows and all(activation_rows)
+            else LEGACY_SCHEMA_VERSION
+        )
+
+        def serialized_mapping(item: UserMapping) -> dict[str, object]:
+            result: dict[str, object] = {
+                "linux_uid": item.linux_uid,
+                "linux_account_generation": item.linux_account_generation,
+                "apple_uid": item.apple_uid,
+                "account_uuid": item.account_uuid,
+                "bag_uuid": item.bag_uuid,
+                "keybag_path": item.keybag_path,
+                "keybag_sha256": item.keybag_sha256,
+                "unlock_mode": item.unlock_mode,
+                "capabilities": sorted(item.capabilities),
+                "enabled": item.enabled,
+            }
+            if schema_version == SCHEMA_VERSION:
+                result.update(
+                    {
+                        "bundle_generation": item.bundle_generation,
+                        "activation_secret_path": item.activation_secret_path,
+                        "activation_secret_sha256": item.activation_secret_sha256,
+                        "activation_secret_length": item.activation_secret_length,
+                    }
+                )
+            return result
+
         document = {
-            "schema_version": SCHEMA_VERSION,
-            "mappings": [
-                {
-                    "linux_uid": item.linux_uid,
-                    "linux_account_generation": item.linux_account_generation,
-                    "apple_uid": item.apple_uid,
-                    "account_uuid": item.account_uuid,
-                    "bag_uuid": item.bag_uuid,
-                    "keybag_path": item.keybag_path,
-                    "keybag_sha256": item.keybag_sha256,
-                    "unlock_mode": item.unlock_mode,
-                    "capabilities": sorted(item.capabilities),
-                    "enabled": item.enabled,
-                }
-                for item in ordered
-            ],
+            "schema_version": schema_version,
+            "mappings": [serialized_mapping(item) for item in ordered],
         }
         encoded = (
             json.dumps(

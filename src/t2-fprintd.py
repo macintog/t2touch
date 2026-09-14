@@ -12,6 +12,7 @@ selected from the scoped Apple-user identity list.
 
 import argparse
 import asyncio
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -29,13 +30,16 @@ from dbus_next import introspection as dbus_introspection
 from dbus_next.service import ServiceInterface, dbus_property, method, signal
 
 import t2_fprint_projection
+import t2_fprint_identity
 import t2_fprint_runtime
 import t2_fprint_enrollment_runtime
 import t2_fprint_deletion_runtime
 import t2_fprint_worker_client
+import t2_fprint_worker
 import t2_fprint_delete_worker_client
 import t2_dbus_identity
 import t2_fprint_claim
+import t2_user_authority
 from t2_dbus_sender import (
     DBusSenderError,
     SenderAwareMessageBus,
@@ -47,11 +51,8 @@ BUS_NAME = "net.reactivated.Fprint"
 MANAGER_PATH = "/net/reactivated/Fprint/Manager"
 DEVICE_PATH = "/net/reactivated/Fprint/Device/0"
 FPRINT_ERROR = "net.reactivated.Fprint.Error"
+UNSET_ENROLLMENT_PROGRESS = object()
 LINUX_USER = os.environ.get("T2_TOUCHID_USER", "")
-MACOS_USER_ID = int(os.environ.get("T2_TOUCHID_MACOS_USER_ID", "501"))
-ENROLLED_FINGER = os.environ.get(
-    "T2_TOUCHID_ENROLLED_FINGER", "right-index-finger"
-)
 AUTO_SYNC_ADAPTIVE_VALUE = os.environ.get(
     "T2_TOUCHID_AUTO_SYNC_ADAPTIVE", "0"
 )
@@ -66,23 +67,31 @@ DESKTOP_FEEDBACK_UNITS = frozenset(
     }
 )
 
-if not 0 <= MACOS_USER_ID <= 0xFFFFFFFF:
-    raise RuntimeError("T2_TOUCHID_MACOS_USER_ID is outside uint32 range")
-if ENROLLED_FINGER not in {
-    f"{hand}-{finger}"
-    for hand in ("left", "right")
-    for finger in (
-        "thumb",
-        "index-finger",
-        "middle-finger",
-        "ring-finger",
-        "little-finger",
-    )
-}:
-    raise RuntimeError("T2_TOUCHID_ENROLLED_FINGER is invalid")
 if AUTO_SYNC_ADAPTIVE_VALUE not in {"0", "1"}:
     raise RuntimeError("T2_TOUCHID_AUTO_SYNC_ADAPTIVE is invalid")
 AUTO_SYNC_ADAPTIVE = AUTO_SYNC_ADAPTIVE_VALUE == "1"
+NATIVE_AUTHORITY = "linux-native-e4"
+COMPATIBILITY_AUTHORITY = "macos-control-oracle-v1"
+
+
+def public_verification_failure(error: BaseException) -> str:
+    """Return a bounded diagnostic without paths or stable identifiers."""
+    message = " ".join(str(error).split())
+    if (
+        not message
+        or len(message) > 300
+        or "/" in message
+        or "\\" in message
+        or any(ord(character) < 32 for character in message)
+    ):
+        return type(error).__name__
+    for token in message.replace("(", " ").replace(")", " ").split():
+        candidate = token.strip("[]{}<>,.;:")
+        if len(candidate) >= 16 and all(
+            character in "0123456789abcdefABCDEF-" for character in candidate
+        ):
+            return type(error).__name__
+    return message
 
 
 def verdict_from_result(
@@ -113,9 +122,14 @@ def verdict_from_result(
     events = result.get("match_events", [])
     if not isinstance(events, list):
         raise RuntimeError("malformed T2 match event list")
+    if result.get("match_cleanup_valid") is not True:
+        raise RuntimeError("the T2 match did not close cleanly")
+    image_quality_rejected = False
     for event in events:
         if not isinstance(event, dict) or event.get("event_kind") != "match_result":
             continue
+        if event.get("result_valid") is not True:
+            raise RuntimeError("the T2 returned an invalid or unknown match result")
         if (
             event.get("matched") is True
             and event.get("matches_enrolled_identity") is True
@@ -125,10 +139,19 @@ def verdict_from_result(
             )
         ):
             return "verify-match"
-        return "verify-no-match"
+        if event.get("no_match") is True and event.get("matched") is False:
+            if event.get("no_match_image_quality") is True:
+                image_quality_rejected = True
+                continue
+            return "verify-no-match"
+        raise RuntimeError("the T2 returned an unclassifiable match result")
     if result.get("match_rejected") is True:
         raise RuntimeError("the T2 rejected match startup")
-    return "verify-no-match"
+    if image_quality_rejected:
+        raise RuntimeError(
+            "the T2 match ended after image-quality retries without a verdict"
+        )
+    raise RuntimeError("the T2 match ended without a terminal verdict")
 
 
 def resolved_any_finger_from_result(result: object) -> str | None:
@@ -140,7 +163,7 @@ def resolved_any_finger_from_result(result: object) -> str | None:
     if (
         not isinstance(gate, dict)
         or type(gate.get("identity_count")) is not int
-        or not 1 <= gate["identity_count"] <= len(t2_fprint_projection.FINGER_NAMES)
+        or not 1 <= gate["identity_count"] <= t2_fprint_identity.MAX_ENROLLED_IDENTITIES
         or gate.get("complete_named_inventory") is not True
         or gate.get("all_identities_selected") is not True
         or gate.get("same_connection_inventory_stable") is not True
@@ -166,7 +189,7 @@ def resolved_any_finger_from_result(result: object) -> str | None:
         if (
             event.get("matches_enrolled_identity") is not True
             or event.get("matched_finger_name_present") is not True
-            or finger_name not in t2_fprint_projection.FINGER_NAME_SET
+            or not t2_fprint_projection.is_finger_name(finger_name)
         ):
             raise RuntimeError("resolved-any T2 match result is incomplete")
         return finger_name
@@ -234,8 +257,24 @@ class T2Backend:
     ) -> None:
         if not LINUX_USER:
             raise RuntimeError("T2_TOUCHID_USER is not configured")
+        try:
+            account = pwd.getpwnam(LINUX_USER)
+        except KeyError as error:
+            raise RuntimeError("configured Linux user does not exist") from error
+        if account.pw_uid == 0:
+            raise RuntimeError("configured Linux user must be non-root")
+        self.linux_uid = account.pw_uid
         self.project_dir = project_dir
         self.match_seconds = match_seconds
+        self.biolockout_state_dir = Path(
+            os.environ.get(
+                "T2_TOUCHID_BIOLOCKOUT_STATE_DIR",
+                "/var/lib/t2-touchid/biolockout",
+            )
+        )
+        if not self.biolockout_state_dir.is_absolute():
+            raise RuntimeError("bio-lockout state directory must be absolute")
+        self.catacomb_root = Path("/var/lib/t2-touchid/catacomb")
         self.process: asyncio.subprocess.Process | None = None
         self.operation_lock = asyncio.Lock()
         if type(auto_sync_adaptive) is not bool:
@@ -257,15 +296,30 @@ class T2Backend:
         except (OSError, ValueError):
             pass
 
+    def runtime_authority(self) -> t2_user_authority.RuntimeUserAuthority:
+        try:
+            return t2_user_authority.load_runtime(self.linux_uid)
+        except t2_user_authority.UserAuthorityError as error:
+            raise RuntimeError("runtime authority is unavailable") from error
+
     async def runtime_projection(self) -> t2_fprint_runtime.RuntimeProjection:
+        authority = self.runtime_authority()
+        if authority.origin == COMPATIBILITY_AUTHORITY:
+            port = await self.discover()
+            await self._run_probe(port, prepare_only=True)
+        elif authority.origin != NATIVE_AUTHORITY:
+            raise RuntimeError("configured T2 authority origin is unsupported")
         command = [
             sys.executable,
             str(self.project_dir / "src/t2-touchid-fprint-status.py"),
         ]
+        environment = os.environ.copy()
+        environment["SUDO_UID"] = str(self.linux_uid)
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=environment,
         )
         self.process = process
         try:
@@ -280,13 +334,38 @@ class T2Backend:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RuntimeError("fprint projection returned malformed JSON") from error
         try:
-            return t2_fprint_runtime.parse_projection(value, ENROLLED_FINGER)
+            return t2_fprint_runtime.parse_projection(value)
         except t2_fprint_runtime.FprintRuntimeError as error:
             raise RuntimeError("fprint projection failed validation") from error
 
+    async def enrollment_projection(self) -> t2_fprint_runtime.RuntimeProjection:
+        """Project E4 state or the one valid pre-E4 native bootstrap state."""
+
+        try:
+            return await self.runtime_projection()
+        except RuntimeError as projection_error:
+            if os.environ.get("T2_TOUCHID_AUTHORITY_MODE") != "linux-native":
+                raise
+            try:
+                native, _configuration, authority, existing_authority = (
+                    t2_fprint_worker.native_enrollment_context(self.linux_uid)
+                )
+                if existing_authority is not None:
+                    raise projection_error
+                native._require_fresh_enrollment_state()
+                if authority.selected.linux_uid != self.linux_uid:
+                    raise RuntimeError("native bootstrap authority changed users")
+            except RuntimeError:
+                raise
+            except Exception as error:
+                raise RuntimeError(
+                    "native enrollment bootstrap is unavailable"
+                ) from error
+            return t2_fprint_runtime.RuntimeProjection((), 0, True)
+
     async def list_fingers(self) -> tuple[str, ...]:
         async with self.operation_lock:
-            return (await self.runtime_projection()).listed_fingers
+            return (await self.enrollment_projection()).listed_fingers
 
     async def discover(self) -> int:
         if self.port is not None:
@@ -313,7 +392,16 @@ class T2Backend:
         port: int,
         target_finger: str | None = None,
         resolve_any_finger: bool = False,
+        live_feedback: Callable[[dict], None] | None = None,
+        prepare_only: bool = False,
     ) -> dict:
+        if type(prepare_only) is not bool or (
+            prepare_only and (target_finger is not None or resolve_any_finger)
+        ):
+            raise RuntimeError("invalid compatibility projection preparation")
+        authority = self.runtime_authority()
+        if authority.origin != COMPATIBILITY_AUTHORITY:
+            raise RuntimeError("compatibility Catacomb authority changed")
         command = [
             "/usr/bin/flock",
             "--exclusive",
@@ -326,28 +414,57 @@ class T2Backend:
             "--port",
             str(port),
             "--initialize",
+            "--biometric-protocol",
+            "--sensor-readiness",
             "--reset-sensor",
-            "--cancel-operation",
+            "--sensor-info",
             "--load-calibration",
+            "--cancel-operation",
+            "--bio-device-list",
             "--identity-list",
+            "--service-template-sync",
+            "--load-native-catacomb-root",
+            str(self.catacomb_root),
+            "--compatibility-authority-linux-uid",
+            str(self.linux_uid),
+            "--biolockout-state-dir",
+            str(self.biolockout_state_dir),
+            "--display-on",
+            "--system-awake",
             "--macos-user-id",
-            str(MACOS_USER_ID),
-            "--match-seconds",
-            str(self.match_seconds),
-            "--stop-on-match-result",
+            str(authority.selected.apple_uid),
         ]
-        if target_finger is not None:
-            command.extend(["--match-finger-name", target_finger])
-        if resolve_any_finger:
-            command.append("--resolve-any-finger-name")
+        if not prepare_only:
+            command.extend(
+                [
+                    "--match-seconds",
+                    str(self.match_seconds),
+                    "--stop-on-match-result",
+                    "--retry-image-quality-no-match",
+                    "--live-match-feedback",
+                    "--live-match-feedback-format",
+                    "json",
+                ]
+            )
+            if target_finger is not None:
+                command.extend(["--match-finger-name", target_finger])
+            if resolve_any_finger:
+                command.append("--resolve-any-finger-name")
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         self.process = process
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stdout_task = asyncio.create_task(process.stdout.read())
+        stderr_task = asyncio.create_task(
+            self._read_probe_stderr(process.stderr, live_feedback)
+        )
         try:
-            stdout, stderr = await process.communicate()
+            await process.wait()
+            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
         finally:
             self.process = None
         if not stdout or process.returncode != 0:
@@ -361,30 +478,106 @@ class T2Backend:
             raise RuntimeError("BridgeXPC probe returned malformed JSON")
         return result
 
+    async def _read_probe_stderr(
+        self,
+        stream: asyncio.StreamReader,
+        live_feedback: Callable[[dict], None] | None,
+    ) -> bytes:
+        captured = bytearray()
+        prefix = b"T2_MATCH_EVENT "
+        while True:
+            line = await stream.readline()
+            if not line:
+                return bytes(captured)
+            captured.extend(line)
+            if live_feedback is None or not line.startswith(prefix):
+                continue
+            try:
+                event = json.loads(line[len(prefix) :])
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(event, dict):
+                live_feedback(event)
+
+    async def _run_native_match(
+        self,
+        target_finger: str | None = None,
+        resolve_any_finger: bool = False,
+        live_feedback: Callable[[dict], None] | None = None,
+    ) -> dict:
+        command = [
+            sys.executable,
+            str(self.project_dir / "src/t2-native-match.py"),
+            "--observation-seconds",
+            str(self.match_seconds),
+            "--stop-on-first-verdict",
+        ]
+        if target_finger is not None:
+            command.extend(["--match-finger-name", target_finger])
+        if resolve_any_finger:
+            command.append("--resolve-any-finger-name")
+        environment = os.environ.copy()
+        environment["SUDO_UID"] = str(self.linux_uid)
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+        self.process = process
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stdout_task = asyncio.create_task(process.stdout.read())
+        stderr_task = asyncio.create_task(
+            self._read_probe_stderr(process.stderr, live_feedback)
+        )
+        try:
+            await process.wait()
+            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+        finally:
+            self.process = None
+        if not stdout or process.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(detail or "native T2 match owner failed")
+        try:
+            result = json.loads(stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("native T2 match owner returned malformed JSON") from error
+        if not isinstance(result, dict):
+            raise RuntimeError("native T2 match owner returned malformed JSON")
+        if any(
+            result.get(field) is not expected
+            for field, expected in (
+                ("configured_identity_records_reconciled", True),
+                ("bridge_os_transaction_released_after_match", True),
+                ("termination_requested", False),
+            )
+        ):
+            raise RuntimeError("native T2 match authority did not reconcile")
+        return result
+
     async def verify(
         self,
         target_finger: str | None = None,
         resolve_any_finger: bool = False,
+        live_feedback: Callable[[dict], None] | None = None,
     ) -> tuple[str, dict]:
         if target_finger is not None and resolve_any_finger:
             raise RuntimeError("named and resolved-any matching conflict")
-        port = await self.discover()
         await self.notify_finger_requested()
-        try:
-            result = await self._run_probe(
-                port, target_finger, resolve_any_finger
+        authority = self.runtime_authority()
+        if authority.origin == NATIVE_AUTHORITY:
+            result = await self._run_native_match(
+                target_finger, resolve_any_finger, live_feedback
             )
-        except RuntimeError:
-            if not self.port_from_cache:
-                raise
-            # A cached service endpoint may disappear after bridgeOS restarts.
-            # Rediscover once; never turn a valid negative match into a retry.
-            self.port = None
-            self.port_from_cache = False
+        elif authority.origin == COMPATIBILITY_AUTHORITY:
             port = await self.discover()
+            # Never replay authentication after an ambiguous transport failure.
             result = await self._run_probe(
-                port, target_finger, resolve_any_finger
+                port, target_finger, resolve_any_finger, live_feedback
             )
+        else:
+            raise RuntimeError("configured T2 authority origin is unsupported")
         if resolve_any_finger:
             verdict = (
                 "verify-match"
@@ -396,7 +589,11 @@ class T2Backend:
         await self.notify_feedback(verdict)
         return verdict, result
 
-    async def verify_fprint(self, requested_finger: str) -> tuple[str, dict]:
+    async def verify_fprint(
+        self,
+        requested_finger: str,
+        live_feedback: Callable[[dict], None] | None = None,
+    ) -> tuple[str, dict]:
         """Resolve presentation afresh, then let the probe resolve authority."""
         async with self.operation_lock:
             view = await self.runtime_projection()
@@ -407,10 +604,9 @@ class T2Backend:
             except t2_fprint_runtime.FprintRuntimeError as error:
                 raise RuntimeError("requested fprint identity is unavailable") from error
             return await self.verify(
-                target_finger=request.target_finger,
-                resolve_any_finger=(
-                    request.requested_finger == "any" and view.complete
-                ),
+                target_finger=None,
+                resolve_any_finger=True,
+                live_feedback=live_feedback,
             )
 
     async def _request_adaptive_sync(self) -> None:
@@ -520,7 +716,7 @@ class T2Backend:
             return
         process.terminate()
         try:
-            await asyncio.wait_for(process.wait(), timeout=2)
+            await asyncio.wait_for(process.wait(), timeout=10)
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
@@ -551,9 +747,10 @@ class FprintDevice(ServiceInterface):
         self.verify_task: asyncio.Task | None = None
         self.delete_task: asyncio.Task | None = None
         self.claim_expiry_task: asyncio.Task | None = None
-        self.enrolled_fingers: tuple[str, ...] = (ENROLLED_FINGER,)
+        self.enrolled_fingers: tuple[str, ...] = ()
         self.finger_present = False
         self.finger_needed = False
+        self.enrollment_progress: int | None = None
 
     @staticmethod
     def _consume_signal_send(result: object) -> None:
@@ -568,13 +765,26 @@ class FprintDevice(ServiceInterface):
 
         result.add_done_callback(consume)
 
-    def _set_finger_state(self, present: object, needed: object) -> None:
+    def _set_finger_state(
+        self,
+        present: object,
+        needed: object,
+        progress: object = UNSET_ENROLLMENT_PROGRESS,
+    ) -> None:
         """Update and publish fprintd's historical dynamic properties."""
 
         if (
             type(present) is not bool
             or type(needed) is not bool
             or (present and needed)
+            or (
+                progress is not UNSET_ENROLLMENT_PROGRESS
+                and progress is not None
+                and (
+                    type(progress) is not int
+                    or not 0 <= progress <= 100
+                )
+            )
         ):
             raise RuntimeError("finger property state is invalid")
         changed: dict[str, Variant] = {}
@@ -584,6 +794,14 @@ class FprintDevice(ServiceInterface):
         if needed != self.finger_needed:
             self.finger_needed = needed
             changed["finger-needed"] = Variant("b", needed)
+        if (
+            progress is not UNSET_ENROLLMENT_PROGRESS
+            and progress != self.enrollment_progress
+        ):
+            self.enrollment_progress = progress
+            changed["t2-enroll-progress"] = Variant(
+                "i", -1 if progress is None else progress
+            )
         if not changed:
             return
         send = getattr(self.identity_bus, "send", None)
@@ -774,11 +992,11 @@ class FprintDevice(ServiceInterface):
             raise DBusError(f"{FPRINT_ERROR}.AlreadyInUse", "verification is active")
         if (
             finger_name != "any"
-            and finger_name not in t2_fprint_projection.FINGER_NAME_SET
+            and not t2_fprint_projection.is_finger_name(finger_name)
         ):
             raise DBusError(
                 f"{FPRINT_ERROR}.InvalidFingername",
-                "verification requires any or a canonical finger name",
+                "verification requires any or an enrolled numbered handle",
             )
         if self.claim_expiry_task is not None:
             self.claim_expiry_task.cancel()
@@ -820,18 +1038,15 @@ class FprintDevice(ServiceInterface):
                     f"{FPRINT_ERROR}.NoEnrolledPrints",
                     "finger is not enrolled",
                 ) from error
-            # fprint's ABI explicitly permits "any" on this signal to tell
-            # clients that any enrolled identity may be presented. Emit the
-            # instruction before capture; the exact successful identity is
-            # reported later through VerifyFingerMatched. Emitting a resolved
-            # VerifyFingerSelected after capture makes pam_fprintd display a
-            # stale "place your finger" prompt after authentication.
-            self.VerifyFingerSelected(finger_name)
             operation = asyncio.create_task(
                 self._run_verification(finger_name)
             )
             self.verify_task = operation
-            self._set_finger_state(False, True)
+            # VerifyStart only schedules the backend. Native activation and
+            # projection still run before Mesa accepts a touch, so publishing
+            # finger-needed here hands the operator a false-ready prompt.
+            # The match_armed event is the first authoritative boundary.
+            self._set_finger_state(False, False)
             started = True
         except DBusError:
             raise
@@ -853,17 +1068,24 @@ class FprintDevice(ServiceInterface):
     async def _run_verification(self, requested_finger: str) -> None:
         current_task = asyncio.current_task()
         try:
-            verdict, result = await self.backend.verify_fprint(requested_finger)
-            if requested_finger == "any" and verdict == "verify-match":
-                if "resolved_any_match_gate" in result:
-                    selected = resolved_any_finger_from_result(result)
-                    if selected is None:
-                        raise RuntimeError("matched any-finger result has no identity")
-                else:
-                    selected = ENROLLED_FINGER
+            # dbus-next sends an async method's reply from the completed
+            # VerifyStart task. Yield once from this separately scheduled task
+            # so that reply is queued before VerifyFingerSelected, matching
+            # upstream fprintd's ordering contract. pam_fprintd 1.94.5 rejects
+            # this signal while its VerifyStart reply is still outstanding.
+            # "any" is intentional: every enrolled identity is valid for
+            # authentication, regardless of which numbered handle a client
+            # supplied, and the exact match is reported only after capture.
+            await asyncio.sleep(0)
+            self.VerifyFingerSelected("any")
+            verdict, result = await self.backend.verify_fprint(
+                requested_finger, self._live_verify_event
+            )
+            if verdict == "verify-match":
+                selected = resolved_any_finger_from_result(result)
+                if selected is None:
+                    raise RuntimeError("matched any-finger result has no identity")
                 self.VerifyFingerMatched(selected)
-            elif verdict == "verify-match":
-                self.VerifyFingerMatched(requested_finger)
             self.VerifyStatus(verdict, True)
             if verdict == "verify-match":
                 # Authentication is already terminal. Persistence is a
@@ -878,7 +1100,12 @@ class FprintDevice(ServiceInterface):
                     )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            print(
+                "T2 verification failed: "
+                f"{public_verification_failure(error)}",
+                flush=True,
+            )
             await self.backend.notify_feedback("verify-unknown-error")
             self.VerifyStatus("verify-unknown-error", True)
         finally:
@@ -890,6 +1117,27 @@ class FprintDevice(ServiceInterface):
         self.claim_expiry_task = asyncio.create_task(
             self._expire_stale_claim(current_task)
         )
+
+    def _live_verify_event(self, event: dict) -> None:
+        """Expose only nonterminal placement feedback from an untrusted stream."""
+        if event.get("event_kind") == "match_armed":
+            self._set_finger_state(False, True)
+            return
+        semantics = event.get("status_semantics")
+        if semantics == "finger-present":
+            self._set_finger_state(True, False)
+            return
+        if semantics == "finger-removed":
+            self._set_finger_state(False, True)
+            return
+        if (
+            event.get("event_kind") == "match_result"
+            and event.get("result_valid") is True
+            and event.get("no_match") is True
+            and event.get("no_match_image_quality") is True
+        ):
+            self._set_finger_state(False, True)
+            self.VerifyStatus("verify-retry-scan", False)
 
     async def _expire_stale_claim(self, completed_task: asyncio.Task) -> None:
         await asyncio.sleep(COMPLETED_CLAIM_SECONDS)
@@ -974,21 +1222,21 @@ class FprintDevice(ServiceInterface):
             raise DBusError(
                 f"{FPRINT_ERROR}.AlreadyInUse", "a biometric operation is active"
             )
-        if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_identity.is_enrollment_request(finger_name):
             raise DBusError(
                 f"{FPRINT_ERROR}.InvalidFingername",
-                "enrollment requires a canonical finger name",
+                "enrollment requires a neutral request or supported legacy client",
             )
         if self.claim_expiry_task is not None:
             self.claim_expiry_task.cancel()
             self.claim_expiry_task = None
         try:
-            # Enrollment persists ``finger_name`` as presentation metadata.
-            # Require a fresh, complete projection before mutation so a
-            # standard fprint client cannot compound legacy/duplicate labels
-            # or silently replace an already enrolled canonical name.
+            # A stock fprintd client may supply one of its historical anatomy
+            # tokens.  It is only request syntax.  The authorized worker owns
+            # the lowest vacant stable slot after it has reconciled the exact
+            # current identity inventory. Retained slots are never renumbered.
             async with self.backend.operation_lock:
-                view = await self.backend.runtime_projection()
+                view = await self.backend.enrollment_projection()
             self._require_claim_owner()
             if (
                 self.verify_task is not None
@@ -1006,11 +1254,7 @@ class FprintDevice(ServiceInterface):
                     f"{FPRINT_ERROR}.Internal",
                     "existing fingerprint labels require migration",
                 )
-            if finger_name in view.finger_names:
-                raise DBusError(
-                    f"{FPRINT_ERROR}.InvalidFingername",
-                    "finger name is already enrolled",
-                )
+            self._set_finger_state(False, False, None)
             client.start(
                 finger_name,
                 self.claimed_caller,
@@ -1040,7 +1284,11 @@ class FprintDevice(ServiceInterface):
             update, t2_fprint_enrollment_runtime.EnrollmentUpdate
         ):
             raise RuntimeError("enrollment worker emitted malformed state")
-        self._set_finger_state(update.finger_present, update.finger_needed)
+        self._set_finger_state(
+            update.finger_present,
+            update.finger_needed,
+            update.progress_percent,
+        )
         if update.status is not None:
             self.EnrollStatus(update.status, update.done)
         if update.done:
@@ -1062,7 +1310,7 @@ class FprintDevice(ServiceInterface):
                 except Exception:
                     pass
                 finally:
-                    self._set_finger_state(False, False)
+                    self._set_finger_state(False, False, None)
                     self._clear_claim()
         finally:
             self.claim_expiry_task = None
@@ -1080,7 +1328,7 @@ class FprintDevice(ServiceInterface):
                     f"{FPRINT_ERROR}.NoActionInProgress",
                     "enrollment is not active",
                 )
-            self._set_finger_state(False, False)
+            self._set_finger_state(False, False, None)
             return
         try:
             await client.stop()
@@ -1091,7 +1339,7 @@ class FprintDevice(ServiceInterface):
                     "native enrollment did not stop cleanly",
                 ) from error
         finally:
-            self._set_finger_state(False, False)
+            self._set_finger_state(False, False, None)
 
     async def _wait_deletion(self, require_running: bool) -> None:
         task = self.delete_task
@@ -1128,10 +1376,10 @@ class FprintDevice(ServiceInterface):
                 f"{FPRINT_ERROR}.PermissionDenied",
                 "native single-finger deletion is disabled",
             )
-        if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_projection.is_finger_name(finger_name):
             raise DBusError(
                 f"{FPRINT_ERROR}.InvalidFingername",
-                "deletion requires a canonical finger name",
+                "deletion requires an enrolled numbered handle",
             )
         if (
             self.verify_task is not None
@@ -1180,11 +1428,6 @@ class FprintDevice(ServiceInterface):
                 raise DBusError(
                     f"{FPRINT_ERROR}.NoEnrolledPrints",
                     "finger is not enrolled",
-                )
-            if view.reconciled_identity_count <= 1:
-                raise DBusError(
-                    f"{FPRINT_ERROR}.PrintsNotDeleted",
-                    "the final fingerprint identity cannot be deleted",
                 )
             operation = asyncio.create_task(
                 client.delete(
@@ -1295,6 +1538,12 @@ def legacy_property_reply(message: Message, device: FprintDevice):
         "scan-type": Variant("s", "press"),
         "finger-present": Variant("b", device.finger_present),
         "finger-needed": Variant("b", device.finger_needed),
+        "t2-enroll-progress": Variant(
+            "i",
+            -1
+            if device.enrollment_progress is None
+            else device.enrollment_progress,
+        ),
     }
     if (
         message.member == "Get"
@@ -1347,6 +1596,7 @@ def legacy_introspection_reply(message: Message, device: FprintDevice):
             ("scan-type", "s"),
             ("finger-present", "b"),
             ("finger-needed", "b"),
+            ("t2-enroll-progress", "i"),
         )
     )
     document = document[:closing] + declarations + document[closing:]
@@ -1406,7 +1656,15 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--match-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--match-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "biometric observation deadline; 0 keeps the initial prompt "
+            "armed until a verdict or explicit client cancellation"
+        ),
+    )
     parser.add_argument(
         "--enable-native-enrollment",
         action="store_true",

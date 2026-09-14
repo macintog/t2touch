@@ -1,0 +1,32 @@
+#!/bin/bash
+
+build() {
+    error "D113 is quarantined after an ambiguous boot regression; do not rebuild"
+    return 1
+}
+
+build_quarantined_reference() {
+    add_module nvme
+    add_module t2_sep_transport
+    add_binary /usr/bin/modprobe
+    add_binary /usr/bin/tr
+
+    add_file /usr/lib/t2-touchid/initramfs/t2-xart-pre-nvme.sh \
+        /usr/lib/t2-touchid/initramfs/t2-xart-pre-nvme.sh 0755
+    add_file /usr/lib/t2-touchid/initramfs/t2-xart-pre-nvme.service \
+        /usr/lib/systemd/system/t2-xart-pre-nvme.service 0644
+    add_symlink \
+        /usr/lib/systemd/system/sysinit.target.wants/t2-xart-pre-nvme.service \
+        ../t2-xart-pre-nvme.service
+
+    add_file /usr/lib/t2-touchid/initramfs/t2-sep-transport-initramfs.conf \
+        /etc/modprobe.d/t2-sep-transport.conf 0600
+    add_file /etc/t2-xart-pre-nvme.conf /etc/t2-xart-pre-nvme.conf 0600
+}
+
+help() {
+    cat <<HELPEOF
+D113 is permanently quarantined after an ambiguous boot regression. Its old
+build body remains only as retained forensic source and this hook always fails.
+HELPEOF
+}

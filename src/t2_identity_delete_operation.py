@@ -95,7 +95,7 @@ def run(
             "identity_uuid": plan.identity_uuid,
             "request_sha256": history.request_sha256,
             "command": 0x0D,
-            "protocol_version": 0,
+            "protocol_version": 1,
         },
     )
     try:
@@ -147,7 +147,14 @@ def run(
     try:
         survivor_summary = t2_identity_inventory.summarize(planned_local, live)
     except t2_identity_inventory.IdentityInventoryError:
-        survivor_summary = None
+        try:
+            survivor_summary = t2_identity_inventory.summarize_pending_final_delete(
+                planned_local,
+                live,
+                expected_catacomb_uuid=history.baseline["sep_catacomb"]["uuid"],
+            )
+        except t2_identity_inventory.IdentityInventoryError:
+            survivor_summary = None
     if survivor_summary is not None:
         _append(
             path,

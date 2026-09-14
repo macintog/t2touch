@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -13,7 +14,137 @@ import t2_enrollment_journal as enrollment_journal
 import t2_enrollment_reconciliation as reconciliation
 import t2_mutation_journal as mutation_journal
 from tests.test_mutation_journal import baseline
-from tests.test_enrollment_persistence_journal import append_persistence
+
+
+def _component_ref(batch_index, component_index, name, descriptor_sha256):
+    return {
+        "connection_generation": baseline()["connection_generation"],
+        "batch_index": batch_index,
+        "component_index": component_index,
+        "name": name,
+        "descriptor_sha256": descriptor_sha256,
+    }
+
+
+def append_persistence(
+    path, operation_id, reconciliation_snapshot_sha256, *, include_biolockout=False
+):
+    """Append the smallest complete persistence transcript used by this suite."""
+    descriptors = {
+        "user_000001f5.cat": "1" * 64,
+        "master.cat": "2" * 64,
+        "biolockout.cat": "3" * 64,
+    }
+    batches = [("user_000001f5.cat", "master.cat")]
+    if include_biolockout:
+        batches.append(("biolockout.cat",))
+    enrollment_journal.append_checked(
+        path,
+        operation_id,
+        "CATACOMB_PERSISTENCE_PLAN",
+        {
+            "connection_generation": baseline()["connection_generation"],
+            "batches": [
+                [
+                    {"name": name, "descriptor_sha256": descriptors[name]}
+                    for name in names
+                ]
+                for names in batches
+            ],
+        },
+    )
+    for batch_index, names in enumerate(batches):
+        staged = []
+        final_reference = None
+        for component_index, name in enumerate(names):
+            reference = _component_ref(
+                batch_index, component_index, name, descriptors[name]
+            )
+            blob_sha256 = str(4 + batch_index * 2 + component_index) * 64
+            file_sha256 = str(7 + batch_index + component_index) * 64
+            enrollment_journal.append_checked(
+                path, operation_id, "CATACOMB_PREPARE_INTENT", reference
+            )
+            enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "CATACOMB_PREPARED",
+                {**reference, "status": 0, "expected_blob_length": 32},
+            )
+            enrollment_journal.append_checked(
+                path, operation_id, "CATACOMB_COMPLETE_INTENT", reference
+            )
+            enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "CATACOMB_SECURE_BLOB_CAPTURED",
+                {
+                    **reference,
+                    "status": 0,
+                    "blob_length": 32,
+                    "secure_blob_sha256": blob_sha256,
+                },
+            )
+            enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "CATACOMB_HOST_STAGED",
+                {
+                    **reference,
+                    "secure_blob_sha256": blob_sha256,
+                    "final_file_sha256": file_sha256,
+                },
+            )
+            staged.append({"name": name, "final_file_sha256": file_sha256})
+            final_reference = reference
+            if component_index + 1 < len(names):
+                enrollment_journal.append_checked(
+                    path, operation_id, "CATACOMB_CONFIRM_INTENT", reference
+                )
+                enrollment_journal.append_checked(
+                    path,
+                    operation_id,
+                    "CATACOMB_CONFIRMED",
+                    {**reference, "status": 0},
+                )
+        staged_sha256 = hashlib.sha256(
+            mutation_journal.canonical(staged)
+        ).hexdigest()
+        batch = {
+            "connection_generation": baseline()["connection_generation"],
+            "batch_index": batch_index,
+            "staged_snapshot_sha256": staged_sha256,
+        }
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_HOST_BATCH_COMMIT_INTENT", batch
+        )
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_HOST_BATCH_COMMITTED", batch
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_FINAL_CONFIRM_INTENT",
+            final_reference,
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_FINAL_CONFIRMED",
+            {**final_reference, "status": 0},
+        )
+    return enrollment_journal.append_checked(
+        path,
+        operation_id,
+        "CATACOMB_PERSISTENCE_ATTESTED",
+        {
+            "connection_generation": baseline()["connection_generation"],
+            "batch_count": len(batches),
+            "reconciliation_snapshot_sha256": reconciliation_snapshot_sha256,
+            "sep_host_generation_equal": True,
+            "independent_archive_readback": True,
+        },
+    )
 
 
 class EnrollmentReconciliationTests(unittest.TestCase):
@@ -266,6 +397,214 @@ class EnrollmentReconciliationTests(unittest.TestCase):
                     mapping_generation=value["mapping_generation"],
                 )
 
+    def test_terminal_witness_rolls_to_fresh_generation_before_persistence(self):
+        value = baseline()
+        fresh_generation = str(uuid.UUID(int=99))
+        new_identity = {
+            "user_id": value["apple_uid"],
+            "identity_uuid": str(uuid.UUID(int=8)),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "operation.jsonl"
+            operation_id, _record = mutation_journal.create(
+                path, "enroll", value
+            )
+            enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "ENROLL_START_INTENT",
+                {
+                    "apple_uid": value["apple_uid"],
+                    "protocol_version": value["protocol_version"],
+                    "connection_generation": value["connection_generation"],
+                    "request_length": 68,
+                    "request_sha256": "a" * 64,
+                },
+            )
+            enrollment_journal.append_checked(
+                path, operation_id, "ENROLL_START_OBSERVED", {"status": 0}
+            )
+            history = enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "E2_TERMINAL_RESULT_WITNESSED",
+                {
+                    "connection_generation": value["connection_generation"],
+                    "event_sequence": 1,
+                    "envelope_type": enrollment_journal.SERVICE_ENROLLMENT_RESULT,
+                    "event_version": 1,
+                    "payload_length": 36,
+                    "event_sha256": "b" * 64,
+                    "embedded_user_matches": False,
+                },
+            )
+            host, live = self.snapshots(success=False)
+            live["connection_generation"] = fresh_generation
+            live["per_user_identity_records"].append(new_identity)
+            live["global_identity_records"].append(
+                {
+                    **new_identity,
+                    "group_type": 1,
+                    "group_uuid": str(uuid.UUID(int=0)),
+                }
+            )
+            live["configured_user_free_capacity"] -= 1
+            live["catacomb"]["hash"] = "3" * 64
+            recovery = reconciliation.classify_terminal_result_witness(
+                history,
+                host=host,
+                live=live,
+                mapping_generation=value["mapping_generation"],
+                require_fresh_generation=True,
+            )
+            recovered = enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "E2_WITNESS_IDENTITY_READBACK_OBSERVED",
+                recovery.evidence,
+            )
+
+        self.assertEqual(
+            recovered.phase, enrollment_journal.EnrollmentPhase.TERMINAL_IDENTITY
+        )
+        self.assertEqual(
+            recovered.persistence_connection_generation, fresh_generation
+        )
+
+    def test_first_identity_recovery_accepts_only_zero_to_new_catacomb(self):
+        """Protect D196's observed bootstrap Catacomb UUID transition."""
+
+        value = baseline()
+        value.update(
+            {
+                "baseline_version": 2,
+                "identity_records": [],
+                "capacity": {"used": 0, "maximum": 5},
+                "sep_catacomb": {
+                    "present": False,
+                    "uuid": str(uuid.UUID(int=0)),
+                    "hash": None,
+                },
+                "host_components": [],
+                "master_enrollment_count": 0,
+                "backup_references": [],
+            }
+        )
+        identity_uuid = str(uuid.UUID(int=8))
+        new_catacomb_uuid = str(uuid.UUID(int=9))
+        recovery_generation = str(uuid.UUID(int=99))
+        host_before = {
+            "account_uuid": value["account_uuid"],
+            "bag_uuid": value["bag_uuid"],
+            "identity_records": [],
+            "host_components": [],
+            "master_enrollment_count": 0,
+        }
+        live = {
+            "double_collection_equal": True,
+            "connection_generation": recovery_generation,
+            "apple_uid": value["apple_uid"],
+            "biometric_protocol_version": 2,
+            "per_user_identity_records": [
+                {"user_id": value["apple_uid"], "identity_uuid": identity_uuid}
+            ],
+            "global_identity_records": [
+                {
+                    "user_id": value["apple_uid"],
+                    "identity_uuid": identity_uuid,
+                    "group_type": 1,
+                    "group_uuid": str(uuid.UUID(int=0)),
+                }
+            ],
+            "maximum_capacity": 5,
+            "configured_user_free_capacity": 4,
+            "catacomb": {
+                "present": True,
+                "uuid": new_catacomb_uuid,
+                "hash": "3" * 64,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "operation.jsonl"
+            operation_id, _record = mutation_journal.create(path, "enroll", value)
+            enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "ENROLL_START_INTENT",
+                {
+                    "apple_uid": value["apple_uid"],
+                    "protocol_version": 2,
+                    "connection_generation": value["connection_generation"],
+                    "request_length": 68,
+                    "request_sha256": "a" * 64,
+                },
+            )
+            enrollment_journal.append_checked(
+                path, operation_id, "ENROLL_START_OBSERVED", {"status": 0}
+            )
+            history = enrollment_journal.append_checked(
+                path,
+                operation_id,
+                "ENROLL_OUTCOME_UNKNOWN",
+                {
+                    "connection_generation": value["connection_generation"],
+                    "stage": "terminal",
+                    "reason": "protocol-error",
+                    "mutation_possible": True,
+                },
+            )
+            recovery = reconciliation.classify_observed_identity_recovery(
+                history,
+                host=host_before,
+                live=live,
+                mapping_generation=value["mapping_generation"],
+            )
+
+        self.assertEqual(recovery.identity_uuid, identity_uuid)
+        unsafe = copy.deepcopy(live)
+        unsafe["catacomb"]["uuid"] = value["sep_catacomb"]["uuid"]
+        with self.assertRaisesRegex(
+            reconciliation.EnrollmentReconciliationError, "new SEP Catacomb"
+        ):
+            reconciliation.classify_observed_identity_recovery(
+                history,
+                host=host_before,
+                live=unsafe,
+                mapping_generation=value["mapping_generation"],
+            )
+
+        host_after = {
+            "account_uuid": value["account_uuid"],
+            "bag_uuid": value["bag_uuid"],
+            "identity_records": [
+                {"user_id": value["apple_uid"], "uuid": identity_uuid, "entity": 0}
+            ],
+            "host_components": [
+                {"name": "biolockout.cat", "sha256": "4" * 64, "mode": 0o600, "uid": 0, "gid": 0},
+                {"name": "master.cat", "sha256": "1" * 64, "mode": 0o600, "uid": 0, "gid": 0},
+                {"name": "user_000001f5.cat", "sha256": "2" * 64, "mode": 0o600, "uid": 0, "gid": 0},
+            ],
+            "master_enrollment_count": 1,
+        }
+        snapshot_sha256 = self.snapshot_digest(host_after, live)
+        persisted_history = SimpleNamespace(
+            phase=enrollment_journal.EnrollmentPhase.PERSISTENCE_READY,
+            baseline=value,
+            terminal_identity_uuid=identity_uuid,
+            persistence_connection_generation=recovery_generation,
+            persistence=SimpleNamespace(
+                phase=reconciliation.persistence_journal.PersistencePhase.COMPLETE,
+                reconciliation_snapshot_sha256=snapshot_sha256,
+            ),
+        )
+        plan = reconciliation.classify(
+            persisted_history,
+            host=host_after,
+            live=live,
+            mapping_generation=value["mapping_generation"],
+        )
+        self.assertEqual(plan.evidence["identity_uuid"], identity_uuid)
+
     def test_e4_requires_new_boot_and_exact_e3_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path, operation_id, identity_uuid = self.create_terminal(
@@ -344,6 +683,36 @@ class EnrollmentReconciliationTests(unittest.TestCase):
                 host=host,
                 live=live,
                 linux_boot_uuid=str(uuid.UUID(int=20)),
+                mapping_generation=baseline()["mapping_generation"],
+                keybag_runtime_revalidated=True,
+            )
+        self.assertEqual(
+            result.phase, enrollment_journal.EnrollmentPhase.POST_REBOOT_VERIFIED
+        )
+
+    def test_live_e4_runtime_accepts_same_boot_with_fresh_connection(self):
+        """Catch accidental restoration of a reboot gate in first enrollment."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path, operation_id, _identity_uuid = self.create_terminal(
+                directory, identity=True
+            )
+            host, live = self.snapshots(success=True)
+            self.persist(path, operation_id, host, live)
+            reconciliation.append_reconciled(
+                path,
+                operation_id,
+                host=host,
+                live=live,
+                mapping_generation=baseline()["mapping_generation"],
+            )
+            live["connection_generation"] = str(uuid.UUID(int=21))
+            result = reconciliation.append_runtime_verified(
+                path,
+                operation_id,
+                host=host,
+                live=live,
+                linux_boot_uuid=baseline()["linux_boot_uuid"],
                 mapping_generation=baseline()["mapping_generation"],
                 keybag_runtime_revalidated=True,
             )

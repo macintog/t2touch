@@ -75,10 +75,11 @@ static int capabilities(int fd)
 	return value == 2 ? 0 : 1;
 }
 
-static int load_keybag(int fd, const char *input_path, const char *session_text)
+static int load_keybag(int fd, const char *input_path, const char *session_text,
+		       int32_t *handle_out)
 {
 	unsigned char *request = NULL;
-	unsigned char response[256] = { 0 };
+	unsigned char response[8] = { 0 };
 	struct t2_aks_ioc_exchange exchange = {
 		.operation = 0x03,
 		.response_capacity = sizeof(response),
@@ -142,6 +143,8 @@ static int load_keybag(int fd, const char *input_path, const char *session_text)
 	}
 	status = get_le32(response);
 	handle = (int32_t)get_le32(response + 4);
+	if (!status && handle_out)
+		*handle_out = handle;
 	printf("status=%#x handle=%d response_length=%u\n", status, handle,
 	       exchange.response_length);
 	ret = status ? 1 : 0;
@@ -291,11 +294,74 @@ static int copy_keybag_uuid(int fd, const char *session_text,
 	return 0;
 }
 
+static int get_primary_identity(int fd, const char *session_text,
+				const char *output_path)
+{
+	unsigned char request[36] = { 0 };
+	unsigned char response[16300] = { 0 };
+	struct t2_aks_ioc_exchange exchange = {
+		.operation = 0x51,
+		.request_length = sizeof(request),
+		.response_capacity = sizeof(response),
+		.request = (uintptr_t)request,
+		.response = (uintptr_t)response,
+	};
+	uint64_t session;
+	uint32_t status, blob_length, padded_length;
+
+	if (parse_u64(session_text, &session) || !session) {
+		fprintf(stderr, "invalid AKS generation session\n");
+		return 2;
+	}
+	put_le64(request + 4, session);
+	/* operation=0, handle=-1, empty input, selector=-1, empty input. */
+	put_le32(request + 20, (uint32_t)-1);
+	put_le32(request + 28, (uint32_t)-1);
+	if (ioctl(fd, T2_AKS_IOC_EXCHANGE, &exchange) < 0) {
+		if (exchange.sep_status == -3) {
+			printf("present=false\n");
+			return 3;
+		}
+		if (exchange.sep_status)
+			fprintf(stderr, "get-primary-identity: SEP status %d\n",
+				exchange.sep_status);
+		else
+			perror("T2_AKS_IOC_EXCHANGE");
+		return 1;
+	}
+	if (exchange.response_length < 8) {
+		fprintf(stderr, "short get-primary-identity response: %u bytes\n",
+			exchange.response_length);
+		return 1;
+	}
+	status = get_le32(response);
+	blob_length = get_le32(response + 4);
+	if (status == (uint32_t)(int32_t)-3) {
+		printf("present=false\n");
+		return 3;
+	}
+	padded_length = (blob_length + 3) & ~3U;
+	if (status || !blob_length || blob_length > sizeof(response) - 8 ||
+	    padded_length < blob_length ||
+	    exchange.response_length != 8 + padded_length) {
+		fprintf(stderr,
+			"invalid get-primary-identity response: status=%#x blob_length=%u response_length=%u\n",
+			status, blob_length, exchange.response_length);
+		return 1;
+	}
+	if (write_private_output(output_path, response + 8, blob_length))
+		return 1;
+	printf("present=true blob_length=%u response_length=%u\n",
+	       blob_length, exchange.response_length);
+	return 0;
+}
+
 static int set_system_keybag(int fd, const char *session_text,
-			     const char *handle_text, const char *special_text)
+			     const char *handle_text, const char *special_text,
+			     int report)
 {
 	unsigned char request[24] = { 0 };
-	unsigned char response[64] = { 0 };
+	unsigned char response[4] = { 0 };
 	struct t2_aks_ioc_exchange exchange = {
 		.operation = 0x0d,
 		.request_length = sizeof(request),
@@ -326,21 +392,41 @@ static int set_system_keybag(int fd, const char *session_text,
 		perror("T2_AKS_IOC_EXCHANGE");
 		return 1;
 	}
-	if (exchange.response_length < 4) {
-		fprintf(stderr, "short set-system response: %u bytes\n",
-			exchange.response_length);
+	if (exchange.response_length != sizeof(response)) {
+		fprintf(stderr, "invalid set-system response: %u bytes (expected %zu)\n",
+			exchange.response_length, sizeof(response));
 		return 1;
 	}
-	printf("status=%#x response_length=%u\n", get_le32(response),
-	       exchange.response_length);
+	if (report)
+		printf("status=%#x response_length=%u\n", get_le32(response),
+		       exchange.response_length);
+	else if (get_le32(response))
+		fprintf(stderr, "AppleKeyStore set-system status=%#x\n",
+			get_le32(response));
 	return get_le32(response) ? 1 : 0;
+}
+
+static int load_system_keybag(int fd, const char *input_path,
+			      const char *session_text,
+			      const char *special_text)
+{
+	char handle_text[16];
+	int32_t handle = 0;
+	int length;
+
+	if (load_keybag(fd, input_path, session_text, &handle))
+		return 1;
+	length = snprintf(handle_text, sizeof(handle_text), "%d", handle);
+	if (length <= 0 || (size_t)length >= sizeof(handle_text))
+		return 1;
+	return set_system_keybag(fd, session_text, handle_text, special_text, 0);
 }
 
 static int unlock_keybag_secret(int fd, uint64_t session, int32_t handle,
 				const char *secret, size_t length)
 {
 	unsigned char *request = NULL;
-	unsigned char response[64] = { 0 };
+	unsigned char response[16] = { 0 };
 	struct t2_aks_ioc_exchange exchange = {
 		.operation = 0x04,
 		.response_capacity = sizeof(response),
@@ -372,8 +458,8 @@ static int unlock_keybag_secret(int fd, uint64_t session, int32_t handle,
 		perror("T2_AKS_IOC_EXCHANGE");
 		goto out;
 	}
-	if (exchange.response_length < 4) {
-		fprintf(stderr, "short unlock response: %u bytes\n",
+	if (exchange.response_length != sizeof(response)) {
+		fprintf(stderr, "invalid unlock response: %u bytes\n",
 			exchange.response_length);
 		goto out;
 	}
@@ -1010,6 +1096,7 @@ int main(int argc, char **argv)
 
 	if (!((argc == 2 && !strcmp(argv[1], "capabilities")) ||
 	      ((argc == 3 || argc == 4) && !strcmp(argv[1], "load-keybag")) ||
+	      (argc == 5 && !strcmp(argv[1], "load-system-keybag")) ||
 	      (argc == 5 && !strcmp(argv[1], "set-system-keybag")) ||
 	      (argc == 5 && (!strcmp(argv[1], "unlock-keybags") ||
 	                     !strcmp(argv[1], "unlock-keybags-stdin"))) ||
@@ -1021,11 +1108,13 @@ int main(int argc, char **argv)
 	                     !strcmp(argv[1], "verify-password-only-stdin"))) ||
 	      (argc == 5 && !strcmp(argv[1], "verify-password-acm-matrix")) ||
 	      (argc == 5 && !strcmp(argv[1], "copy-keybag-uuid")) ||
+	      (argc == 4 && !strcmp(argv[1], "get-primary-identity")) ||
 	      (argc == 5 && !strcmp(argv[1], "get-device-state")) ||
 	      (argc == 6 && !strcmp(argv[1], "get-device-state-v1")))) {
 		fprintf(stderr,
 			"Usage: %s capabilities\n"
 			"       %s load-keybag INPUT [SESSION]\n"
+			"       %s load-system-keybag INPUT SESSION SPECIAL\n"
 			"       %s set-system-keybag SESSION HANDLE SPECIAL\n"
 			"       %s unlock-keybags SESSION NORMAL SPECIAL\n"
 			"       %s unlock-keybags-stdin SESSION NORMAL SPECIAL\n"
@@ -1037,11 +1126,12 @@ int main(int argc, char **argv)
 			"       %s verify-password-only-stdin SESSION HANDLE\n"
 			"       %s verify-password-acm-matrix SESSION SPECIAL POSITIVE < CONTEXT_16_BYTES\n"
 			"       %s copy-keybag-uuid SESSION HANDLE OUTPUT\n"
+			"       %s get-primary-identity SESSION OUTPUT_DER\n"
 			"       %s get-device-state HANDLE SELECTOR OUTPUT\n"
 			"       %s get-device-state-v1 SESSION HANDLE SELECTOR OUTPUT\n",
 			argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
 			argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
-			argv[0]);
+			argv[0], argv[0], argv[0]);
 		return 2;
 	}
 	fd = open("/dev/t2-aks", O_RDWR | O_CLOEXEC);
@@ -1052,9 +1142,11 @@ int main(int argc, char **argv)
 	if (!strcmp(argv[1], "capabilities"))
 		ret = capabilities(fd);
 	else if (!strcmp(argv[1], "load-keybag"))
-		ret = load_keybag(fd, argv[2], argc == 4 ? argv[3] : NULL);
+		ret = load_keybag(fd, argv[2], argc == 4 ? argv[3] : NULL, NULL);
+	else if (!strcmp(argv[1], "load-system-keybag"))
+		ret = load_system_keybag(fd, argv[2], argv[3], argv[4]);
 	else if (!strcmp(argv[1], "set-system-keybag"))
-		ret = set_system_keybag(fd, argv[2], argv[3], argv[4]);
+		ret = set_system_keybag(fd, argv[2], argv[3], argv[4], 1);
 	else if (!strcmp(argv[1], "unlock-keybags") ||
 		 !strcmp(argv[1], "unlock-keybags-stdin"))
 		ret = unlock_keybags(fd, argv[2], argv[3], argv[4],
@@ -1076,6 +1168,8 @@ int main(int argc, char **argv)
 		ret = verify_password_acm_matrix(fd, argv[2], argv[3], argv[4]);
 	else if (!strcmp(argv[1], "copy-keybag-uuid"))
 		ret = copy_keybag_uuid(fd, argv[2], argv[3], argv[4]);
+	else if (!strcmp(argv[1], "get-primary-identity"))
+		ret = get_primary_identity(fd, argv[2], argv[3]);
 	else if (!strcmp(argv[1], "get-device-state-v1"))
 		ret = get_device_state_v1(fd, argv[2], argv[3], argv[4], argv[5]);
 	else

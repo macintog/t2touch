@@ -35,7 +35,8 @@ class FprintDeleteWorkerLauncherTests(unittest.TestCase):
         self.worker_root.mkdir(mode=0o700)
         self.systemd_run = self.root / "systemd-run"
         self.worker = self.root / "worker"
-        for path in (self.systemd_run, self.worker):
+        self.python = self.root / "python"
+        for path in (self.systemd_run, self.worker, self.python):
             path.write_bytes(b"executable")
             path.chmod(0o700)
         self.commands = []
@@ -50,6 +51,7 @@ class FprintDeleteWorkerLauncherTests(unittest.TestCase):
             mock.patch.object(worker, "WORKER_ROOT", self.worker_root),
             mock.patch.object(launcher, "SYSTEMD_RUN", self.systemd_run),
             mock.patch.object(launcher, "WORKER", self.worker),
+            mock.patch.object(launcher, "VENV_PYTHON", self.python),
         )
 
     def runner(self, command, **arguments):
@@ -68,7 +70,7 @@ class FprintDeleteWorkerLauncherTests(unittest.TestCase):
 
     def test_launches_hardened_credential_free_worker(self):
         patches = self.patches()
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             session = launcher.launch(
                 runner=self.runner,
                 unit_resolver=lambda pid: (
@@ -81,14 +83,19 @@ class FprintDeleteWorkerLauncherTests(unittest.TestCase):
             command, arguments = self.commands[0]
             rendered = " ".join(command)
             self.assertNotIn("LoadCredential", rendered)
+            self.assertIn("PYTHONPATH=/opt/t2-touchid/src", rendered)
+            self.assertIn(str(self.python), command)
             self.assertIn("DeviceAllow=/dev/t2-aks rw", rendered)
+            self.assertIn("DeviceAllow=/dev/t2-acm rw", rendered)
+            self.assertIn("CAP_IPC_LOCK", rendered)
+            self.assertIn("CAP_SYS_ADMIN", rendered)
             self.assertIn("ProtectSystem=strict", rendered)
             self.assertIn(
                 "ReadWritePaths=/run/t2-touchid /var/lib/t2-touchid",
                 rendered,
             )
             for forbidden in (
-                "left-thumb",
+                "finger-2",
                 "apple_uid",
                 "linux_uid",
                 "password=",
@@ -102,7 +109,7 @@ class FprintDeleteWorkerLauncherTests(unittest.TestCase):
 
     def test_wrong_peer_unit_fails_and_removes_socket(self):
         patches = self.patches()
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             with self.assertRaises(
                 launcher.FprintDeleteWorkerLauncherError
             ):

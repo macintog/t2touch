@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "reviewed_at_utc": "2026-09-14T14:30:00+00:00",
+  "mini_base_commit": "268062d5637f79296250355d134068fb847848a4",
+  "engineering_baseline_commit": "9fcdb889eeb00ee58437268ea80aa59f593d7c78",
+  "engineering_head_commit": "d821b087658792b863fef35336c871d494709961",
+  "engineering_source_state": "retained committed integration checkpoint; these hashes identify the source reviewed at that checkpoint and do not claim to identify the later publication commit",
+  "scope": "Reference-module comparison and documentation review. No new runtime code was extracted into mini.",
+  "validation_boundary": {
+    "source_comparison": "static AST and byte comparisons against the pinned engineering checkpoint; existing mini license and introductory differences retained",
+    "hardware": "reported from retained engineering records; no hardware actions in this review",
+    "not_established": [
+      "live delete-finger-1-then-add sequence",
+      "delete-all or last-fingerprint deletion",
+      "multi-user operation",
+      "deep-sleep recovery",
+      "persistence across a macOS boot",
+      "release-level validation on additional hardware"
+    ]
+  },
+  "mini_modules": {
+    "src/t2_activation_bundle.py": {
+      "mini_sha256": "ff48a5bb4bf1bd6e339a844f5aa2ea92188deb330581a109414ad41cb24954dc",
+      "engineering_sha256": "99b8379b0f2cad7fa5dc1b7022015744ec5f6e1e95a62eeb655980596c22f6da",
+      "engineering_unchanged_since_baseline": true,
+      "implementation_matches_mini_excluding_license_comments_and_module_docstring": true
+    },
+    "src/t2_aks_identity_create.py": {
+      "mini_sha256": "7f677a84d788ac4e62b815bf516f3645f716d740e58644c407d93c3faf303525",
+      "engineering_sha256": "bca5869c70e2c4efc079dd476fb2ff9253a9212301d12d526cbf11e51fc2937f",
+      "engineering_unchanged_since_baseline": true,
+      "implementation_matches_mini_excluding_license_comments_and_module_docstring": true
+    },
+    "src/t2_aks_identity_replacement.py": {
+      "mini_sha256": "7af4f2d08e6e1ce6756f79f3354815d3fdb8ce33dba5613c74c780ef0390d4b9",
+      "engineering_sha256": "2272a8548a439cd2e2301c014b87e9a39b0bb1274e293aff9d6be21cc6017d8b",
+      "engineering_unchanged_since_baseline": true,
+      "implementation_matches_mini_excluding_license_comments_and_module_docstring": true
+    }
+  },
+  "engineering_source_sha256": {
+    "README.md": "5777a0a6a64d2a468ffe5785df03182b25510521d3821533109b51d3579cdecc",
+    "docs/CONTINUITY.md": "2c728f8936f2b301371c23b64ba26e37b6db09db59cfd86abbb4d2da8d813bbf",
+    "docs/NEXT_THREAD.md": "c96287b8adbde540a23fd2f31cbc3bd550d48b4c313cbf7440a1c843cc53d233",
+    "docs/UPSTREAM_STATUS_RECONCILIATION.md": "29a6f8040a4d0bd618ce8b8d4d83d5d87f59166174c117c2d058c28dfef3502f",
+    "docs/archive/completed-integration-2026-09/NATIVE_COMPLETION_REVIEW.md": "b1e8c9324c1a42208d7a7508be22bb7d659eabebdaff96777df1b695b5faacf4",
+    "docs/archive/completed-integration-2026-09/NATIVE_MATCH_FORWARD_REVIEW.md": "0c80c3e08ebce1061144491617b095dff9950049aedfb9e35af0f8348a03f76f",
+    "docs/archive/completed-integration-2026-09/NEXT_RELIABILITY_REVIEW.md": "e30e8a29bcc0b37b9d72fad960c5e8e9c288633c0a1e3fab6d65c67f1e831ac2",
+    "docs/archive/completed-integration-2026-09/TUI_STARTUP_PERFORMANCE.md": "72b0966cc30556c472c358fdc8d88980c44ee7184dc16f68dc48f451b4762686",
+    "src/t2-native-first-run.py": "e5acd53d9897465328c3e5f00bfa3a3b530c3b1d31d884679a0fec0ca3dc7479",
+    "src/t2-native-transport-gates.py": "e72f98d736eb158e30eda8b84fc4e3c2eb3ffdc3444be3ff6dd61ea58eca4554",
+    "src/t2_native_mutation_authority.py": "328c93a6a577efd57e9e2ae3c9be0fff99dc7c01524688f44e6aa6024e1b2195",
+    "src/t2-native-enroll.py": "bc10670e86cc537865a0017a8e554884af08c9e7926b2aa223ec235b04ce4599",
+    "src/bridge-xpc-probe.py": "301187bdc7363a0436b913a34791056cf872c43f4881335dcddb02ec6174851c",
+    "src/t2_fprint_identity.py": "8c68a71abe56a57cafd32d00a07c32cc86b6de86f9228a9eacc33288a60594d0",
+    "src/t2_fprint_sequence.py": "8e13640bc0fe6382d8bfd9e1be162abcef73b3b1fcb5f00f9a037a18a30358a8",
+    "src/t2_identity_delete_pipeline.py": "a8e6c1ed99581ee9834d0a562ac24bbfc10a3a24f9b85a7306dca66fafd0553a",
+    "src/t2-touchid-manage.py": "a230f71b0025f6f6027222b688ae55b2c6a682316429aefd8fde4d1e5d5c27c0",
+    "src/t2-fprintd-enroll-tui.py": "7cfc19bd346f6102ad70c68ec7116845d1efc712d9792fed14fcc0ee0b5d647d",
+    "src/t2_rsd.py": "c1a42ee6fade197a63c8afdb21c5b95b4df25e575990dc4a9b0a71e953e2375c",
+    "src/t2_mutation_registry.py": "d433fd8cc8c37f982459dda20d86416ec7b2ee116a3951e110e89a15a074251b",
+    "src/t2-fprintd.py": "68aa420a3d4e77d21b0b7f80d79396e06f54df20f41faae06d4d9d63e8cea408",
+    "src/t2_native_pam_ready.py": "399b3a1f1e56cb3caf580274f2f12b32a0ec7e0db91f208b3fcae2c61d15a171",
+    "src/t2_native_post_reboot_reconciler.py": "ccb5cba3002de626138eb20c389f3c2512b8cc583075be1279b32e4f276bd4dd"
+  }
+}

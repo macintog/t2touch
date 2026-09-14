@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 [Unit]
-Description=Warm up Apple T2 BiometricKit before exposing fprintd
-Requires=t2-credential-unlock.service
-After=t2-credential-unlock.service NetworkManager.service network-online.target
+Description=Discover Apple T2 BiometricKit before exposing fprintd
+Requires=t2-biometric-port-refresh.service
+After=NetworkManager.service network-online.target t2-biometric-port-refresh.service
 Wants=network-online.target
-ConditionPathExists=/etc/credstore.encrypted/t2-touchid-password
 
 [Service]
 Type=oneshot

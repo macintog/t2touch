@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -74,6 +75,8 @@ class FakeTransport:
         load=7,
         loaded_bag_uuid=identifier(2),
         bind=0,
+        unload=0,
+        configuration=None,
         unlock=0,
     ):
         self.initial_observation = observations[0]
@@ -81,9 +84,13 @@ class FakeTransport:
         self.load_result = load
         self.loaded_bag_uuid = loaded_bag_uuid
         self.bind_result = bind
+        self.unload_result = unload
+        self.configuration_result = configuration
         self.unlock_result = unlock
         self.calls = []
         self.password_seen = None
+        self.identity_binding_seen = None
+        self.acm_context_seen = None
 
     @staticmethod
     def _result(value):
@@ -107,10 +114,29 @@ class FakeTransport:
         self.calls.append(("bind", handle, special_alias))
         return self._result(self.bind_result)
 
+    def unload_keybag(self, handle):
+        self.calls.append(("unload", handle))
+        return self._result(self.unload_result)
+
+    def resolve_alias_configuration(self, special_alias):
+        self.calls.append(("configuration", special_alias))
+        return self._result(self.configuration_result)
+
     def unlock_alias(self, special_alias, password):
         self.calls.append(("unlock", special_alias))
         self.password_seen = bytes(password)
         return self._result(self.unlock_result)
+
+    def unlock_alias_with_acm_context(self, special_alias, acm_external_form):
+        self.calls.append(("unlock-acm", special_alias))
+        self.acm_context_seen = acm_external_form
+        return self._result(self.unlock_result)
+
+    def bind_loaded_identity_secret_to_acm_context(
+        self, identity_reference, authorization_context
+    ):
+        self.calls.append(("authorize-loaded-acm",))
+        self.identity_binding_seen = (identity_reference, authorization_context)
 
 
 class UserActivationOperationTests(unittest.TestCase):
@@ -182,6 +208,7 @@ class UserActivationOperationTests(unittest.TestCase):
         authorization=None,
         *,
         authority_time=2_000,
+        acm_context_factory=None,
     ):
         password = bytearray(b"test-password") if password is UNSET else password
         if authorization is None:
@@ -197,6 +224,7 @@ class UserActivationOperationTests(unittest.TestCase):
                 password,
                 authorization=authorization,
                 linux_boot_uuid=identifier(21),
+                acm_context_factory=acm_context_factory,
                 clock=lambda: authority_time,
             )
             return result, password
@@ -219,6 +247,141 @@ class UserActivationOperationTests(unittest.TestCase):
         self.assertEqual(result.outcome, "already-ready")
         self.assertIsNone(password)
         self.assertFalse(self.path.exists())
+
+    def test_rebound_identity_unlocks_inside_retained_consumer(self):
+        transport = FakeTransport([READY, LOCKED, READY, READY])
+        with operation.retain_ready_identity_handle(
+            self.path,
+            self.mapping_set,
+            self.selected,
+            "verify",
+            persistent(),
+            transport,
+            authorization=self.authorization(READY),
+            linux_boot_uuid=identifier(21),
+            clock=lambda: 2_000,
+        ) as retained_state:
+            self.assertEqual(retained_state, "device-locked")
+            operation.prepare_retained_identity(
+                self.path,
+                self.selected,
+                transport,
+            )
+            operation.unlock_retained_identity(
+                self.path,
+                self.selected,
+                "verify",
+                persistent(),
+                transport,
+                b"\x25" * 16,
+            )
+            self.assertEqual(
+                journal.read(self.path).phase,
+                journal.UserActivationPhase.ALIAS_UNLOCKED,
+            )
+            self.assertEqual(transport.calls[-1][0], "observe")
+        self.assertEqual(
+            journal.read(self.path).phase, journal.UserActivationPhase.READY
+        )
+        self.assertEqual(
+            [call[0] for call in transport.calls],
+            [
+                "observe",
+                "load",
+                "bag-uuid",
+                "bind",
+                "observe",
+                "configuration",
+                "unlock-acm",
+                "observe",
+                "unload",
+                "observe",
+            ],
+        )
+
+    def test_absent_alias_rebinds_inside_retained_consumer(self):
+        """Protect D190: a clean reboot may drop the negative alias entirely."""
+
+        transport = FakeTransport([ABSENT, LOCKED, READY, READY])
+        with operation.retain_ready_identity_handle(
+            self.path,
+            self.mapping_set,
+            self.selected,
+            "verify",
+            persistent(),
+            transport,
+            authorization=self.authorization(ABSENT),
+            linux_boot_uuid=identifier(21),
+            clock=lambda: 2_000,
+        ) as retained_state:
+            self.assertEqual(retained_state, "device-locked")
+            operation.prepare_retained_identity(
+                self.path,
+                self.selected,
+                transport,
+            )
+            operation.unlock_retained_identity(
+                self.path,
+                self.selected,
+                "verify",
+                persistent(),
+                transport,
+                b"\x25" * 16,
+            )
+        self.assertEqual(
+            journal.read(self.path).phase, journal.UserActivationPhase.READY
+        )
+        self.assertEqual(
+            [call[0] for call in transport.calls],
+            [
+                "observe",
+                "load",
+                "bag-uuid",
+                "bind",
+                "observe",
+                "configuration",
+                "unlock-acm",
+                "observe",
+                "unload",
+                "observe",
+            ],
+        )
+
+    def test_retained_identity_releases_handle_after_consumer_failure(self):
+        transport = FakeTransport([LOCKED, LOCKED, READY, READY])
+        with self.assertRaisesRegex(RuntimeError, "synthetic consumer failure"):
+            with operation.retain_ready_identity_handle(
+                self.path,
+                self.mapping_set,
+                self.selected,
+                "verify",
+                persistent(),
+                transport,
+                authorization=self.authorization(LOCKED),
+                linux_boot_uuid=identifier(21),
+                clock=lambda: 2_000,
+            ) as retained_state:
+                self.assertEqual(retained_state, "device-locked")
+                operation.prepare_retained_identity(
+                    self.path,
+                    self.selected,
+                    transport,
+                )
+                operation.unlock_retained_identity(
+                    self.path,
+                    self.selected,
+                    "verify",
+                    persistent(),
+                    transport,
+                    b"\x25" * 16,
+                )
+                raise RuntimeError("synthetic consumer failure")
+        self.assertEqual(
+            journal.read(self.path).phase, journal.UserActivationPhase.READY
+        )
+        self.assertEqual(
+            [call[0] for call in transport.calls][-2:], ["unload", "observe"]
+        )
 
     def test_actionable_state_refuses_to_mutate_without_password(self):
         transport = FakeTransport([ABSENT])
@@ -272,7 +435,7 @@ class UserActivationOperationTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
     def test_absent_alias_loads_binds_unlocks_and_reconciles(self):
-        transport = FakeTransport([ABSENT, LOCKED, READY])
+        transport = FakeTransport([ABSENT, LOCKED, READY, READY])
         result, password = self.invoke(transport)
         self.assertEqual(result.outcome, "ready")
         self.assertTrue(result.mutation_performed)
@@ -283,24 +446,76 @@ class UserActivationOperationTests(unittest.TestCase):
         self.assertEqual(journal.read(self.path).operation_id, identifier(40))
         self.assertEqual(
             [call[0] for call in transport.calls],
-            ["observe", "load", "bag-uuid", "bind", "observe", "unlock", "observe"],
+            [
+                "observe",
+                "load",
+                "bag-uuid",
+                "bind",
+                "observe",
+                "configuration",
+                "unlock",
+                "observe",
+                "unload",
+                "observe",
+            ],
         )
 
     def test_bind_error_with_ready_readback_is_success_without_unlock(self):
-        transport = FakeTransport([ABSENT, READY], bind=OSError("lost reply"))
+        transport = FakeTransport(
+            [ABSENT, READY, READY], bind=OSError("lost reply")
+        )
         result, password = self.invoke(transport)
         self.assertEqual(result.outcome, "ready")
         self.assertNotIn("unlock", [call[0] for call in transport.calls])
         self.assertEqual(password, bytearray(len(password)))
         self.assertEqual(journal.read(self.path).phase, journal.UserActivationPhase.READY)
 
-    def test_unlock_error_with_ready_readback_is_observed_success(self):
-        transport = FakeTransport([LOCKED, READY], unlock=OSError("lost reply"))
-        result, password = self.invoke(transport)
+    def test_d168_locked_alias_separates_identity_and_authorization_references(self):
+        transport = FakeTransport(
+            [LOCKED, LOCKED, READY, READY], unlock=OSError("lost reply")
+        )
+        context_user_id = None
+
+        @contextmanager
+        def acm_context(apple_user_id, identity_secret, identity_binder):
+            nonlocal context_user_id
+            context_user_id = apple_user_id
+            self.assertEqual(identity_secret, bytearray(b"test-password"))
+            identity_reference = b"\x5a" * 16
+            authorization_context = b"\xa5" * 16
+            identity_binder(identity_reference, authorization_context)
+            yield identity_reference
+
+        result, password = self.invoke(
+            transport, acm_context_factory=acm_context
+        )
         self.assertEqual(result.outcome, "ready")
         self.assertTrue(result.mutation_performed)
+        self.assertEqual(context_user_id, self.selected.apple_uid)
+        self.assertNotEqual(context_user_id, self.selected.linux_uid)
+        self.assertEqual(
+            transport.identity_binding_seen,
+            (b"\x5a" * 16, b"\xa5" * 16),
+        )
+        self.assertEqual(transport.acm_context_seen, b"\x5a" * 16)
         self.assertEqual(password, bytearray(len(password)))
         self.assertEqual(journal.read(self.path).phase, journal.UserActivationPhase.READY)
+        self.assertEqual(
+            [call[0] for call in transport.calls],
+            [
+                "observe",
+                "load",
+                "bag-uuid",
+                "bind",
+                "observe",
+                "configuration",
+                "authorize-loaded-acm",
+                "unlock-acm",
+                "observe",
+                "unload",
+                "observe",
+            ],
+        )
 
     def test_load_error_freezes_outcome_unknown_without_retry(self):
         transport = FakeTransport([ABSENT], load=OSError("transport"))
@@ -358,7 +573,7 @@ class UserActivationOperationTests(unittest.TestCase):
         self.assertEqual([call[0] for call in transport.calls].count("bind"), 1)
 
     def test_unlock_that_remains_locked_stops_without_retry(self):
-        transport = FakeTransport([LOCKED, LOCKED])
+        transport = FakeTransport([LOCKED, LOCKED, LOCKED])
         with self.assertRaisesRegex(operation.UserActivationOperationError, "stopped"):
             self.invoke(transport)
         self.assertEqual(journal.read(self.path).phase, journal.UserActivationPhase.STOPPED)

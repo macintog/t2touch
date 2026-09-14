@@ -58,7 +58,21 @@ def read_local_host_snapshot(
     prepared_expected_hashes: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Read the Linux-local store through both strict codecs and pinned metadata."""
-    if prepared_expected_names is None and prepared_expected_hashes is None:
+    if baseline.get("baseline_version") == 2:
+        try:
+            components = store.read_committed_components()
+        except t2_catacomb_store.CatacombStoreError:
+            store.require_empty_bootstrap_root()
+            return {
+                "account_uuid": baseline["account_uuid"],
+                "bag_uuid": baseline["bag_uuid"],
+                "identity_records": [],
+                "host_components": [],
+                "master_enrollment_count": 0,
+            }
+    elif baseline.get("baseline_version") != 1:
+        raise EnrollmentFinalizerError("unsupported finalizer baseline version")
+    elif prepared_expected_names is None and prepared_expected_hashes is None:
         components = store.read_committed_components()
     elif (
         isinstance(prepared_expected_names, set)
@@ -98,7 +112,19 @@ def read_local_host_snapshot(
         if not isinstance(name, str) or name in metadata:
             raise EnrollmentFinalizerError("baseline component metadata is duplicated")
         metadata[name] = record
-    if set(metadata) != set(components):
+    if baseline["baseline_version"] == 2:
+        if metadata:
+            raise EnrollmentFinalizerError(
+                "Linux-native baseline unexpectedly has host components"
+            )
+        for name in components:
+            info = (store.root / name).stat(follow_symlinks=False)
+            metadata[name] = {
+                "mode": info.st_mode & 0o777,
+                "uid": info.st_uid,
+                "gid": info.st_gid,
+            }
+    elif set(metadata) != set(components):
         raise EnrollmentFinalizerError("local and baseline component sets differ")
 
     return {
@@ -184,10 +210,21 @@ class BuiltinEnrollmentFinalizer:
         if history.operation_id != self.operation_id:
             raise EnrollmentFinalizerError("finalizer operation ID differs from journal")
         baseline = history.baseline
+        terminal_witness_rollover = (
+            result.outcome == "result-witnessed"
+            and history.phase
+            is t2_enrollment_journal.EnrollmentPhase.TERMINAL_WITNESS
+            and history.persistence_connection_generation
+            == baseline["connection_generation"]
+            and self.connection_generation != baseline["connection_generation"]
+        )
         if (
             baseline["apple_uid"] != self.apple_user_id
-            or history.persistence_connection_generation
-            != self.connection_generation
+            or (
+                history.persistence_connection_generation
+                != self.connection_generation
+                and not terminal_witness_rollover
+            )
             or baseline["mapping_generation"] != self.mapping_generation
             or self.lease.connection_generation != self.connection_generation
         ):
@@ -202,6 +239,7 @@ class BuiltinEnrollmentFinalizer:
                         host=host,
                         live=live,
                         mapping_generation=self.mapping_generation,
+                        require_fresh_generation=terminal_witness_rollover,
                     )
                 )
                 history = t2_enrollment_journal.append_checked(
@@ -217,7 +255,9 @@ class BuiltinEnrollmentFinalizer:
                         self.operation_id,
                         "ENROLL_OUTCOME_UNKNOWN",
                         {
-                            "connection_generation": self.connection_generation,
+                            "connection_generation": baseline[
+                                "connection_generation"
+                            ],
                             "stage": "terminal",
                             "reason": "protocol-error",
                             "mutation_possible": True,
@@ -230,6 +270,43 @@ class BuiltinEnrollmentFinalizer:
                 ) from error
 
         if result.outcome not in ("identity-observed", "result-witnessed"):
+            if baseline["baseline_version"] == 2:
+                host, live = self._stable_readback(baseline)
+                reconciled = t2_enrollment_reconciliation.append_reconciled(
+                    self.journal_path,
+                    self.operation_id,
+                    host=host,
+                    live=live,
+                    mapping_generation=self.mapping_generation,
+                )
+                if reconciled.phase is not t2_enrollment_journal.EnrollmentPhase.RECONCILED:
+                    raise EnrollmentFinalizerError(
+                        "failed first enrollment did not reconcile to empty state"
+                    )
+                return t2_enrollment_coordinator.FinalizationAttestation(
+                    self.connection_generation, False, True
+                )
+            if result.outcome == "cancelled":
+                # A cancelled capture is not an identity and has no durable
+                # enrollment state to save.  This adapts T1Bridge's
+                # pre-completion cancellation contract: cancel first, then
+                # reconcile the unchanged inventory without starting a
+                # Catacomb or BioLockout persistence transaction.
+                host, live = self._stable_readback(baseline)
+                reconciled = t2_enrollment_reconciliation.append_reconciled(
+                    self.journal_path,
+                    self.operation_id,
+                    host=host,
+                    live=live,
+                    mapping_generation=self.mapping_generation,
+                )
+                if reconciled.phase is not t2_enrollment_journal.EnrollmentPhase.RECONCILED:
+                    raise EnrollmentFinalizerError(
+                        "cancelled enrollment did not reconcile"
+                    )
+                return t2_enrollment_coordinator.FinalizationAttestation(
+                    self.connection_generation, False, True
+                )
             committed = self.store.read_committed_components()
             old_biolockout = t2_catacomb_codec.decode_biolockout_catacomb(
                 committed["biolockout.cat"]
@@ -358,61 +435,111 @@ class BuiltinEnrollmentFinalizer:
             ),
         )
 
-        if resuming_confirmed_component:
-            committed = self.store.read_committed_components_during_prepare(
-                {name for name, _digest in history.persistence.batches[0]},
-                dict(history.persistence.staged_files),
-            )
-        else:
-            committed = self.store.read_committed_components()
         user_name = f"user_{self.apple_user_id:08x}.cat"
-        old_user = t2_catacomb_codec.decode_user_catacomb(
-            committed[user_name], self.apple_user_id
-        )
-        old_master = t2_catacomb_codec.decode_master_catacomb(
-            committed["master.cat"]
-        )
-        old_biolockout = t2_catacomb_codec.decode_biolockout_catacomb(
-            committed["biolockout.cat"]
-        )
         timestamp = self.clock()
         apple_time = _apple_time(timestamp)
-        if apple_time <= old_master.current_time:
-            raise EnrollmentFinalizerError("finalizer clock did not advance master time")
-        entity = _next_entity({identity.entity for identity in old_user.identities})
-        if baseline["sep_catacomb"]["present"] is False:
-            encoded_user = old_user.replace_only_for_absent_sep(
-                identity_uuid=identity_uuid,
-                entity=entity,
-                name=self.identity_name,
-                created=timestamp,
-                absent_sep_attested=True,
-            )
-        else:
-            encoded_user = old_user.add(
-                identity_uuid=identity_uuid,
-                entity=entity,
-                name=self.identity_name,
-                created=timestamp,
-            )
-        user_with_identity = t2_catacomb_codec.decode_user_catacomb(
-            encoded_user, self.apple_user_id
-        )
+        if baseline["baseline_version"] == 2:
+            if not resuming_confirmed_component:
+                self.store.require_empty_bootstrap_root()
 
-        def encode(name: str, secure_blob: bytearray) -> bytearray:
-            if name == user_name:
-                output = user_with_identity.replace_secure_data(bytes(secure_blob))
-            elif name == "master.cat":
-                output = old_master.encode(
-                    secure_data=bytes(secure_blob),
-                    enrollment_count=old_master.enrollment_count + 1,
-                    current_time=apple_time,
+            def encode(name: str, secure_blob: bytearray) -> bytearray:
+                if name == user_name:
+                    output = t2_catacomb_codec.encode_initial_builtin_user_catacomb(
+                        secure_data=bytes(secure_blob),
+                        account_uuid=baseline["account_uuid"],
+                        keybag_uuid=baseline["bag_uuid"],
+                        user_id=self.apple_user_id,
+                        identity_uuid=identity_uuid,
+                        name=self.identity_name,
+                        created=timestamp,
+                    )
+                elif name == "master.cat":
+                    output = t2_catacomb_codec.encode_initial_master_catacomb(
+                        secure_data=bytes(secure_blob),
+                        enrollment_count=1,
+                        current_time=apple_time,
+                    )
+                elif name == "biolockout.cat":
+                    output = t2_catacomb_codec.encode_initial_biolockout_catacomb(
+                        secure_data=bytes(secure_blob)
+                    )
+                else:
+                    raise EnrollmentFinalizerError(
+                        "unexpected persistence component"
+                    )
+                return bytearray(output)
+
+        else:
+            if resuming_confirmed_component:
+                committed = self.store.read_committed_components_during_prepare(
+                    {name for name, _digest in history.persistence.batches[0]},
+                    dict(history.persistence.staged_files),
                 )
-            elif name == "biolockout.cat":
-                output = old_biolockout.encode(secure_data=bytes(secure_blob))
             else:
-                raise EnrollmentFinalizerError("unexpected persistence component")
-            return bytearray(output)
+                committed = self.store.read_committed_components()
+            old_user = t2_catacomb_codec.decode_user_catacomb(
+                committed[user_name], self.apple_user_id
+            )
+            old_master = t2_catacomb_codec.decode_master_catacomb(
+                committed["master.cat"]
+            )
+            old_biolockout = t2_catacomb_codec.decode_biolockout_catacomb(
+                committed["biolockout.cat"]
+            )
+            if apple_time <= old_master.current_time:
+                raise EnrollmentFinalizerError(
+                    "finalizer clock did not advance master time"
+                )
+            entity = _next_entity(
+                {identity.entity for identity in old_user.identities}
+            )
+            if baseline["sep_catacomb"]["present"] is False:
+                if old_user.identities:
+                    encoded_user = old_user.replace_only_for_absent_sep(
+                        identity_uuid=identity_uuid,
+                        entity=entity,
+                        name=self.identity_name,
+                        created=timestamp,
+                        absent_sep_attested=True,
+                    )
+                else:
+                    encoded_user = old_user.add(
+                        identity_uuid=identity_uuid,
+                        entity=entity,
+                        name=self.identity_name,
+                        created=timestamp,
+                    )
+            else:
+                encoded_user = old_user.add(
+                    identity_uuid=identity_uuid,
+                    entity=entity,
+                    name=self.identity_name,
+                    created=timestamp,
+                )
+            user_with_identity = t2_catacomb_codec.decode_user_catacomb(
+                encoded_user, self.apple_user_id
+            )
+
+            def encode(name: str, secure_blob: bytearray) -> bytearray:
+                if name == user_name:
+                    output = user_with_identity.replace_secure_data(
+                        bytes(secure_blob)
+                    )
+                elif name == "master.cat":
+                    output = old_master.encode(
+                        secure_data=bytes(secure_blob),
+                        enrollment_count=old_master.enrollment_count + 1,
+                        current_time=apple_time,
+                    )
+                elif name == "biolockout.cat":
+                    output = old_biolockout.encode(
+                        secure_data=bytes(secure_blob)
+                    )
+                else:
+                    raise EnrollmentFinalizerError(
+                        "unexpected persistence component"
+                    )
+                return bytearray(output)
 
         cached: dict[str, dict[str, object]] = {}
 

@@ -92,7 +92,12 @@ class PersistenceTracker:
     def __init__(
         self, baseline: dict[str, Any], *, plan_kind: str = "enrollment"
     ) -> None:
-        if plan_kind not in {"enrollment", "identity-metadata"}:
+        if plan_kind not in {
+            "enrollment",
+            "identity-metadata",
+            "identity-delete",
+            "identity-delete-master-recovery",
+        }:
             raise PersistenceJournalError("unsupported Catacomb persistence plan kind")
         self._baseline = baseline
         self._plan_kind = plan_kind
@@ -223,6 +228,7 @@ class PersistenceTracker:
             "master.cat",
             f'user_{self._baseline["apple_uid"]:08x}.cat',
         }
+        user_name = f'user_{self._baseline["apple_uid"]:08x}.cat'
         seen: set[str] = set()
         seen_descriptors: set[str] = set()
         normalized = []
@@ -267,6 +273,21 @@ class PersistenceTracker:
                 raise PersistenceJournalError(
                     "identity metadata persistence must contain only its user Catacomb"
                 )
+        elif self._plan_kind == "identity-delete":
+            names = [name for batch in normalized for name, _digest in batch]
+            if len(normalized) != 1 or names not in (
+                [user_name],
+                [user_name, "master.cat"],
+            ):
+                raise PersistenceJournalError(
+                    "identity deletion persistence must contain user then optional master Catacomb"
+                )
+        elif self._plan_kind == "identity-delete-master-recovery":
+            names = [name for batch in normalized for name, _digest in batch]
+            if len(normalized) != 1 or names != ["master.cat"]:
+                raise PersistenceJournalError(
+                    "identity deletion master recovery must contain only master Catacomb"
+                )
         elif allow_biolockout_only:
             if (
                 len(normalized) != 1
@@ -280,7 +301,6 @@ class PersistenceTracker:
             raise PersistenceJournalError(
                 "enrollment persistence omits the user or master Catacomb"
             )
-        user_name = f'user_{self._baseline["apple_uid"]:08x}.cat'
         primary_names = [name for name, _digest in normalized[0]]
         if (
             self._plan_kind == "enrollment"

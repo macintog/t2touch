@@ -440,12 +440,7 @@ def _generation(
     values = (
         (b"schema", str(SCHEMA_VERSION).encode("ascii")),
         (b"uid", str(uid).encode("ascii")),
-        (b"passwd-device", str(passwd.metadata.device).encode("ascii")),
-        (b"passwd-inode", str(passwd.metadata.inode).encode("ascii")),
-        (b"passwd-size", str(passwd.metadata.size).encode("ascii")),
-        (b"passwd-mtime-ns", str(passwd.metadata.mtime_ns).encode("ascii")),
-        (b"passwd-ctime-ns", str(passwd.metadata.ctime_ns).encode("ascii")),
-        (b"passwd-digest", passwd.database_digest),
+        (b"passwd-database-digest", passwd.database_digest),
         (b"record-digest", passwd.record_digest),
         (b"shadow-record-digest", shadow_digest),
         (b"home-filesystem-id", str(home.filesystem_id).encode("ascii")),

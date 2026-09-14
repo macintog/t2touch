@@ -233,7 +233,7 @@ class MappingAdminCommandTests(unittest.TestCase):
             "t2-touchid-user-map: authority unavailable\n",
         )
 
-    def test_install_and_uninstall_own_command_without_purging_by_default(self):
+    def test_install_and_uninstall_preserve_private_authority(self):
         command = (SOURCE / "t2-touchid-user-map.py").read_text(encoding="utf-8")
         install = (SOURCE.parent / "install.sh").read_text(encoding="utf-8")
         uninstall = (SOURCE.parent / "uninstall.sh").read_text(encoding="utf-8")
@@ -241,8 +241,10 @@ class MappingAdminCommandTests(unittest.TestCase):
         self.assertIn("sys.path.insert(0, str(INSTALLED_SOURCE))", command)
         self.assertIn("src/t2-touchid-user-map.py", install)
         self.assertIn("t2-touchid-user-map", uninstall)
-        self.assertIn("--purge-private-data", uninstall)
-        self.assertIn("Preserved config, credentials, keybags", uninstall)
+        self.assertNotIn("--purge-private-data", uninstall)
+        self.assertIn(
+            "Preserved config, credentials, and biometric data", uninstall
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+[Unit]
+Description=One-shot T2 xART publication before ANS2 NVMe binding
+DefaultDependencies=no
+Wants=systemd-udevd-control.socket systemd-udevd-kernel.socket
+After=systemd-udevd-control.socket systemd-udevd-kernel.socket
+Before=systemd-modules-load.service systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/t2-touchid/initramfs/t2-xart-pre-nvme.sh
+TimeoutStartSec=90s

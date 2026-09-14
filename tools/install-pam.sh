@@ -125,6 +125,7 @@ install_system_auth_hook() {
 
 install_system_auth_hook check
 install_one sudo "$source_dir/pam/sudo" check
+install_one polkit-1 "$source_dir/pam/polkit-1" check
 if [[ -e /etc/pam.d/omarchy-lock-password ]]; then
   install_one omarchy-lock-password "$source_dir/pam/omarchy-lock-password" check
   install_one omarchy-lock-fingerprint "$source_dir/pam/omarchy-lock-fingerprint" check
@@ -132,6 +133,7 @@ fi
 
 install_system_auth_hook
 install_one sudo "$source_dir/pam/sudo"
+install_one polkit-1 "$source_dir/pam/polkit-1"
 if [[ -e /etc/pam.d/omarchy-lock-password ]]; then
   install_one omarchy-lock-password "$source_dir/pam/omarchy-lock-password"
   install_one omarchy-lock-fingerprint "$source_dir/pam/omarchy-lock-fingerprint"
@@ -139,4 +141,4 @@ fi
 rm -f -- /etc/security/t2-touchid-sudo-prompt
 
 echo "PAM templates installed; originals are in $backup_dir."
-echo "Keep this terminal open and validate password fallback before closing it."
+echo "Password authentication remains available as a fallback."

@@ -73,8 +73,9 @@ failure.
 ## Safe directions
 
 The lock-screen password hook and its README claim have now been removed.
-Manual keybag unlock and the existing encrypted system credential remain the
-supported boot paths.
+Manual keybag unlock and the encrypted system credential are compatibility
+paths. The installed Linux-native service activates its own saved authority
+without this lock-password hook.
 
 A future lock-password integration needs a narrow privileged broker that:
 
@@ -87,5 +88,5 @@ A future lock-password integration needs a narrow privileged broker that:
 - always leaves password authentication independent and usable.
 
 The existing encrypted system credential service avoids this unprivileged PAM
-boundary and is the current automated alternative, subject to the security
-tradeoffs documented in the main README.
+boundary for compatibility authority. The native product uses its activation bundle;
+see [architecture](ARCHITECTURE.md).

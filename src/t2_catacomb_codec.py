@@ -126,6 +126,118 @@ def _secure_envelope(data: Any, magic: bytes, field: str) -> bytes:
     return data
 
 
+def _canonical_nonzero_uuid(value: Any, field: str) -> str:
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise CatacombCodecError(f"{field} is not a UUID") from error
+    if str(parsed) != value or parsed.int == 0:
+        raise CatacombCodecError(f"{field} is not a canonical nonzero UUID")
+    return value
+
+
+def _build_user_root(
+    *,
+    secure_data: bytes,
+    account_uuid: str,
+    keybag_uuid: str,
+    user_id: int,
+    identities: list[Identity] | tuple[Identity, ...],
+) -> dict[str, Any]:
+    """Build the recovered built-in user graph from explicit semantics."""
+    if not identities:
+        objects: list[Any] = [
+            "$null",
+            {"NS.data": secure_data, "$class": plistlib.UID(2)},
+            {"$classname": "NSMutableData", "$classes": CLASS_CHAINS["NSMutableData"]},
+            {"NS.objects": [], "$class": plistlib.UID(4)},
+            {"$classname": "NSMutableArray", "$classes": CLASS_CHAINS["NSMutableArray"]},
+            {"NS.uuidbytes": uuid.UUID(account_uuid).bytes, "$class": plistlib.UID(6)},
+            {"$classname": "NSUUID", "$classes": CLASS_CHAINS["NSUUID"]},
+            {"NS.uuidbytes": uuid.UUID(keybag_uuid).bytes, "$class": plistlib.UID(6)},
+        ]
+        return {
+            "$version": 100000,
+            "$archiver": "NSKeyedArchiver",
+            "$top": {
+                "CatacombVersion": 0x30000,
+                "CatacombSecureData": plistlib.UID(1),
+                "CatacombUserKeybagUUID": plistlib.UID(7),
+                "CatacombUserID": user_id,
+                "CatacombIdentityList": plistlib.UID(3),
+                "CatacombUserUUID": plistlib.UID(5),
+            },
+            "$objects": objects,
+        }
+    objects: list[Any] = [
+        "$null",
+        {"NS.data": secure_data, "$class": plistlib.UID(2)},
+        {"$classname": "NSMutableData", "$classes": CLASS_CHAINS["NSMutableData"]},
+        {"NS.objects": [], "$class": plistlib.UID(4)},
+        {"$classname": "NSMutableArray", "$classes": CLASS_CHAINS["NSMutableArray"]},
+        {"$classname": "BiometricKitIdentity", "$classes": CLASS_CHAINS["BiometricKitIdentity"]},
+        {"$classname": "NSDate", "$classes": CLASS_CHAINS["NSDate"]},
+        {"$classname": "BiometricKitAccessory", "$classes": CLASS_CHAINS["BiometricKitAccessory"]},
+        {"$classname": "BiometricKitAccessoryGroup", "$classes": CLASS_CHAINS["BiometricKitAccessoryGroup"]},
+        {"$classname": "NSUUID", "$classes": CLASS_CHAINS["NSUUID"]},
+        "Builtin",
+        {
+            "BKAccessoryGroupName": plistlib.UID(10),
+            "BKAccessoryGroupType": 1,
+            "BKAccessoryGroupUUID": b"\0" * 16,
+            "$class": plistlib.UID(8),
+        },
+        {
+            "BKAccessoryUUID": b"\0" * 16,
+            "BKAccessoryFlags": 6,
+            "BKAccessoryName": plistlib.UID(10),
+            "BKAccessoryType": 1,
+            "BKAccessoryGroup": plistlib.UID(11),
+            "$class": plistlib.UID(7),
+        },
+        {"NS.uuidbytes": uuid.UUID(account_uuid).bytes, "$class": plistlib.UID(9)},
+        {"NS.uuidbytes": uuid.UUID(keybag_uuid).bytes, "$class": plistlib.UID(9)},
+    ]
+    references = objects[3]["NS.objects"]
+    for identity in identities:
+        name_index = len(objects)
+        objects.append(identity.name)
+        date_index = len(objects)
+        objects.append({"NS.time": identity.creation_time, "$class": plistlib.UID(6)})
+        identity_index = len(objects)
+        objects.append(
+            {
+                "BKIdentityMatchCount": identity.match_count,
+                "BKIdentityCreationTime": plistlib.UID(date_index),
+                "BKIdentityEntityNumber": identity.entity,
+                "BKIdentityUUID": uuid.UUID(identity.uuid).bytes,
+                "BKIdentityFlags": identity.flags,
+                "BKIdentityMatchCountContinuous": identity.continuous_match_count,
+                "BKIdentityName": plistlib.UID(name_index),
+                "BKIdentityType": identity.identity_type,
+                "BKIdentityAccessory": plistlib.UID(12),
+                "BKIdentityUpdateCount": identity.update_count,
+                "BKIdentityUserID": identity.user_id,
+                "BKIdentityAttribute": identity.attribute,
+                "$class": plistlib.UID(5),
+            }
+        )
+        references.append(plistlib.UID(identity_index))
+    return {
+        "$version": 100000,
+        "$archiver": "NSKeyedArchiver",
+        "$top": {
+            "CatacombVersion": 0x30000,
+            "CatacombSecureData": plistlib.UID(1),
+            "CatacombUserKeybagUUID": plistlib.UID(14),
+            "CatacombUserID": user_id,
+            "CatacombIdentityList": plistlib.UID(3),
+            "CatacombUserUUID": plistlib.UID(13),
+        },
+        "$objects": objects,
+    }
+
+
 class UserCatacomb:
     def __init__(self, data: bytes, expected_user_id: int) -> None:
         if not isinstance(data, bytes) or not 0 < len(data) <= MAX_FILE_BYTES:
@@ -387,6 +499,19 @@ class UserCatacomb:
             raise CatacombCodecError(
                 "refusing to encode an unverified zero-identity user component"
             )
+        return self.plan_delete(identity_uuid)
+
+    def plan_delete(self, identity_uuid: str) -> bytes:
+        """Encode one removal for a caller that independently gates commit.
+
+        Unlike :meth:`delete`, this pure planning primitive can represent the
+        empty survivor set.  It supplies no attestation by itself: callers
+        must not persist the result until a stable SEP readback proves the
+        exact target absent and the complete planned survivor set present.
+        """
+
+        if not self.identities:
+            raise CatacombCodecError("delete planning requires one identity")
         target = self._identity_index(identity_uuid)
         identities = [
             identity
@@ -394,6 +519,14 @@ class UserCatacomb:
             if index != target
         ]
         return self._encode_and_verify(self._build_root(identities), identities)
+
+    def clear_after_stable_sep_empty(self, *, sep_empty_attested: bool) -> bytes:
+        """Encode an empty projection only after an independent stable SEP proof."""
+        if sep_empty_attested is not True or not self.identities:
+            raise CatacombCodecError(
+                "empty projection requires an explicit nonempty-to-empty SEP attestation"
+            )
+        return self._encode_and_verify(self._build_root([]), [])
 
     def replace_only_for_absent_sep(
         self,
@@ -440,8 +573,6 @@ class UserCatacomb:
         name: str,
         created: dt.datetime | None = None,
     ) -> bytes:
-        if not self.identities:
-            raise CatacombCodecError("cannot derive built-in sensor metadata from an empty fixture")
         if len(self.identities) >= MAX_IDENTITIES:
             raise CatacombCodecError("identity capacity policy reached")
         new_uuid = str(uuid.UUID(identity_uuid))
@@ -459,7 +590,19 @@ class UserCatacomb:
         if not math.isfinite(seconds):
             raise CatacombCodecError("creation time is invalid")
 
-        prototype = self.identities[0]
+        prototype = self.identities[0] if self.identities else Identity(
+            uuid=new_uuid,
+            user_id=self.expected_user_id,
+            entity=entity,
+            name=name,
+            identity_type=1,
+            flags=0,
+            attribute=0,
+            match_count=0,
+            continuous_match_count=0,
+            update_count=0,
+            creation_time=seconds,
+        )
         identities = [
             *self.identities,
             dataclasses.replace(
@@ -492,74 +635,13 @@ class UserCatacomb:
         *,
         secure_data: bytes | None = None,
     ) -> dict[str, Any]:
-        """Build the recovered built-in user graph deterministically from semantics."""
-        objects: list[Any] = [
-            "$null",
-            {"NS.data": self.secure_data if secure_data is None else secure_data, "$class": plistlib.UID(2)},
-            {"$classname": "NSMutableData", "$classes": CLASS_CHAINS["NSMutableData"]},
-            {"NS.objects": [], "$class": plistlib.UID(4)},
-            {"$classname": "NSMutableArray", "$classes": CLASS_CHAINS["NSMutableArray"]},
-            {"$classname": "BiometricKitIdentity", "$classes": CLASS_CHAINS["BiometricKitIdentity"]},
-            {"$classname": "NSDate", "$classes": CLASS_CHAINS["NSDate"]},
-            {"$classname": "BiometricKitAccessory", "$classes": CLASS_CHAINS["BiometricKitAccessory"]},
-            {"$classname": "BiometricKitAccessoryGroup", "$classes": CLASS_CHAINS["BiometricKitAccessoryGroup"]},
-            {"$classname": "NSUUID", "$classes": CLASS_CHAINS["NSUUID"]},
-            "Builtin",
-            {
-                "BKAccessoryGroupName": plistlib.UID(10),
-                "BKAccessoryGroupType": 1,
-                "BKAccessoryGroupUUID": b"\0" * 16,
-                "$class": plistlib.UID(8),
-            },
-            {
-                "BKAccessoryUUID": b"\0" * 16,
-                "BKAccessoryFlags": 6,
-                "BKAccessoryName": plistlib.UID(10),
-                "BKAccessoryType": 1,
-                "BKAccessoryGroup": plistlib.UID(11),
-                "$class": plistlib.UID(7),
-            },
-            {"NS.uuidbytes": uuid.UUID(self.account_uuid).bytes, "$class": plistlib.UID(9)},
-            {"NS.uuidbytes": uuid.UUID(self.keybag_uuid).bytes, "$class": plistlib.UID(9)},
-        ]
-        references = objects[3]["NS.objects"]
-        for identity in identities:
-            name_index = len(objects)
-            objects.append(identity.name)
-            date_index = len(objects)
-            objects.append({"NS.time": identity.creation_time, "$class": plistlib.UID(6)})
-            identity_index = len(objects)
-            objects.append(
-                {
-                    "BKIdentityMatchCount": identity.match_count,
-                    "BKIdentityCreationTime": plistlib.UID(date_index),
-                    "BKIdentityEntityNumber": identity.entity,
-                    "BKIdentityUUID": uuid.UUID(identity.uuid).bytes,
-                    "BKIdentityFlags": identity.flags,
-                    "BKIdentityMatchCountContinuous": identity.continuous_match_count,
-                    "BKIdentityName": plistlib.UID(name_index),
-                    "BKIdentityType": identity.identity_type,
-                    "BKIdentityAccessory": plistlib.UID(12),
-                    "BKIdentityUpdateCount": identity.update_count,
-                    "BKIdentityUserID": identity.user_id,
-                    "BKIdentityAttribute": identity.attribute,
-                    "$class": plistlib.UID(5),
-                }
-            )
-            references.append(plistlib.UID(identity_index))
-        return {
-            "$version": 100000,
-            "$archiver": "NSKeyedArchiver",
-            "$top": {
-                "CatacombVersion": 0x30000,
-                "CatacombSecureData": plistlib.UID(1),
-                "CatacombUserKeybagUUID": plistlib.UID(14),
-                "CatacombUserID": self.expected_user_id,
-                "CatacombIdentityList": plistlib.UID(3),
-                "CatacombUserUUID": plistlib.UID(13),
-            },
-            "$objects": objects,
-        }
+        return _build_user_root(
+            secure_data=self.secure_data if secure_data is None else secure_data,
+            account_uuid=self.account_uuid,
+            keybag_uuid=self.keybag_uuid,
+            user_id=self.expected_user_id,
+            identities=identities,
+        )
 
     def _encode_and_verify(
         self,
@@ -592,6 +674,66 @@ class UserCatacomb:
 
 def decode_user_catacomb(data: bytes, expected_user_id: int) -> UserCatacomb:
     return UserCatacomb(data, expected_user_id)
+
+
+def encode_initial_builtin_user_catacomb(
+    *,
+    secure_data: bytes,
+    account_uuid: str,
+    keybag_uuid: str,
+    user_id: int,
+    identity_uuid: str,
+    name: str,
+    created: dt.datetime,
+) -> bytes:
+    """Encode the first built-in identity without an imported prototype."""
+    secure_data = _secure_envelope(
+        secure_data, b"LTFC", "initial user Catacomb secure data"
+    )
+    account_uuid = _canonical_nonzero_uuid(account_uuid, "account UUID")
+    keybag_uuid = _canonical_nonzero_uuid(keybag_uuid, "keybag UUID")
+    identity_uuid = _canonical_nonzero_uuid(identity_uuid, "identity UUID")
+    user_id = _bounded_int(user_id, "user ID", 0xFFFFFFFE)
+    if (
+        not isinstance(name, str)
+        or not name
+        or "\x00" in name
+        or len(name.encode("utf-8")) > MAX_STRING_BYTES
+    ):
+        raise CatacombCodecError("initial identity name is invalid")
+    if not isinstance(created, dt.datetime) or created.tzinfo is None:
+        raise CatacombCodecError("initial identity creation time is not timezone-aware")
+    creation_time = (
+        created.astimezone(dt.timezone.utc) - APPLE_EPOCH
+    ).total_seconds()
+    if not math.isfinite(creation_time):
+        raise CatacombCodecError("initial identity creation time is invalid")
+
+    identity = Identity(
+        uuid=identity_uuid,
+        user_id=user_id,
+        entity=0,
+        name=name,
+        identity_type=1,
+        flags=0,
+        attribute=0,
+        match_count=0,
+        continuous_match_count=0,
+        update_count=0,
+        creation_time=creation_time,
+    )
+    root = _build_user_root(
+        secure_data=secure_data,
+        account_uuid=account_uuid,
+        keybag_uuid=keybag_uuid,
+        user_id=user_id,
+        identities=[identity],
+    )
+    candidate = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
+    decoded = UserCatacomb(candidate, user_id)
+    return decoded._encode_and_verify(
+        root, [identity], expected_secure_data=secure_data
+    )
 
 
 class MasterCatacomb:
@@ -647,42 +789,78 @@ class MasterCatacomb:
             or not math.isfinite(current_time)
         ):
             raise CatacombCodecError("master date is invalid")
-        root = {
-            "$version": 100000,
-            "$archiver": "NSKeyedArchiver",
-            "$top": {
-                "CatacombVersion": 0x30000,
-                "CatacombSecureData": plistlib.UID(1),
-                "CatacombCurrentDate": plistlib.UID(3),
-                "CatacombUserID": -1,
-                "CatacombEnrollmentCount": enrollment_count,
+        return _encode_master_component(
+            secure_data=secure_data,
+            enrollment_count=enrollment_count,
+            current_time=float(current_time),
+        )
+
+
+def _encode_master_component(
+    *, secure_data: bytes, enrollment_count: int, current_time: float
+) -> bytes:
+    root = {
+        "$version": 100000,
+        "$archiver": "NSKeyedArchiver",
+        "$top": {
+            "CatacombVersion": 0x30000,
+            "CatacombSecureData": plistlib.UID(1),
+            "CatacombCurrentDate": plistlib.UID(3),
+            "CatacombUserID": -1,
+            "CatacombEnrollmentCount": enrollment_count,
+        },
+        "$objects": [
+            "$null",
+            {"NS.data": secure_data, "$class": plistlib.UID(2)},
+            {
+                "$classname": "NSMutableData",
+                "$classes": CLASS_CHAINS["NSMutableData"],
             },
-            "$objects": [
-                "$null",
-                {"NS.data": secure_data, "$class": plistlib.UID(2)},
-                {"$classname": "NSMutableData", "$classes": CLASS_CHAINS["NSMutableData"]},
-                {"NS.time": float(current_time), "$class": plistlib.UID(4)},
-                {"$classname": "NSDate", "$classes": CLASS_CHAINS["NSDate"]},
-            ],
-        }
-        output = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
-        decoded = MasterCatacomb(output)
-        if (
-            decoded.secure_data != secure_data
-            or decoded.enrollment_count != enrollment_count
-            or decoded.current_time != float(current_time)
-        ):
-            raise CatacombCodecError("master encoder read-back mismatch")
-        oracle = read_master(output)
-        if oracle != {
-            "component": "master",
-            "secure_sha256": hashlib.sha256(secure_data).hexdigest(),
-            "secure_length": len(secure_data),
-            "enrollment_count": enrollment_count,
-            "current_time": float(current_time),
-        }:
-            raise CatacombCodecError("independent master read-back mismatch")
-        return output
+            {"NS.time": float(current_time), "$class": plistlib.UID(4)},
+            {"$classname": "NSDate", "$classes": CLASS_CHAINS["NSDate"]},
+        ],
+    }
+    output = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
+    decoded = MasterCatacomb(output)
+    if (
+        decoded.secure_data != secure_data
+        or decoded.enrollment_count != enrollment_count
+        or decoded.current_time != float(current_time)
+    ):
+        raise CatacombCodecError("master encoder read-back mismatch")
+    oracle = read_master(output)
+    if oracle != {
+        "component": "master",
+        "secure_sha256": hashlib.sha256(secure_data).hexdigest(),
+        "secure_length": len(secure_data),
+        "enrollment_count": enrollment_count,
+        "current_time": float(current_time),
+    }:
+        raise CatacombCodecError("independent master read-back mismatch")
+    return output
+
+
+def encode_initial_master_catacomb(
+    *, secure_data: bytes, enrollment_count: int, current_time: float
+) -> bytes:
+    """Wrap the first SEP-exported master component without a host preimage."""
+    secure_data = _secure_envelope(
+        secure_data, b"LTFC", "initial master Catacomb secure data"
+    )
+    enrollment_count = _bounded_int(
+        enrollment_count, "initial master enrollment count"
+    )
+    if (
+        not isinstance(current_time, (int, float))
+        or isinstance(current_time, bool)
+        or not math.isfinite(current_time)
+    ):
+        raise CatacombCodecError("initial master date is invalid")
+    return _encode_master_component(
+        secure_data=secure_data,
+        enrollment_count=enrollment_count,
+        current_time=float(current_time),
+    )
 
 
 class BioLockoutCatacomb:
@@ -701,29 +879,45 @@ class BioLockoutCatacomb:
         secure_data = self.secure_data if secure_data is None else _secure_envelope(
             secure_data, b"HRLB", "replacement bio-lockout secure data"
         )
-        root = {
-            "$version": 100000,
-            "$archiver": "NSKeyedArchiver",
-            "$top": {
-                "BioLockoutRecordSecureData": plistlib.UID(1),
-                "BioLockoutRecordVersion": 0x10000,
+        return _encode_biolockout_component(secure_data)
+
+
+def _encode_biolockout_component(secure_data: bytes) -> bytes:
+    root = {
+        "$version": 100000,
+        "$archiver": "NSKeyedArchiver",
+        "$top": {
+            "BioLockoutRecordSecureData": plistlib.UID(1),
+            "BioLockoutRecordVersion": 0x10000,
+        },
+        "$objects": [
+            "$null",
+            {"NS.data": secure_data, "$class": plistlib.UID(2)},
+            {
+                "$classname": "NSMutableData",
+                "$classes": CLASS_CHAINS["NSMutableData"],
             },
-            "$objects": [
-                "$null",
-                {"NS.data": secure_data, "$class": plistlib.UID(2)},
-                {"$classname": "NSMutableData", "$classes": CLASS_CHAINS["NSMutableData"]},
-            ],
-        }
-        output = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
-        if BioLockoutCatacomb(output).secure_data != secure_data:
-            raise CatacombCodecError("bio-lockout encoder read-back mismatch")
-        if read_biolockout(output) != {
-            "component": "biolockout",
-            "secure_sha256": hashlib.sha256(secure_data).hexdigest(),
-            "secure_length": len(secure_data),
-        }:
-            raise CatacombCodecError("independent bio-lockout read-back mismatch")
-        return output
+        ],
+    }
+    output = plistlib.dumps(root, fmt=plistlib.FMT_BINARY, sort_keys=False)
+    if BioLockoutCatacomb(output).secure_data != secure_data:
+        raise CatacombCodecError("bio-lockout encoder read-back mismatch")
+    if read_biolockout(output) != {
+        "component": "biolockout",
+        "secure_sha256": hashlib.sha256(secure_data).hexdigest(),
+        "secure_length": len(secure_data),
+    }:
+        raise CatacombCodecError("independent bio-lockout read-back mismatch")
+    return output
+
+
+def encode_initial_biolockout_catacomb(*, secure_data: bytes) -> bytes:
+    """Wrap the first SEP-exported bio-lockout component without a preimage."""
+    return _encode_biolockout_component(
+        _secure_envelope(
+            secure_data, b"HRLB", "initial bio-lockout Catacomb secure data"
+        )
+    )
 
 
 def _load_component_root(data: bytes, top_keys: set[str], object_count: int) -> dict[str, Any]:

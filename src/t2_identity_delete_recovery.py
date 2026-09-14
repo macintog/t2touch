@@ -26,6 +26,7 @@ class IdentityDeleteRecovery:
     connection_generation: str
     snapshot_sha256: str
     identity_count: int
+    committed_user_sha256: str | None = None
 
 
 def _components(value: Any) -> dict[str, dict[str, Any]]:
@@ -59,12 +60,12 @@ def _components(value: Any) -> dict[str, dict[str, Any]]:
 
 def _catacomb_state(
     live: dict[str, Any], baseline: dict[str, Any]
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, bool]:
     catacomb = live.get("catacomb")
     states = catacomb.get("user_states") if isinstance(catacomb, dict) else None
     if (
         not isinstance(catacomb, dict)
-        or catacomb.get("present") is not True
+        or catacomb.get("present") not in (True, False)
         or catacomb.get("uuid") != baseline["sep_catacomb"]["uuid"]
         or not isinstance(states, list)
     ):
@@ -90,20 +91,52 @@ def _catacomb_state(
     if (
         len(selected) != 1
         or len(masters) != 1
-        or masters[0].get("needs_save") is not False
         or not isinstance(selected[0].get("needs_save"), bool)
+        or not isinstance(masters[0].get("needs_save"), bool)
+        or (
+            catacomb.get("present") is False
+            and (
+                (
+                    selected[0].get("state"),
+                    selected[0].get("needs_save"),
+                )
+                not in {(7, True), (3, False)}
+                or (
+                    masters[0].get("state"),
+                    masters[0].get("needs_save"),
+                )
+                != (
+                    selected[0].get("state"),
+                    selected[0].get("needs_save"),
+                )
+            )
+        )
     ):
         raise IdentityDeleteRecoveryError("SEP Catacomb state is unsafe")
-    return catacomb, selected[0]["needs_save"]
+    return (
+        catacomb,
+        selected[0]["needs_save"],
+        masters[0]["needs_save"],
+    )
 
 
 def _summarize_or_none(
-    local: t2_catacomb_codec.UserCatacomb, live: dict[str, Any]
+    local: t2_catacomb_codec.UserCatacomb,
+    live: dict[str, Any],
+    *,
+    expected_catacomb_uuid: str,
 ) -> dict[str, Any] | None:
     try:
         return t2_identity_inventory.summarize(local, live)
     except t2_identity_inventory.IdentityInventoryError:
-        return None
+        try:
+            return t2_identity_inventory.summarize_pending_final_delete(
+                local,
+                live,
+                expected_catacomb_uuid=expected_catacomb_uuid,
+            )
+        except t2_identity_inventory.IdentityInventoryError:
+            return None
 
 
 def classify(
@@ -143,11 +176,9 @@ def classify(
     if (
         host.get("account_uuid") != baseline["account_uuid"]
         or host.get("bag_uuid") != baseline["bag_uuid"]
-        or host.get("master_enrollment_count")
-        != baseline["master_enrollment_count"]
     ):
         raise IdentityDeleteRecoveryError(
-            "delete changed account, keybag, or master enrollment count"
+            "delete changed account or keybag"
         )
 
     baseline_pairs = {
@@ -191,15 +222,11 @@ def classify(
             raise IdentityDeleteRecoveryError(
                 "delete changed component ownership or mode"
             )
-    catacomb, user_needs_save = _catacomb_state(live, baseline)
+    catacomb, user_needs_save, master_needs_save = _catacomb_state(
+        live, baseline
+    )
     user_name = f'user_{baseline["apple_uid"]:08x}.cat'
     staged = dict(history.persistence.staged_files)
-    forward_persistence = (
-        history.persistence_connection_generation
-        != baseline["connection_generation"]
-        and set(staged) == {user_name}
-    )
-
     plan = None
     if local_pairs == baseline_pairs:
         try:
@@ -225,39 +252,51 @@ def classify(
         after[name]["sha256"] == before[name]["sha256"] for name in before
     )
     unchanged_summary = (
-        _summarize_or_none(local, live)
+        _summarize_or_none(
+            local,
+            live,
+            expected_catacomb_uuid=baseline["sep_catacomb"]["uuid"],
+        )
         if local_pairs == baseline_pairs
         else None
     )
     unchanged = (
         unchanged_summary is not None
         and host_baseline_equal
+        and host.get("master_enrollment_count")
+        == baseline["master_enrollment_count"]
         and catacomb["hash"] == baseline["sep_catacomb"]["hash"]
         and user_needs_save is False
+        and master_needs_save is False
         and history.recovery_action != "commit-rolled-forward"
     )
 
     committed_summary = (
-        _summarize_or_none(local, live)
+        _summarize_or_none(
+            local,
+            live,
+            expected_catacomb_uuid=baseline["sep_catacomb"]["uuid"],
+        )
         if local_pairs == survivor_pairs
         else None
     )
+    pair_staged = set(staged) == {user_name, "master.cat"}
     committed = (
         committed_summary is not None
         and t2_identity_delete.survivor_snapshot_sha256(local.identities)
         == history.survivor_snapshot_sha256
-        and set(staged) == {user_name}
+        and pair_staged
         and after[user_name]["sha256"] == staged[user_name]
+        and after["master.cat"]["sha256"] == staged["master.cat"]
         and all(
             after[name]["sha256"] == before[name]["sha256"]
             for name in before
-            if name != user_name
+            if name not in {user_name, "master.cat"}
         )
+        and host.get("master_enrollment_count")
+        == baseline["master_enrollment_count"] - 1
         and user_needs_save is False
-        and (
-            history.recovery_action != "prepare-discarded"
-            or forward_persistence
-        )
+        and master_needs_save is False
     )
 
     baseline_forward_summary = None
@@ -270,38 +309,55 @@ def classify(
             raise IdentityDeleteRecoveryError(
                 "reconstructed survivor archive is invalid"
             ) from error
-        baseline_forward_summary = _summarize_or_none(planned_local, live)
+        baseline_forward_summary = _summarize_or_none(
+            planned_local,
+            live,
+            expected_catacomb_uuid=baseline["sep_catacomb"]["uuid"],
+        )
     baseline_forward = (
         baseline_forward_summary is not None
         and host_baseline_equal
+        and host.get("master_enrollment_count")
+        == baseline["master_enrollment_count"]
         and user_needs_save is True
+        and master_needs_save is True
         and history.recovery_action != "commit-rolled-forward"
     )
-    survivor_forward = (
+    committed_user_sha256 = staged.get(user_name)
+    master_forward = (
         committed_summary is not None
         and t2_identity_delete.survivor_snapshot_sha256(local.identities)
         == history.survivor_snapshot_sha256
-        and set(staged) == {user_name}
-        and after[user_name]["sha256"] == staged[user_name]
+        and isinstance(committed_user_sha256, str)
+        and after[user_name]["sha256"] == committed_user_sha256
         and all(
             after[name]["sha256"] == before[name]["sha256"]
             for name in before
-            if name != user_name
+            if name not in {user_name, "master.cat"}
         )
-        and user_needs_save is True
-        and (
-            history.recovery_action != "prepare-discarded"
-            or forward_persistence
-        )
+        and host.get("master_enrollment_count")
+        in {
+            baseline["master_enrollment_count"],
+            baseline["master_enrollment_count"] - 1,
+        }
+        and user_needs_save is False
+        and master_needs_save is True
+        and history.recovery_action != "prepare-discarded"
     )
-    forward = baseline_forward or survivor_forward
-    outcomes = [unchanged, committed, forward]
+    forward = baseline_forward
+    outcomes = [unchanged, committed, forward, master_forward]
     if sum(outcomes) != 1:
         raise IdentityDeleteRecoveryError(
             "fresh state is not a unique unchanged, committed, or forward-repair state"
         )
     outcome = (
-        "no-change" if unchanged else "committed" if committed else "forward-required"
+        "no-change"
+        if unchanged
+        else "committed"
+        if committed
+        else "forward-required"
+        if forward
+        else "master-forward-required"
     )
     archive_state = "baseline" if unchanged or baseline_forward else "survivors"
     summary = (
@@ -327,6 +383,7 @@ def classify(
         generation,
         hashlib.sha256(t2_mutation_journal.canonical(snapshot)).hexdigest(),
         summary["identity_count"],
+        committed_user_sha256 if master_forward else None,
     )
 
 
@@ -351,6 +408,8 @@ def append_observed(
         if recovery.outcome == "committed"
         else {"baseline", "survivors"}
         if recovery.outcome == "forward-required"
+        else {"survivors"}
+        if recovery.outcome == "master-forward-required"
         else set()
     )
     if recovery.archive_state not in expected_archive_states:
@@ -363,6 +422,27 @@ def append_observed(
         "mapping_generation": mapping_generation,
         "recovery_action": history.recovery_action,
     }
+    if recovery.outcome == "master-forward-required":
+        if recovery.committed_user_sha256 is None:
+            raise IdentityDeleteRecoveryError(
+                "delete master recovery has no committed user binding"
+            )
+        return delete_journal.append_checked(
+            path,
+            operation_id,
+            "DELETE_RECOVERY_MASTER_SAVE_REQUIRED",
+            {
+                **common,
+                "survivor_snapshot_sha256": history.survivor_snapshot_sha256,
+                "survivor_count": recovery.identity_count,
+                "committed_user_sha256": recovery.committed_user_sha256,
+                "target_absent": True,
+                "local_live_equal": True,
+                "sep_user_clean": True,
+                "sep_master_needs_save": True,
+                "stable_double_read": True,
+            },
+        )
     if recovery.outcome == "forward-required":
         return delete_journal.append_checked(
             path,
@@ -376,7 +456,7 @@ def append_observed(
                 "local_archive_state": recovery.archive_state,
                 "host_archive_state": recovery.archive_state,
                 "sep_user_needs_save": True,
-                "sep_master_clean": True,
+                "sep_master_needs_save": True,
                 "stable_double_read": True,
             },
         )

@@ -190,6 +190,7 @@ def classify_terminal_result_witness(
     host: dict[str, Any],
     live: dict[str, Any],
     mapping_generation: str,
+    require_fresh_generation: bool = False,
 ) -> ObservedIdentityRecovery:
     """Adopt no wire identity; prove exactly one configured-user SEP addition."""
     if history.phase is not enrollment_journal.EnrollmentPhase.TERMINAL_WITNESS:
@@ -201,7 +202,7 @@ def classify_terminal_result_witness(
         host=host,
         live=live,
         mapping_generation=mapping_generation,
-        require_fresh_generation=False,
+        require_fresh_generation=require_fresh_generation,
     )
 
 
@@ -272,21 +273,30 @@ def _classify_observed_identity(
         live.get("global_identity_records"), apple_uid
     )
     added = live_after - before
+    bootstrap = baseline.get("baseline_version") == 2
     absent_initialization = baseline["sep_catacomb"]["present"] is False
-    identity_delta_valid = (
-        host_after == before
-        and configured_global == live_after
-        and len(added) == 1
-        and (
-            (not absent_initialization and not (before - live_after))
-            or (
-                absent_initialization
-                and len(before) == 1
-                and len(live_after) == 1
-                and before.isdisjoint(live_after)
-            )
+    identity_delta_valid = host_after == before and configured_global == live_after
+    if bootstrap:
+        identity_delta_valid = (
+            identity_delta_valid
+            and not before
+            and len(added) == 1
+            and len(live_after) == 1
         )
-    )
+    elif absent_initialization:
+        identity_delta_valid = (
+            identity_delta_valid
+            and len(before) in (0, 1)
+            and len(live_after) == 1
+            and len(added) == 1
+            and (not before or before.isdisjoint(live_after))
+        )
+    else:
+        identity_delta_valid = (
+            identity_delta_valid
+            and not (before - live_after)
+            and len(added) == 1
+        )
     if (
         not identity_delta_valid
         or len(live_after)
@@ -322,11 +332,28 @@ def _classify_observed_identity(
             "identity recovery observed a rebound SEP Catacomb"
         )
     try:
+        mutation_journal.require_uuid(
+            catacomb.get("uuid"), "recovery SEP Catacomb UUID"
+        )
         mutation_journal.require_sha256(
             catacomb.get("hash"), "recovery SEP Catacomb hash"
         )
     except mutation_journal.JournalError as error:
         raise EnrollmentReconciliationError(str(error)) from error
+    if bootstrap:
+        baseline_catacomb_uuid = baseline["sep_catacomb"]["uuid"]
+        if uuid.UUID(baseline_catacomb_uuid).int == 0:
+            if (
+                uuid.UUID(catacomb["uuid"]).int == 0
+                or catacomb["uuid"] == baseline_catacomb_uuid
+            ):
+                raise EnrollmentReconciliationError(
+                    "first identity did not create one new SEP Catacomb"
+                )
+        elif catacomb["uuid"] != baseline_catacomb_uuid:
+            raise EnrollmentReconciliationError(
+                "first identity rebound the prepared SEP Catacomb namespace"
+            )
     if (
         not absent_initialization
         and catacomb["hash"] == baseline["sep_catacomb"]["hash"]
@@ -451,8 +478,10 @@ def classify(
         raise EnrollmentReconciliationError("existing host identity entity changed")
     removed = before - live_after
     added = live_after - before
+    bootstrap = baseline.get("baseline_version") == 2
     replacement_delta = (
         absent_initialization
+        and not bootstrap
         and len(before) == 1
         and len(live_after) == 1
         and len(removed) == 1
@@ -472,43 +501,6 @@ def classify(
         or not 0 <= free_capacity <= maximum
     ):
         raise EnrollmentReconciliationError("identity capacity changed before E3")
-    catacomb = live.get("catacomb")
-    if (
-        not isinstance(catacomb, dict)
-        or catacomb.get("present") is not True
-        or not isinstance(catacomb.get("uuid"), str)
-        or not isinstance(catacomb.get("hash"), str)
-    ):
-        raise EnrollmentReconciliationError("SEP Catacomb state is incomplete")
-    try:
-        mutation_journal.require_uuid(catacomb["uuid"], "SEP Catacomb UUID")
-        mutation_journal.require_sha256(catacomb["hash"], "SEP Catacomb hash")
-    except mutation_journal.JournalError as error:
-        raise EnrollmentReconciliationError(str(error)) from error
-    before_components = _components(baseline["host_components"])
-    after_components = _components(host.get("host_components"))
-    if set(before_components) != set(after_components):
-        raise EnrollmentReconciliationError("host component set changed")
-    if any(
-        after_components[name][field] != before_components[name][field]
-        for name in before_components
-        for field in ("mode", "uid", "gid")
-    ):
-        raise EnrollmentReconciliationError("host component metadata changed")
-    if (
-        not absent_initialization
-        and catacomb["uuid"] != baseline["sep_catacomb"]["uuid"]
-    ):
-        raise EnrollmentReconciliationError("SEP Catacomb UUID changed")
-
-    master_enrollment_count = host.get("master_enrollment_count")
-    if (
-        not isinstance(master_enrollment_count, int)
-        or isinstance(master_enrollment_count, bool)
-        or master_enrollment_count < 0
-    ):
-        raise EnrollmentReconciliationError("master enrollment count is invalid")
-    identity_uuid = next(iter(added))[1] if added else None
     persistence_terminal = (
         history.phase is enrollment_journal.EnrollmentPhase.PERSISTENCE_READY
         or persistence_readback
@@ -525,6 +517,58 @@ def classify(
         and [name for name, _digest in history.persistence.batches[0]]
         == ["biolockout.cat"]
     )
+    catacomb = live.get("catacomb")
+    if (
+        not isinstance(catacomb, dict)
+        or not isinstance(catacomb.get("uuid"), str)
+        or not isinstance(catacomb.get("hash"), str)
+    ):
+        raise EnrollmentReconciliationError("SEP Catacomb state is incomplete")
+    try:
+        mutation_journal.require_uuid(catacomb["uuid"], "SEP Catacomb UUID")
+        mutation_journal.require_sha256(catacomb["hash"], "SEP Catacomb hash")
+    except mutation_journal.JournalError as error:
+        raise EnrollmentReconciliationError(str(error)) from error
+    catacomb_present = catacomb.get("present") is True
+    if type(catacomb.get("present")) is not bool or (
+        persistence_success and not catacomb_present
+    ) or (not bootstrap and not catacomb_present):
+        raise EnrollmentReconciliationError("SEP Catacomb presence is inconsistent")
+    catacomb_hash = catacomb["hash"] if catacomb_present else None
+    before_components = _components(baseline["host_components"])
+    after_components = _components(host.get("host_components"))
+    if not bootstrap and set(before_components) != set(after_components):
+        raise EnrollmentReconciliationError("host component set changed")
+    if not bootstrap and any(
+        after_components[name][field] != before_components[name][field]
+        for name in before_components
+        for field in ("mode", "uid", "gid")
+    ):
+        raise EnrollmentReconciliationError("host component metadata changed")
+    if bootstrap:
+        baseline_catacomb_uuid = baseline["sep_catacomb"]["uuid"]
+        if uuid.UUID(baseline_catacomb_uuid).int == 0:
+            invalid_bootstrap_uuid = (
+                uuid.UUID(catacomb["uuid"]).int == 0
+                or catacomb["uuid"] == baseline_catacomb_uuid
+            )
+        else:
+            invalid_bootstrap_uuid = catacomb["uuid"] != baseline_catacomb_uuid
+        if invalid_bootstrap_uuid:
+            raise EnrollmentReconciliationError("first SEP Catacomb UUID is invalid")
+    if not absent_initialization and (
+        catacomb["uuid"] != baseline["sep_catacomb"]["uuid"]
+    ):
+        raise EnrollmentReconciliationError("SEP Catacomb UUID changed")
+
+    master_enrollment_count = host.get("master_enrollment_count")
+    if (
+        not isinstance(master_enrollment_count, int)
+        or isinstance(master_enrollment_count, bool)
+        or master_enrollment_count < 0
+    ):
+        raise EnrollmentReconciliationError("master enrollment count is invalid")
+    identity_uuid = next(iter(added))[1] if added else None
     if persistence_success:
         if identity_uuid != history.terminal_identity_uuid:
             raise EnrollmentReconciliationError(
@@ -537,14 +581,25 @@ def classify(
             or "biolockout.cat" not in after_components
         ):
             raise EnrollmentReconciliationError("required Catacomb components are absent")
-        if (
+        if bootstrap:
+            if (
+                set(after_components)
+                != {user_name, "master.cat", "biolockout.cat"}
+                or baseline["sep_catacomb"]["present"] is not False
+                or not catacomb_present
+                or master_enrollment_count != 1
+            ):
+                raise EnrollmentReconciliationError(
+                    "first enrollment did not create one complete Catacomb generation"
+                )
+        elif (
             after_components[user_name]["sha256"]
             == before_components[user_name]["sha256"]
             or after_components["master.cat"]["sha256"]
             == before_components["master.cat"]["sha256"]
             or after_components["biolockout.cat"]["sha256"]
             == before_components["biolockout.cat"]["sha256"]
-            or catacomb["hash"] == baseline["sep_catacomb"]["hash"]
+            or catacomb_hash == baseline["sep_catacomb"]["hash"]
             or master_enrollment_count
             <= baseline["master_enrollment_count"]
         ):
@@ -574,7 +629,7 @@ def classify(
         if (
             after_components != before_components
             or catacomb.get("uuid") != baseline["sep_catacomb"]["uuid"]
-            or catacomb.get("hash") != baseline["sep_catacomb"]["hash"]
+            or catacomb_hash != baseline["sep_catacomb"]["hash"]
             or master_enrollment_count
             != baseline["master_enrollment_count"]
         ):
@@ -586,7 +641,7 @@ def classify(
         "account_uuid": host["account_uuid"],
         "bag_uuid": host["bag_uuid"],
         "identity_records": sorted(live_after),
-        "catacomb": {"uuid": catacomb["uuid"], "hash": catacomb["hash"]},
+        "catacomb": {"uuid": catacomb["uuid"], "hash": catacomb_hash},
         "host_components": [after_components[name] for name in sorted(after_components)],
         "master_enrollment_count": master_enrollment_count,
         "mapping_generation": mapping_generation,
@@ -683,8 +738,9 @@ def classify_post_reboot(
     linux_boot_uuid: str,
     mapping_generation: str,
     keybag_runtime_revalidated: bool,
+    require_different_boot: bool = True,
 ) -> dict[str, Any]:
-    """Build strict E4 evidence from a fresh boot and live generation."""
+    """Build strict E4 evidence from a fresh runtime generation."""
     if (
         history.phase is not enrollment_journal.EnrollmentPhase.RECONCILED
         or history.terminal_identity_uuid is None
@@ -697,7 +753,10 @@ def classify_post_reboot(
         mutation_journal.require_uuid(linux_boot_uuid, "Linux boot UUID")
     except mutation_journal.JournalError as error:
         raise EnrollmentReconciliationError(str(error)) from error
-    if linux_boot_uuid == history.baseline["linux_boot_uuid"]:
+    if (
+        require_different_boot
+        and linux_boot_uuid == history.baseline["linux_boot_uuid"]
+    ):
         raise EnrollmentReconciliationError(
             "post-reboot verification is still on the enrollment boot"
         )
@@ -783,4 +842,31 @@ def append_post_reboot_verified(
     )
     return enrollment_journal.append_checked(
         path, operation_id, "E4_POST_REBOOT_VERIFIED", evidence
+    )
+
+
+def append_runtime_verified(
+    path: Path,
+    operation_id: str,
+    *,
+    host: dict[str, Any],
+    live: dict[str, Any],
+    linux_boot_uuid: str,
+    mapping_generation: str,
+    keybag_runtime_revalidated: bool,
+) -> enrollment_journal.EnrollmentHistory:
+    """Publish E4 after a fresh owner and Bridge connection in the same boot."""
+
+    history = enrollment_journal.read(path)
+    evidence = classify_post_reboot(
+        history,
+        host=host,
+        live=live,
+        linux_boot_uuid=linux_boot_uuid,
+        mapping_generation=mapping_generation,
+        keybag_runtime_revalidated=keybag_runtime_revalidated,
+        require_different_boot=False,
+    )
+    return enrollment_journal.append_checked(
+        path, operation_id, "E4_RUNTIME_VERIFIED", evidence
     )

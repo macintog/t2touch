@@ -38,9 +38,9 @@ class DeletionWorkerClient:
         caller: t2_dbus_identity.PinnedDBusCaller,
         evidence: t2_fprint_claim.ClaimEvidence,
     ) -> t2_fprint_deletion_runtime.DeletionCompletion:
-        if finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_projection.is_finger_name(finger_name):
             raise FprintDeleteWorkerClientError(
-                "worker deletion requires a canonical finger name"
+                "worker deletion requires a canonical finger handle"
             )
         if (
             not isinstance(caller, t2_dbus_identity.PinnedDBusCaller)

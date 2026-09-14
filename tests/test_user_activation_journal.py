@@ -124,6 +124,24 @@ class UserActivationJournalTests(unittest.TestCase):
             },
         )
         self.append(
+            "USER_ALIAS_CONFIGURATION_INTENT",
+            {
+                "runtime_generation": self.runtime,
+                "special_alias": -501,
+                "mutation_possible": True,
+            },
+        )
+        self.append(
+            "USER_ALIAS_CONFIGURATION_RESOLVED",
+            {
+                "runtime_generation": self.runtime,
+                "special_alias": -501,
+                "bag_uuid_matches": True,
+                "command_status": 0,
+                "command_raised": False,
+            },
+        )
+        self.append(
             "USER_ALIAS_UNLOCK_INTENT",
             {
                 "runtime_generation": self.runtime,

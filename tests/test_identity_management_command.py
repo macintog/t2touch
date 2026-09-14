@@ -236,6 +236,23 @@ class IdentityManagementCommandTests(unittest.TestCase):
                 MODULE.t2_identity_delete, "plan", return_value=plan
             ),
             mock.patch.object(
+                MODULE.t2_identity_inventory,
+                "summarize",
+                return_value={"inventory": "exact"},
+            ),
+            mock.patch.object(
+                MODULE.t2_fprint_projection,
+                "project",
+                return_value=SimpleNamespace(
+                    finger_names=("finger-1", "finger-2")
+                ),
+            ),
+            mock.patch.object(
+                MODULE.t2_fprint_sequence,
+                "reconcile",
+                return_value=2,
+            ) as reconcile_handles,
+            mock.patch.object(
                 MODULE.t2_baseline, "build_baseline", return_value=baseline
             ) as baseline_builder,
             mock.patch.object(MODULE.t2_mutation_journal, "create"),
@@ -260,6 +277,9 @@ class IdentityManagementCommandTests(unittest.TestCase):
             baseline_builder.call_args.kwargs["password_fallback_verified"]
         )
         self.assertIs(dispatch.call_args.kwargs["bridge"], bridge)
+        reconcile_handles.assert_called_once_with(
+            501, ("finger-1", "finger-2")
+        )
         persist.assert_called_once()
         self.assertTrue(result["delete_succeeded"])
         self.assertEqual(result["identity_count"], 1)
@@ -382,10 +402,10 @@ class IdentityManagementCommandTests(unittest.TestCase):
             mock.patch.object(MODULE.t2_mutation_journal, "create") as create,
         ):
             result = MODULE.run_fprint_rename_preflight(
-                configuration, slot=2, new_name="left-thumb"
+                configuration, slot=2, new_name="finger-2"
             )
         planner.assert_called_once_with(
-            local, {"live": True}, slot=2, new_name="left-thumb"
+            local, {"live": True}, slot=2, new_name="finger-2"
         )
         create.assert_not_called()
         self.assertTrue(result["fprint_rename_preflight_succeeded"])
@@ -393,15 +413,86 @@ class IdentityManagementCommandTests(unittest.TestCase):
         self.assertFalse(result["mutation_performed"])
         self.assertTrue(result["identifiers_redacted"])
 
-    def test_fprint_rename_requires_canonical_name(self):
-        for invalid in ("Linux enrolled finger", None, [], True):
+    def test_native_fprint_rename_preflight_uses_native_authority(self):
+        configuration = {
+            "authority_mode": "linux-native",
+            "apple_uid": 501,
+            "special_bag": -501,
+        }
+        local = object()
+        renamed = object()
+        live = {"live": True}
+        plan = SimpleNamespace(archive=b"renamed", previous_name="legacy")
+        current = SimpleNamespace(complete=False)
+        projected = SimpleNamespace(
+            complete=True,
+            reconciled_identity_count=2,
+            unassigned_identity_count=0,
+            duplicate_finger_name_count=0,
+        )
+        native_context = mock.MagicMock()
+        native_context.__enter__.return_value = (
+            object(), object(), {}, local, object(), live
+        )
+        native_context.__exit__.return_value = False
+        with (
+            mock.patch.object(
+                MODULE.t2_mutation_registry,
+                "blocks_new_mutation",
+                return_value=False,
+            ),
+            mock.patch.object(MODULE.os.path, "lexists", return_value=False),
+            mock.patch.object(
+                MODULE, "_native_management_lease", return_value=native_context
+            ) as native_lease,
+            mock.patch.object(MODULE, "keybag_runtime") as keybag_runtime,
+            mock.patch.object(
+                MODULE.t2_identity_inventory,
+                "summarize",
+                side_effect=({"current": True}, {"projected": True}),
+            ),
+            mock.patch.object(
+                MODULE.t2_identity_rename, "plan", return_value=plan
+            ) as planner,
+            mock.patch.object(
+                MODULE.t2_catacomb_codec,
+                "decode_user_catacomb",
+                return_value=renamed,
+            ),
+            mock.patch.object(
+                MODULE.t2_fprint_projection,
+                "project",
+                side_effect=(current, projected),
+            ),
+        ):
+            result = MODULE.run_fprint_rename_preflight(
+                configuration, slot=1, new_name="finger-1"
+            )
+        native_lease.assert_called_once_with(configuration, operation="inventory")
+        keybag_runtime.assert_not_called()
+        planner.assert_called_once_with(
+            local, live, slot=1, new_name="finger-1"
+        )
+        self.assertTrue(result["fprint_rename_preflight_succeeded"])
+        self.assertTrue(result["projected_fprint_projection_complete"])
+        self.assertFalse(result["mutation_performed"])
+
+    def test_fprint_rename_requires_neutral_numbered_handle(self):
+        for invalid in (
+            "Linux enrolled finger",
+            "right-index-finger",
+            "finger-01",
+            None,
+            [],
+            True,
+        ):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
-                MODULE.IdentityManagementError, "canonical anatomical"
+                MODULE.IdentityManagementError, "neutral numbered"
             ):
                 MODULE.require_fprint_name(invalid)
         self.assertEqual(
-            MODULE.require_fprint_name("right-index-finger"),
-            "right-index-finger",
+            MODULE.require_fprint_name("finger-1"),
+            "finger-1",
         )
 
     def test_protected_mapping_capability_must_be_enabled(self):
@@ -427,13 +518,25 @@ class IdentityManagementCommandTests(unittest.TestCase):
     def test_management_mutations_never_manufacture_password_attestation(self):
         source = (SOURCE / "t2-touchid-manage.py").read_text(encoding="utf-8")
         self.assertNotIn("password_fallback_verified=True", source)
-        self.assertEqual(source.count("password_fallback_verified=False"), 3)
+        self.assertEqual(source.count("password_fallback_verified=False"), 5)
 
     def test_adaptive_sync_reuses_active_sensor_readiness(self):
         source = (SOURCE / "t2-touchid-manage.py").read_text(encoding="utf-8")
         self.assertIn(
             '"recover-catacomb-sync",',
             source,
+        )
+
+    def test_management_readiness_start_never_restarts_its_service_owner(self):
+        completed = SimpleNamespace(returncode=0)
+        with mock.patch.object(
+            MODULE.subprocess, "run", return_value=completed
+        ) as runner:
+            MODULE.warm_sensor()
+        runner.assert_called_once_with(
+            ["/usr/bin/systemctl", "start", "t2-biometric-ready.service"],
+            check=False,
+            timeout=60,
         )
 
     def test_adaptive_catacomb_sync_persists_user_then_master(self):

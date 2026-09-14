@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 from __future__ import annotations
 
+import errno
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +22,8 @@ import t2_identity_delete_journal as delete_journal
 import t2_identity_rename_journal as rename_journal
 import t2_linux_account as linux_account
 import t2_post_reboot_reconciler as reconciler
+import t2_post_reboot_diagnostic as post_reboot_diagnostic
+import t2_native_post_reboot_reconciler as native_reconciler
 import t2_user_mapping as mapping
 import t2_user_readiness as readiness
 import t2_user_reconciliation_live as live_reconciliation
@@ -83,6 +87,20 @@ class Live:
 
 
 class PostRebootReconcilerTests(unittest.TestCase):
+    def test_failure_diagnostic_is_bounded_and_redacted(self):
+        private = OSError(errno.EIO, "/private/identifier/payload")
+        failure = post_reboot_diagnostic.staged(
+            "inventory-collection", private
+        ).redacted()
+
+        self.assertEqual(failure["stage"], "inventory-collection")
+        self.assertEqual(failure["exception_class"], "OSError")
+        self.assertEqual(failure["errno"], errno.EIO)
+        self.assertIsNone(failure["child_exit_status"])
+        encoded = json.dumps(failure, sort_keys=True)
+        self.assertNotIn("/private/identifier/payload", encoded)
+        self.assertNotIn("payload", encoded)
+
     def setUp(self):
         self.mapping = mapping.UserMapping(
             1000,
@@ -98,6 +116,23 @@ class PostRebootReconcilerTests(unittest.TestCase):
         )
         self.mapping_set = mapping.UserMappingSet(
             "d" * 64, (self.mapping,)
+        )
+        self.protected_mapping_set = mapping.UserMappingSet(
+            "c" * 64,
+            (
+                mapping.UserMapping(
+                    self.mapping.linux_uid,
+                    self.mapping.linux_account_generation,
+                    self.mapping.apple_uid,
+                    self.mapping.account_uuid,
+                    self.mapping.bag_uuid,
+                    self.mapping.keybag_path,
+                    self.mapping.keybag_sha256,
+                    self.mapping.unlock_mode,
+                    self.mapping.capabilities,
+                    False,
+                ),
+            ),
         )
         self.baseline = {
             "caller_linux_uid": 1000,
@@ -128,6 +163,20 @@ class PostRebootReconcilerTests(unittest.TestCase):
         )
         self.live = Live(self.mapping, self.material)
         self.account = linux_account.AccountEvidence(1000, "a" * 64)
+        self.authority = reconciler.t2_user_authority.RuntimeUserAuthority(
+            self.mapping_set,
+            self.mapping,
+            readiness.PersistentEvidence(
+                "a" * 64,
+                "b" * 64,
+                501,
+                identifier(1),
+                identifier(2),
+                True,
+            ),
+            Path("/var/lib/t2-touchid/oracle/proof.jsonl"),
+            "macos-control-oracle-v1",
+        )
 
         self.candidate = reconciler.PendingMutation(
             "enroll", "enroll", self.path, self.history
@@ -154,7 +203,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
             mock.patch.object(
                 reconciler.t2_user_mapping_admin,
                 "_load_optional",
-                return_value=self.mapping_set,
+                return_value=self.protected_mapping_set,
             ),
             mock.patch.object(reconciler, "_unchanged_history"),
             mock.patch.object(reconciler.os, "close"),
@@ -187,6 +236,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
                 account_collector=lambda _uid: self.account,
                 keybag_reader=lambda _path: "b" * 64,
                 runtime_state=lambda _alias: (1, 42),
+                authority_loader=lambda _uid: self.authority,
                 boot_reader=lambda: identifier(40),
             )
         self.assertEqual(result.state, "enroll-post-reboot-verified")
@@ -216,6 +266,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
                     account_collector=lambda _uid: self.account,
                     keybag_reader=lambda _path: "b" * 64,
                     runtime_state=lambda _alias: (1, 42),
+                    authority_loader=lambda _uid: self.authority,
                     boot_reader=lambda: identifier(40),
                 )
         self.assertEqual(self.live.collect_count, 0)
@@ -241,11 +292,45 @@ class PostRebootReconcilerTests(unittest.TestCase):
                     account_collector=lambda _uid: self.account,
                     keybag_reader=lambda _path: "b" * 64,
                     runtime_state=lambda _alias: (2, 42),
+                    authority_loader=lambda _uid: self.authority,
+                    boot_reader=lambda: identifier(40),
+                )
+        self.assertEqual(self.live.collect_count, 0)
+
+    def test_native_authority_is_not_misreported_as_automatic_verification(self):
+        native = reconciler.t2_user_authority.RuntimeUserAuthority(
+            self.mapping_set,
+            self.mapping,
+            self.authority.persistent,
+            self.authority.enrollment_journal,
+            "linux-native-e4",
+        )
+        patches = self.common_patches()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+        ):
+            with self.assertRaisesRegex(
+                reconciler.PostRebootReconcilerError,
+                "requires compatibility authority",
+            ):
+                reconciler.run(
+                    live_factory=lambda: self.live,
+                    account_collector=lambda _uid: self.account,
+                    keybag_reader=lambda _path: "b" * 64,
+                    runtime_state=lambda _alias: (1, 42),
+                    authority_loader=lambda _uid: native,
                     boot_reader=lambda: identifier(40),
                 )
         self.assertEqual(self.live.collect_count, 0)
 
     def test_candidate_scan_requires_one_blocking_reconciled_enrollment(self):
+        self.history.baseline["baseline_version"] = 2
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / f"{self.history.operation_id}.jsonl"
@@ -269,6 +354,22 @@ class PostRebootReconcilerTests(unittest.TestCase):
                 self.assertEqual(candidate.capability, "enroll")
                 self.assertEqual(candidate.path, path)
                 self.assertIs(candidate.history, self.history)
+
+                addition = SimpleNamespace(
+                    **{
+                        **self.history.__dict__,
+                        "baseline": {
+                            **self.history.baseline,
+                            "baseline_version": 1,
+                        },
+                    }
+                )
+                with mock.patch.object(
+                    reconciler.t2_enrollment_journal,
+                    "validate_history",
+                    return_value=addition,
+                ):
+                    self.assertIsNone(reconciler._pending_candidate())
 
                 with mock.patch.object(
                     reconciler.t2_mutation_registry,
@@ -325,6 +426,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
                 account_collector=lambda _uid: self.account,
                 keybag_reader=lambda _path: "b" * 64,
                 runtime_state=lambda _alias: (1, 42),
+                authority_loader=lambda _uid: self.authority,
                 boot_reader=lambda: identifier(40),
             )
         self.assertEqual(result.state, "rename-post-reboot-verified")
@@ -418,6 +520,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
                 account_collector=lambda _uid: self.account,
                 keybag_reader=lambda _path: "b" * 64,
                 runtime_state=lambda _alias: (1, 42),
+                authority_loader=lambda _uid: self.authority,
                 boot_reader=lambda: identifier(40),
             )
         self.assertEqual(result.state, "delete-one-post-reboot-verified")
@@ -428,7 +531,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
         self.assertIs(delete_append.call_args.kwargs["host"], self.material.host)
         self.assertIs(delete_append.call_args.kwargs["live"], self.material.live)
 
-    def test_candidate_scan_selects_one_reconciled_delete(self):
+    def test_candidate_scan_leaves_reconciled_delete_complete(self):
         history = SimpleNamespace(
             operation_id=identifier(80),
             phase=delete_journal.IdentityDeletePhase.RECONCILED,
@@ -459,10 +562,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
                 ),
             ):
                 candidate = reconciler._pending_candidate()
-        self.assertEqual(candidate.kind, "delete-one")
-        self.assertEqual(candidate.capability, "identity-management")
-        self.assertEqual(candidate.path, path)
-        self.assertIs(candidate.history, history)
+        self.assertIsNone(candidate)
 
     def test_service_is_read_only_ordered_and_installed(self):
         root = Path(__file__).parents[1]
@@ -476,18 +576,154 @@ class PostRebootReconcilerTests(unittest.TestCase):
         uninstall = (root / "uninstall.sh").read_text(encoding="utf-8")
         for required in (
             "Before=fprintd.service",
+            "EnvironmentFile=/etc/t2-touchid.conf",
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
+            "CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN",
             "DevicePolicy=closed",
             "DeviceAllow=/dev/t2-aks rw",
+            "DeviceAllow=/dev/t2-acm rw",
             "ReadWritePaths=/run/t2-touchid /var/lib/t2-touchid",
         ):
             self.assertIn(required, unit)
+        self.assertIn("Requires=t2-biometric-ready.service", unit)
+        self.assertNotIn(
+            "Requires=t2-keybag-load.service t2-credential-unlock.service", unit
+        )
         self.assertNotIn("LoadCredential", unit)
         self.assertNotIn("t2-fprint-enrollment-worker", unit)
-        self.assertIn("Wants=t2-touchid-post-reboot.service", fprintd)
+        self.assertIn(
+            "Requires=t2-native-first-run.service t2-biometric-ready.service t2-touchid-post-reboot.service",
+            fprintd,
+        )
+        first_run = (
+            root / "systemd/system/t2-native-first-run.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "Before=t2-biometric-ready.service "
+            "t2-touchid-post-reboot.service fprintd.service",
+            first_run,
+        )
+        self.assertIn("DeviceAllow=/dev/t2-aks rw", first_run)
+        self.assertIn("DeviceAllow=/dev/t2-acm rw", first_run)
         self.assertIn("t2-touchid-post-reboot.py", install)
+        self.assertIn("t2-native-first-run.service.d", install)
         self.assertIn("t2-touchid-post-reboot", uninstall)
+        self.assertIn("t2-native-first-run", uninstall)
+
+    def test_native_dispatch_routes_each_pending_proof_to_its_owner(self):
+        bound_history = SimpleNamespace(
+            baseline={"caller_linux_uid": 1000, "target_linux_uid": 1000}
+        )
+        enrollment = mock.Mock(
+            return_value={
+                "schema_version": 1,
+                "enrollment_post_reboot_verified": True,
+                "runtime_authority_published": True,
+                "fingerprint_mutation_performed": False,
+                "identifiers_redacted": True,
+            }
+        )
+        with mock.patch.object(native_reconciler, "ROOT_UID", os.geteuid()):
+            result = native_reconciler.run(
+                candidate_loader=lambda: SimpleNamespace(
+                    kind="enroll", history=bound_history
+                ),
+                enrollment_verifier=enrollment,
+            )
+        self.assertEqual(result.state, "enroll-post-reboot-verified")
+        self.assertTrue(result.journal_updated)
+        enrollment.assert_called_once_with(1000)
+
+        publication = mock.Mock(
+            return_value={
+                "schema_version": 1,
+                "enrollment_post_reboot_verified": True,
+                "runtime_authority_published": True,
+                "fingerprint_mutation_performed": False,
+                "identifiers_redacted": True,
+            }
+        )
+        publication_history = SimpleNamespace(
+            operation_id=identifier(70),
+            baseline={"caller_linux_uid": 1000, "target_linux_uid": 1000},
+        )
+        with mock.patch.object(native_reconciler, "ROOT_UID", os.geteuid()):
+            result = native_reconciler.run(
+                candidate_loader=lambda: SimpleNamespace(
+                    kind="enroll-publication", history=publication_history
+                ),
+                enrollment_verifier=enrollment,
+                publication_recoverer=publication,
+            )
+        self.assertEqual(result.state, "enroll-authority-published")
+        self.assertFalse(result.journal_updated)
+        publication.assert_called_once_with(1000, identifier(70))
+        enrollment.assert_called_once_with(1000)
+
+        for kind, command, field in (
+            ("rename", "verify-post-reboot", "post_reboot_verified"),
+            (
+                "delete-one",
+                "verify-delete-post-reboot",
+                "delete_post_reboot_verified",
+            ),
+        ):
+            runner = mock.Mock(
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "schema_version": 1,
+                            field: True,
+                            "identifiers_redacted": True,
+                        }
+                    ).encode(),
+                )
+            )
+            with mock.patch.object(native_reconciler, "ROOT_UID", os.geteuid()):
+                result = native_reconciler.run(
+                    candidate_loader=lambda kind=kind: SimpleNamespace(
+                        kind=kind, history=bound_history
+                    ),
+                    management_runner=runner,
+                )
+            self.assertEqual(result.state, f"{kind}-post-reboot-verified")
+            self.assertTrue(result.journal_updated)
+            self.assertEqual(runner.call_args.args[0][-1], command)
+            self.assertEqual(runner.call_args.kwargs["env"]["SUDO_UID"], "1000")
+
+        external_runner = mock.Mock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "external_deletion_reconciled": True,
+                        "sep_mutation_performed": False,
+                        "identifiers_redacted": True,
+                    }
+                ).encode(),
+            )
+        )
+        mapping = SimpleNamespace(
+            mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)
+        )
+        with mock.patch.object(
+            native_reconciler.t2_user_mapping, "load", return_value=mapping
+        ):
+            result = native_reconciler.reconcile_external_deletion_if_needed(
+                runner=external_runner
+            )
+        self.assertEqual(result.state, "external-deletion-reconciled")
+        self.assertTrue(result.journal_updated)
+        self.assertEqual(
+            external_runner.call_args.args[0][-1],
+            "reconcile-external-deletion-if-needed",
+        )
+        self.assertEqual(
+            external_runner.call_args.kwargs["env"]["SUDO_UID"], "1000"
+        )
 
 
 if __name__ == "__main__":

@@ -1012,7 +1012,7 @@ def main() -> int:
     mode.add_argument("--verify-post-reboot", action="store_true")
     mode.add_argument("--recover-local-transaction", action="store_true")
     mode.add_argument("--recover-observed-identity", action="store_true")
-    parser.add_argument("--identity-name", default="Linux enrolled finger")
+    parser.add_argument("--identity-name", default="finger-1")
     parser.add_argument(
         "--acknowledge-password-fallback-tested", action="store_true"
     )

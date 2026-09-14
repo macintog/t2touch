@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 import socket
 import stat
 import uuid
@@ -21,6 +22,22 @@ WORKER_ROOT = Path("/run/t2-touchid/workers")
 
 class FprintDeleteWorkerError(RuntimeError):
     pass
+
+
+def _native_management_module():
+    path = Path(__file__).resolve().with_name("t2-touchid-manage.py")
+    specification = importlib.util.spec_from_file_location(
+        "t2_fprint_native_management", path
+    )
+    if specification is None or specification.loader is None:
+        raise FprintDeleteWorkerError("native identity manager is unavailable")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _native_mode() -> bool:
+    return os.environ.get("T2_TOUCHID_AUTHORITY_MODE") == "linux-native"
 
 
 def serve_once(
@@ -64,6 +81,37 @@ def serve_once(
             expected_session=request.session,
             expected_account=request.account,
         )
+
+        if _native_mode():
+            native = _native_management_module()
+            previous_sudo_uid = os.environ.get("SUDO_UID")
+            os.environ["SUDO_UID"] = str(request.caller.uid)
+            try:
+                configuration = native.runtime_configuration()
+                with native.operation_lock(), native.sleep_inhibitor():
+                    document = native.run_delete(
+                        configuration,
+                        finger_name=request.finger_name,
+                        authorization_session=authorization,
+                    )
+            finally:
+                if previous_sudo_uid is None:
+                    os.environ.pop("SUDO_UID", None)
+                else:
+                    os.environ["SUDO_UID"] = previous_sudo_uid
+            completion = t2_fprint_deletion_runtime.DeletionCompletion(
+                request.finger_name,
+                document.get("delete_succeeded") is True,
+                document.get("delete_succeeded") is True,
+                document.get("post_reboot_verification_required") is True,
+                document.get("delete_succeeded") is True,
+            )
+            mutation_completed = True
+            t2_fprint_delete_worker_protocol.send_completion(
+                connection, completion
+            )
+            response_sent = True
+            return completion
 
         def consume(authority, live):
             deletion = deletion_consumer_factory(

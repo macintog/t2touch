@@ -29,6 +29,7 @@ def persist(
     plan: t2_identity_delete.IdentityDeletePlan,
     apple_uid: int,
     mapping_generation: str,
+    master_only: bool = False,
 ) -> delete_journal.IdentityDeleteHistory:
     """Persist and independently reconcile one already-observed SEP deletion."""
 
@@ -46,6 +47,19 @@ def persist(
         protocol_version=2,
         connection_generation=lease.connection_generation,
     )
+    try:
+        committed = store.read_committed_components()
+        master = t2_catacomb_codec.decode_master_catacomb(
+            committed["master.cat"]
+        )
+    except (
+        KeyError,
+        t2_catacomb_codec.CatacombCodecError,
+        t2_catacomb_store.CatacombStoreError,
+    ) as error:
+        raise IdentityDeletePipelineError(
+            "committed master Catacomb is unavailable"
+        ) from error
 
     def readback() -> t2_identity_delete_persistence.DeleteReadbackAttestation:
         observed_live = t2_bridge_inventory.collect_stable_private_inventory(
@@ -78,10 +92,12 @@ def persist(
             journal_path,
             operation_id,
             plan=plan,
+            master=master,
             transport=transport,
             store=store,
             mapping_generation=mapping_generation,
             readback=readback,
+            master_only=master_only,
         )
     except IdentityDeletePipelineError:
         raise

@@ -1,0 +1,25 @@
+03:07:51 TUI application-level crash (2026-09-03)
+
+No systemd-coredump exists and the journal contains no OOM kill or native
+fault. Available memory was 12 GiB. The preserved child event stream ends at a
+valid status-63 finger-present object after match_armed, status 80, status 90,
+three statistics events, and status 81.
+
+Commit e34d926 assigned mode="capturing" in the finger-present branch.
+TerminalUI.sensor_art had complete ASCII and Unicode maps for mode="present"
+but no "capturing" key. set_state immediately calls draw(force=True); the
+right pane's full layout calls sensor_art and deterministically raises
+KeyError("capturing"). The TUI traceback went to its terminal, not the file
+that intentionally captures only child stderr. Static control flow plus the
+last saved event is conclusive.
+
+The TUI finally block then sent SIGTERM to its session-isolated child. The
+child artifact proves termination_requested=true, command 0x0c status zero,
+match_cleanup_valid=true, Bridge method-12 transaction release, and private
+event output. No verdict or BioLockout mutation occurred. The exact repair is
+mode="present".
+
+Totality audit found no other assigned mode absent from the renderer. Adjacent
+defensive fixes reject non-object live JSON, add microseconds to exclusive
+artifact names, use renderer fallbacks, retain the TUI on ordinary Python
+exceptions, and forward SIGHUP/SIGTERM through the clean child shutdown path.

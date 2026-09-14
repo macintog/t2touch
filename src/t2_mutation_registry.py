@@ -56,12 +56,15 @@ def _enrollment_entry(records) -> MutationEntry:
     post_reboot = (
         phase is t2_enrollment_journal.EnrollmentPhase.RECONCILED
         and history.terminal_identity_uuid is not None
+        and history.baseline.get("baseline_version") == 2
     )
     complete = (
         phase
         in {
             t2_enrollment_journal.EnrollmentPhase.BASELINE,
             t2_enrollment_journal.EnrollmentPhase.ABORTED_BEFORE_START,
+            t2_enrollment_journal.EnrollmentPhase.ADDITION_VERIFIED,
+            t2_enrollment_journal.EnrollmentPhase.ADDITION_ROLLED_BACK,
             t2_enrollment_journal.EnrollmentPhase.POST_REBOOT_VERIFIED,
         }
         or (
@@ -92,12 +95,16 @@ def _delete_entry(records) -> MutationEntry:
     except t2_identity_delete_journal.IdentityDeleteJournalError as error:
         raise MutationRegistryError("single-delete journal is invalid") from error
     phase = history.phase
-    post_reboot = (
-        phase is t2_identity_delete_journal.IdentityDeletePhase.RECONCILED
-    )
+    # A reconciled deletion has already committed and independently read back
+    # the exact survivor Catacomb while a stable SEP double-read proves the
+    # deleted identity absent.  That is the ordinary management boundary; a
+    # later cross-boot observation may add evidence, but must not serialize
+    # otherwise independent add/delete operations behind a reboot.
+    post_reboot = False
     complete = phase in {
         t2_identity_delete_journal.IdentityDeletePhase.BASELINE,
         t2_identity_delete_journal.IdentityDeletePhase.ABORTED,
+        t2_identity_delete_journal.IdentityDeletePhase.RECONCILED,
         t2_identity_delete_journal.IdentityDeletePhase.POST_REBOOT_VERIFIED,
     }
     return MutationEntry("delete-one", phase.value, not complete, post_reboot)

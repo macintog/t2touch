@@ -45,7 +45,59 @@ def encoded(entries: list[dict[str, object]]) -> bytes:
     ).encode()
 
 
+def activation_entry(
+    linux_uid: int = 1000, apple_uid: int = 501
+) -> dict[str, object]:
+    value = entry(linux_uid, apple_uid)
+    generation = identifier(apple_uid + 2000)
+    root = f"/var/lib/t2-touchid/users/{linux_uid}/identities/{generation}"
+    value.update(
+        {
+            "bundle_generation": generation,
+            "activation_secret_path": f"{root}/activation.secret",
+            "activation_secret_sha256": "c" * 64,
+            "activation_secret_length": 16,
+            "keybag_path": f"{root}/user.kb",
+        }
+    )
+    return value
+
+
+def activation_encoded(entries: list[dict[str, object]]) -> bytes:
+    return json.dumps(
+        {"schema_version": 2, "mappings": entries},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+
 class UserMappingTests(unittest.TestCase):
+    def test_activation_schema_binds_exact_generation_and_both_artifacts(self):
+        result = mapping.parse(activation_encoded([activation_entry()]))
+        selected = result.resolve(1000, "verify")
+        self.assertEqual(result.schema_version, 2)
+        self.assertEqual(selected.activation_secret_length, 16)
+        self.assertEqual(selected.activation_secret_sha256, "c" * 64)
+        self.assertTrue(selected.keybag_path.endswith("/user.kb"))
+        self.assertTrue(selected.activation_secret_path.endswith("/activation.secret"))
+
+    def test_activation_schema_rejects_legacy_or_cross_generation_paths(self):
+        for field, replacement in (
+            ("keybag_path", "/var/lib/t2-touchid/users/1000/user.kb"),
+            (
+                "activation_secret_path",
+                "/var/lib/t2-touchid/users/1000/identities/"
+                + identifier(9999)
+                + "/activation.secret",
+            ),
+            ("activation_secret_length", 15),
+        ):
+            with self.subTest(field=field):
+                value = activation_entry()
+                value[field] = replacement
+                with self.assertRaises(mapping.UserMappingError):
+                    mapping.parse(activation_encoded([value]))
+
     def test_parses_distinct_users_and_derives_special_alias(self):
         result = mapping.parse(encoded([entry(), entry(1001, 502)]))
         selected = result.resolve(1001, "enroll")

@@ -3,26 +3,46 @@
 set -euo pipefail
 
 module=t2_sep_transport
-parameter=/sys/module/$module/parameters/register_ool
+provisioning_parameter=/sys/module/$module/parameters/enable_identity_provisioning
+replacement_parameter=/sys/module/$module/parameters/enable_identity_replacement
+config=/etc/t2-touchid.conf
 
-if [[ -e /dev/t2-aks ]]; then
+mapfile -t authority_modes < <(
+  sed -n 's/^T2_TOUCHID_AUTHORITY_MODE=//p' "$config"
+)
+if (( ${#authority_modes[@]} != 1 )) ||
+  [[ ${authority_modes[0]} != linux-native &&
+     ${authority_modes[0]} != macos-control-oracle ]]; then
+  echo "invalid T2 Touch ID authority mode" >&2
+  exit 1
+fi
+
+needs_native_provisioning=0
+needs_native_replacement=0
+if [[ ${authority_modes[0]} == linux-native ]]; then
+  native_gate_output=$(
+    /opt/t2-touchid/.venv/bin/python \
+      /opt/t2-touchid/src/t2-native-transport-gates.py
+  )
+  if [[ $native_gate_output =~ ^([01])[[:space:]]([01])$ ]]; then
+    needs_native_provisioning=${BASH_REMATCH[1]}
+    needs_native_replacement=${BASH_REMATCH[2]}
+  else
+    echo "invalid Linux-native transport gate result" >&2
+    exit 1
+  fi
+fi
+
+if [[ -e /dev/t2-aks && -e /dev/t2-acm ]] &&
+  { (( ! needs_native_provisioning )) ||
+    [[ -r $provisioning_parameter && $(<$provisioning_parameter) == Y ]]; } &&
+  { (( ! needs_native_replacement )) ||
+    [[ -r $replacement_parameter && $(<$replacement_parameter) == Y ]]; }; then
   exit 0
 fi
 
 if [[ -d /sys/module/$module ]]; then
-  # A PCI modalias may load the module before this service.  It is safe to
-  # replace only the observation-only instance: it has registered no SEP DMA.
-  if [[ ! -r $parameter ]] || [[ $(<"$parameter") != Y ]]; then
-    # Unbind first: the bound PCI driver holds a module reference that makes
-    # a bare modprobe --remove fail with "Module is in use" (observed 15,2).
-    for dev in /sys/bus/pci/drivers/$module/0000:*; do
-      [[ -e $dev ]] && echo "${dev##*/}" > /sys/bus/pci/drivers/$module/unbind
-    done
-    /usr/bin/modprobe --remove "$module"
-  else
-    echo "$module is active with register_ool=1 but /dev/t2-aks is absent; reboot required" >&2
-    exit 1
-  fi
+  /usr/local/sbin/t2-sep-transport-unload
 fi
 
 # Pass probe_capabilities explicitly: modprobe.d must stay observation-only by
@@ -30,8 +50,49 @@ fi
 # The v1 negotiation is a SEP-side prerequisite, not just a check — without it
 # SEP ignores all endpoint-7 exchanges (keybag-load and even the read-only
 # capabilities query time out). Observed MacBookPro15,2 2026-09-06.
-/usr/bin/modprobe "$module" register_ool=1 probe_capabilities=1
+module_arguments=(register_ool=1 probe_capabilities=1)
+if [[ ${authority_modes[0]} == macos-control-oracle ]]; then
+  module_arguments+=(register_acm=1 retain_runtime_handle=1)
+else
+  mapfile -t platform_asids < <(
+    sed -n 's/^T2_TOUCHID_AKS_PLATFORM_ASID=//p' "$config"
+  )
+  mapfile -t platform_cdhashes < <(
+    sed -n 's/^T2_TOUCHID_AKS_PLATFORM_CDHASH=//p' "$config"
+  )
+  if (( ${#platform_asids[@]} != 1 )) ||
+    [[ ! ${platform_asids[0]} =~ ^[0-9]+$ ]] ||
+    (( 10#${platform_asids[0]} > 4294967295 )); then
+    echo "invalid Linux-native AKS platform ASID" >&2
+    exit 1
+  fi
+  if (( ${#platform_cdhashes[@]} != 1 )) ||
+    [[ -n ${platform_cdhashes[0]} &&
+       ! ${platform_cdhashes[0]} =~ ^[[:xdigit:]]{40}$ ]]; then
+    echo "invalid Linux-native AKS platform CDHash" >&2
+    exit 1
+  fi
+  module_arguments+=(
+    register_acm=1
+    "aks_platform_asid=${platform_asids[0]}"
+    aks_platform_proc_uniqueid=1
+  )
+  if [[ -n ${platform_cdhashes[0]} ]]; then
+    module_arguments+=("aks_platform_cdhash=${platform_cdhashes[0],,}")
+  fi
+  if (( needs_native_provisioning )); then
+    module_arguments+=(enable_identity_provisioning=1)
+  fi
+  if (( needs_native_replacement )); then
+    module_arguments+=(enable_identity_provisioning=1 enable_identity_replacement=1)
+  fi
+fi
+/usr/bin/modprobe "$module" "${module_arguments[@]}"
 [[ -e /dev/t2-aks ]] || {
   echo "$module loaded without creating /dev/t2-aks" >&2
+  exit 1
+}
+[[ -e /dev/t2-acm ]] || {
+  echo "$module loaded without creating /dev/t2-acm" >&2
   exit 1
 }

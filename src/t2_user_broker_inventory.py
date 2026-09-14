@@ -18,7 +18,7 @@ SUMMARY_KEYS = frozenset(
         "identities",
         "local_live_reconciled",
         "selection_scope",
-        "fprintd_listing_is_compatibility_alias",
+        "finger_names_are_presentation_metadata",
         "identifiers_redacted",
     }
 )
@@ -45,7 +45,7 @@ class PublicIdentityInventory:
     identities: tuple[PublicIdentity, ...]
     local_live_reconciled: bool = True
     selection_scope: str = "current-reconciled-list"
-    fprintd_listing_is_compatibility_alias: bool = True
+    finger_names_are_presentation_metadata: bool = True
     identifiers_redacted: bool = True
 
     @property
@@ -59,8 +59,8 @@ class PublicIdentityInventory:
             "identities": [identity.public() for identity in self.identities],
             "local_live_reconciled": self.local_live_reconciled,
             "selection_scope": self.selection_scope,
-            "fprintd_listing_is_compatibility_alias": (
-                self.fprintd_listing_is_compatibility_alias
+            "finger_names_are_presentation_metadata": (
+                self.finger_names_are_presentation_metadata
             ),
             "identifiers_redacted": self.identifiers_redacted,
         }
@@ -103,7 +103,7 @@ def parse_public_inventory(value: object) -> PublicIdentityInventory:
         or len(records) != count
         or value.get("local_live_reconciled") is not True
         or value.get("selection_scope") != "current-reconciled-list"
-        or value.get("fprintd_listing_is_compatibility_alias") is not True
+        or value.get("finger_names_are_presentation_metadata") is not True
         or value.get("identifiers_redacted") is not True
     ):
         raise UserBrokerInventoryError("public identity inventory is invalid")

@@ -1,0 +1,18 @@
+/*
+ * Reference-machine-only authorization override.
+ *
+ * The product policy remains auth_self for biometric mutation.  This isolated
+ * integration host instead grants its one active local test account the two
+ * caller-bound mutation actions so automated hardware exercises never open a
+ * password dialog.  The privileged broker still pins PID, UID, process start
+ * time, login session, account generation, mapping generation, boot, runtime,
+ * and operation ID before dispatch.
+ */
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.t2linux.touchid.enroll" ||
+         action.id == "org.t2linux.touchid.identity-management") &&
+        subject.user == "replace-with-desktop-user" &&
+        subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

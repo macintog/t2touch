@@ -15,7 +15,7 @@ sys.path.insert(0, str(SOURCE))
 import t2_catacomb_store
 import t2_identity_delete_pipeline as pipeline
 import t2_identity_delete_persistence as persistence
-from tests.test_catacomb_codec import fixture
+from tests.test_catacomb_codec import fixture, master_fixture
 from tests.test_identity_delete import IdentityDeleteTests
 
 
@@ -32,7 +32,10 @@ class IdentityDeletePipelineTests(unittest.TestCase):
         )
         store = object.__new__(t2_catacomb_store.CatacombStore)
         store.read_committed_components = mock.Mock(
-            return_value={"user_000001f5.cat": fixture()}
+            return_value={
+                "master.cat": master_fixture(),
+                "user_000001f5.cat": fixture(),
+            }
         )
         history = SimpleNamespace(baseline={"stable": True})
         attestation = SimpleNamespace(
@@ -52,6 +55,7 @@ class IdentityDeletePipelineTests(unittest.TestCase):
                 ),
             )
             self.assertIs(keywords["transport"], transport)
+            self.assertEqual(keywords["master"].enrollment_count, 2)
             return final
 
         with mock.patch.object(

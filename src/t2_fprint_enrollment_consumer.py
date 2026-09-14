@@ -10,7 +10,9 @@ from pathlib import Path
 import t2_acm_device
 import t2_enrollment_coordinator
 import t2_enrollment_finalizer
+import t2_fprint_identity
 import t2_fprint_projection
+import t2_fprint_sequence
 import t2_user_broker
 import t2_user_policy
 import t2_user_reconciliation_live
@@ -44,11 +46,14 @@ class EnrollmentConsumer:
     coordinator: Callable[..., object] = field(
         default=t2_enrollment_coordinator.run, repr=False
     )
+    handle_allocator: Callable[[object, object], str] = field(
+        default=t2_fprint_sequence.candidate, repr=False
+    )
 
     def __post_init__(self) -> None:
-        if self.finger_name not in t2_fprint_projection.FINGER_NAME_SET:
+        if not t2_fprint_identity.is_enrollment_request(self.finger_name):
             raise FprintEnrollmentConsumerError(
-                "enrollment consumer requires a canonical finger name"
+                "enrollment consumer requires supported request syntax"
             )
         if (
             not callable(self.password_binder)
@@ -57,6 +62,7 @@ class EnrollmentConsumer:
             or not callable(self.acm_device_factory)
             or not callable(self.finalizer_factory)
             or not callable(self.coordinator)
+            or not callable(self.handle_allocator)
         ):
             raise FprintEnrollmentConsumerError(
                 "enrollment consumer dependency is unavailable"
@@ -140,10 +146,6 @@ class EnrollmentConsumer:
             raise FprintEnrollmentConsumerError(
                 "existing fingerprint labels require migration"
             )
-        if self.finger_name in projection.finger_names:
-            raise FprintEnrollmentConsumerError(
-                "finger name is already enrolled"
-            )
         try:
             material = prepare(authority.selected, authority.operation_id)
         except t2_user_reconciliation_live.EnrollmentCapacityExhausted as error:
@@ -177,6 +179,20 @@ class EnrollmentConsumer:
             raise FprintEnrollmentConsumerError(
                 "same-generation enrollment material is inconsistent"
             )
+        try:
+            allocated_finger = self.handle_allocator(
+                material.apple_uid, projection.finger_names
+            )
+            if not t2_fprint_projection.is_finger_name(allocated_finger):
+                raise FprintEnrollmentConsumerError(
+                    "neutral fingerprint handle allocator returned an invalid handle"
+                )
+        except FprintEnrollmentConsumerError:
+            raise
+        except (t2_fprint_sequence.FprintSequenceError, ValueError) as error:
+            raise FprintEnrollmentConsumerError(
+                "neutral fingerprint handle allocation failed"
+            ) from error
         journal_path = MUTATION_ROOT / f"{authority.operation_id}.jsonl"
         try:
             acm_manager = self.acm_device_factory()
@@ -195,7 +211,7 @@ class EnrollmentConsumer:
                     operation_id=authority.operation_id,
                     catacomb_root=material.catacomb_root,
                     mapping_generation=authority.mapping_set.generation,
-                    identity_name=self.finger_name,
+                    identity_name=allocated_finger,
                 )
                 result = self.coordinator(
                     lease=material.lease,

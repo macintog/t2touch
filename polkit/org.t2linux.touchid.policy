@@ -29,11 +29,11 @@
 
   <action id="org.t2linux.touchid.activate-user">
     <description>Activate your mapped Apple keybag for T2 Touch ID</description>
-    <message>Authentication is required to activate T2 Touch ID</message>
+    <message>Authorization is required to activate T2 Touch ID</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
-      <allow_active>auth_self</allow_active>
+      <allow_active>yes</allow_active>
     </defaults>
   </action>
 

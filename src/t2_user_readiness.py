@@ -57,7 +57,7 @@ class AliasEvidence:
     special_alias: int | None
     bag_uuid: str | None
     lock_state: int | None
-    account_uuid: str | None
+    account_uuid: str | None = None
 
 
 @dataclass(frozen=True)

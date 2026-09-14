@@ -1,0 +1,62 @@
+Native-success oracle and bridgeOS status-78 firmware boundary (2026-09-03)
+
+Preserved bridgeOS 23P6068 unified logs contain four native MatchMode command-4
+calls, all with input length 68. Two reach successful matching. The ordinary
+unlock at 2026-09-01T23:53:31Z reports internal matchFlags 9, accepted image
+processing, SEP matcher command 0x9, Image matched:1, Cancel, then
+SaveBioLockoutRecord command 74. Its service initialization contains no missing
+sensor-configuration write relative to Linux; extra calls are reads/logging.
+
+Native success service-event order is 90, 63, 55, 72, 95, 91, match-result,
+then finale statuses and 64. The 335,784-record native archive contains no
+status 81. Current Linux selected-identity requests are length 92, flags 0x4001,
+and produce 90, 81, 63, 91, 78, 64 on every attempt. That is a proven mode/input
+divergence. A 68-byte Linux control omits the sensor-side identity filter but
+continues to require the returned 20-byte identity to match the refreshed user-
+501 enrolled record before host acceptance.
+
+AppleMesaSEPDriver in the exact runtime-matching bridgeOS kernelcache authors
+status 78 in handleFingerDetect at 0xfffffff0069b8ad0. The finger-off branch
+constructs ordinal 78 at 0xfffffff0069b8d6c-0xfffffff0069b8dec and immediately
+constructs ordinal 64 at 0xfffffff0069b8e4c-0xfffffff0069b8e68. Its predicate
+requires match/enroll command mode 2/3, an empty IOMesaCaptureDataQueue, idle
+asyncCaptureHandler, and clear wait/suppression state. This exactly explains
+the observed 0.11-ms 78-to-64 interval. Status 78 is a post-drain/no-pending
+finger-off fallback, not a matcher verdict.
+
+The distinct visible image-quality failure in handleMatch emits status 70 at
+0xfffffff0069cf7ec. Linux emits no 70. Status 91 comes from pauseCapture after
+finger-on; it does not prove an image reached handleMatch. Terminal match
+results use event family 0xe3ff8002 through sendMatchResult.
+
+One current-boot OS-log-only sysdiagnose received 8.5 MB but hit its bounded
+15-minute timeout and removed its partial output. The single advertised
+recovery request then failed immediately; no output was overwritten. Do not
+repeat that bulk collection. Existing narrow tooling cannot retrieve only the
+BiometricKit slice.
+
+The native-length Linux no-finger gate 20260903T134136378417Z sent 68 bytes,
+flags 1 and zero selected identities; command 4/cancel returned zero and cleanup
+and Bridge release were valid. The next discriminator is one enrolled-finger
+capture on this exact request. If status 81 disappears and the native pipeline
+appears, selected-identity framing was the mode switch. If 81/78 remain, the
+next boundary is current AppleMesaSEPDriver internal instrumentation or a new
+paired native log capture, not speculative host commands.
+
+The enrolled-finger control 20260903T134402342236Z then closed that
+discriminator. With the exact 68-byte request, flags 1 and no selected-identity
+blob, Linux still emitted status 81 and ten complete
+90,81,63,91,78,64 cycles. It emitted no 55, 72, 95 or match result. The first
+two 63-to-78 intervals were 13.908 and 12.796 seconds, so sustained physical
+contact did not advance the capture pipeline. Across all ten cycles, 78-to-64
+was 0.104-0.117 ms (median 0.106 ms). Selected-identity framing is therefore
+not the missing mode switch; command-4 length 68 is necessary native parity
+but not sufficient.
+
+That control also exposed a TUI error: the firmware-authored 64 immediately
+overwrote the rejection screen and rearmed while the finger was still held.
+The TUI now treats the first 78 as the end of one observation, requests clean
+probe cancellation, ignores queued post-rejection events, and keeps a LIFT NOW
+screen visible until operator acknowledgement. Do not collect more finger
+samples for this boundary. Continue with current-driver internal
+instrumentation or a narrow current bridgeOS log path.
