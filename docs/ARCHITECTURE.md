@@ -1,123 +1,170 @@
 # Product architecture
 
-`t2touch` presents the T2 Touch ID sensor through the standard fprintd D-Bus
-interface. Applications do not need a T2-specific authentication path: `sudo`,
-PolicyKit, the Omarchy lock screen, and normal fprintd clients all consume the
-same enrolled inventory.
+t2touch installs a Linux-native Touch ID stack for one desktop account on an
+Intel T2 Mac. Its Python service owns the standard `net.reactivated.Fprint`
+D-Bus name and implements the fprintd interface. Stock fprintd clients, sudo,
+PolicyKit, and the Omarchy lock screen all use that service. t2touch is a
+fprintd-compatible service, not a libfprint driver loaded into the stock daemon.
 
-The supported product sequence is deliberately small:
+The [README](../README.md) covers installation and everyday commands.
+[Fprintd integration](FPRINT_INTEGRATION.md) specifies the client and worker
+contracts; the [protocol reference](research/README.md) explains AKS, ACM,
+BridgeXPC, and Catacomb formats.
 
-```text
-install in the current session
-  -> t2touch enroll
-  -> fingerprint is durable and immediately usable
-  -> verify or delete through ordinary fprintd semantics
-```
-
-Enrollment, named deletion, uninstall, and a matching-transport userspace
-reinstall complete in the current session. A missing applesmc boot-state
-publisher requires the packaged prerequisite and one restart before installation
-can complete. A different or unidentified resident transport stops installation
-before installed-state changes; changing transports requires a planned kernel
-restart. See [installation](../README.md#requirements).
-
-## Runtime layers
+## Components and control flow
 
 ```text
-sudo / PolicyKit / lock screen / fprintd clients
-                         |
-                         v
-                fprintd-compatible service
-                         |
-            reconciled user authority + inventory
-                         |
-            BridgeXPC / BiometricKit      AKS / ACM
-                         |                   |
-                   CDC-NCM network      SEP transport
-                          \                 /
-                           bridgeOS + SEP
+  t2touch CLI / enrollment TUI       sudo / PolicyKit / lock screen
+                   \                 /
+                    fprintd D-Bus API
+                            |
+                 t2-fprintd.py service
+              caller + account + inventory
+                            |
+          serialized enrollment / match / deletion
+                 /                       \
+    BridgeXPC / BiometricKit           AKS / ACM
+       sensor and templates        account authorization
+                 |                       |
+         T2 CDC-NCM network        /dev/t2-aks, /dev/t2-acm
+                 |                       |
+             bridgeOS            t2_sep_transport kernel module
+                 \                       /
+                       Secure Enclave
 ```
 
-- The fprintd facade implements the standard user-facing enrollment,
-  verification, listing, and deletion contracts.
-- Lifecycle owners serialize mutation, keep credentials and biometric state
-  private, and publish an identity only after persistence and fresh-owner
-  verification succeed.
-- BridgeXPC and BiometricKit carry sensor events and matching operations over
-  the T2 CDC-NCM interface.
-- The allowlisted kernel transport exposes only the AKS and ACM operations the
-  lifecycle owners need. It does not expose a general raw SEP command channel.
-- systemd orders network preparation, transport loading, first-run authority,
-  biometric readiness, and fprintd. Starting fprintd pulls in the complete
-  chain.
+- [`src/t2touch.py`](../src/t2touch.py) dispatches enrollment to the direct
+  D-Bus TUI and uses stock fprintd clients for list, verify, and named deletion.
+- [`src/t2-fprintd.py`](../src/t2-fprintd.py) owns claims, the reconciled user
+  inventory, and the public operation lifecycle. Enrollment and deletion use
+  separate caller-bound transient workers.
+- Lifecycle modules in [`src/`](../src/) coordinate activation, sensor
+  operations, persistent state, and recovery under the biometric operation lock.
+- BridgeXPC carries BiometricKit requests and sensor events over the private
+  T2 network. AKS manages keybag identity; ACM supplies authorization contexts.
+- [`src/t2_sep_transport.c`](../src/t2_sep_transport.c) owns PCI/BCE mailbox
+  DMA and exposes a narrow allowlist of AKS/ACM operations. It is not a general
+  raw SEP command channel.
 
-## Authority and first enrollment
+Apple's bridgeOS and Secure Enclave firmware continue to run on the T2.
+Linux owns the host-side account mapping, activation material, biometric
+archives, and service integration. Matching occurs in SEP.
 
-On a blank T2 fingerprint authority, first run creates a Linux-owned SEP
-identity, saves its encrypted keybag, and verifies it through a new transport
-owner before enabling the Linux account mapping. The installer refuses to
-replace an authority that already exists. Machines retaining macOS Touch ID
-state use the separate [compatibility workflow](COMPATIBILITY.md).
+## Installation and startup
 
-The first successful enrollment persists the Catacomb and rolling BioLockout
-state, reconciles host and SEP inventory through a fresh Bridge connection,
-and publishes runtime authority before reporting success to the TUI. A failed
-or cancelled enrollment publishes nothing and does not consume a numbered
-slot.
+[`install-omarchy.sh`](../install-omarchy.sh) installs dependencies and invokes
+[`install.sh`](../install.sh) for the desktop account. The latter installs the
+Python environment under `/opt/t2-touchid`, DKMS modules, systemd units,
+D-Bus access policy, and reversible PAM integration.
 
-Later enrollments use the same inventory. Entries are neutral `Finger N`
-slots from 1 through 5; the system does not infer or require a physical finger
-name. Retained slots never move after a deletion, and the lowest vacant slot is
-used by the next successful enrollment. Any enrolled finger can satisfy
-authentication, regardless of whether it was imported or enrolled on Linux.
+Before changing installed state, it rejects a different or unidentified
+resident T2 transport. It also requires the running applesmc driver to publish
+typed SEP boot state. If that capability is absent, it stages the included
+[`applesmc-t2touch`](../packaging/applesmc-t2touch/README.md) prerequisite and
+stops for a normal kernel restart. An on-disk module is not proof of a live
+capability.
 
-## In-place lifecycle
+The installed native startup chain is:
 
-The service loader owns transport configuration. During install or upgrade it
-keeps a matching live transport bound, restarts this product's userspace
-service chain, and starts fprintd again in the same running system. SEP retains
-the transport's registered DMA addresses, so the installer rejects a different
-or unidentified resident module before changing installed state. A transport
-change must use a planned kernel restart. Uninstall stops userspace while
-leaving a pinned live transport safely resident.
+```text
+Bridge network preparation -> BiometricKit port discovery -> SEP transport
+  -> native account setup/activation -> biometric readiness
+  -> mutation reconciliation -> fprintd service
+```
 
-Ambiguous transport failures fail closed. They are reported by
-`t2-touchid-doctor`; they are not converted into a successful authentication
-or a blind mutation retry.
+The [systemd units](../systemd/system/) enforce these dependencies.
+`t2-native-first-run.service` creates or verifies the selected account;
+`t2-biometric-ready.service` establishes usable biometric state;
+`t2-touchid-post-reboot.service` reconciles eligible journals before
+`fprintd.service` starts. A failed prerequisite prevents service exposure.
+The installer starts this chain and installs PAM only after native fprintd
+readiness succeeds.
 
-## Durable and volatile state
+Fresh installations select `linux-native` authority. Compatibility mode retains
+an existing Apple authority and adds the imported keybag and encrypted-credential
+services; it does not turn an existing fingerprint into a different inventory
+type. There is no supported end-user migration command for macOS Touch ID state.
 
-Durable private state lives under `/var/lib/t2-touchid` and binds one local
-account generation to its SEP keybag, mapping, Catacomb generations, mutation
-journals, and runtime authority. The encrypted first-run credential lives in
-the systemd credential store. Volatile locks, sockets, and readiness state live
-under `/run/t2-touchid` and are never treated as durable authority.
+## Account authority and fingerprints
 
-Uninstall preserves private state for reinstall. Named deletion supports the
-final fingerprint and reconciles a clean, enrollable empty inventory. Batch
-delete-all and private-state purge are not exposed. A stable external deletion
-of the sole identity is handled separately: the startup reconciler commits an empty Linux projection before fprintd starts,
-without issuing an SEP deletion or restoring the removed identity. The next
-enrollment reuses that empty authority and persists a fresh one-identity
-generation.
+On blank authority, first run creates a Linux-owned SEP identity, saves its
+keybag and activation material, then verifies it through a fresh userspace
+owner before enabling the Linux account mapping. It does not overwrite an
+existing authority. A fresh owner means new descriptors and authorization
+contexts, not replacing the resident kernel transport or rebooting the machine.
 
-## Security boundary
+First enrollment begins with an enabled account and empty fingerprint inventory.
+It captures a fingerprint, persists the user/master Catacomb and rolling
+BioLockout state, reconciles local and SEP inventories through a fresh Bridge
+connection, and publishes runtime authority before returning success. Normal
+enrollment therefore completes in the current session.
 
-Fingerprint matching is a local authentication convenience. Password
-authentication remains enabled and independent. The service accepts a match
-only when SEP returns a validated enrolled identity in the selected user's
-reconciled inventory; sensor presence or transport success alone is not an
-authentication result.
+Account authority survives changes to the fingerprint set. Later enrollments
+extend the reconciled inventory rather than requiring the first fingerprint
+to remain present. Finger 1 through Finger 5 are stable neutral slots backed by
+private template identities. The lock-held allocator chooses the lowest vacant
+slot, and deletion never renumbers survivors. Any enrolled fingerprint may
+satisfy authentication, regardless of its origin or the client's requested name.
 
-T2 Linux normally does not have Apple's Secure Boot trust chain for its Linux
-kernel. This integration therefore is not equivalent to FileVault or a
-hardware-attested Linux boot. Private templates, keybags, stable identifiers,
-and credentials must never enter logs or the repository.
+Named deletion supports the final fingerprint. It reconciles an empty,
+enrollable inventory, so the next enrollment uses Finger 1. Stable external
+removal of the sole fingerprint is also reconciled without restoring it or
+sending another deletion. Batch delete-all and private-state purge are not
+exposed.
 
-## Current support boundary
+## Persistence and recovery
 
-The complete product path has been validated on one `MacBookPro16,1`. The
-architecture selects protocol capabilities rather than hard-coding finger or
-user assumptions, but additional T2 models still need reproduction evidence.
-Historical protocol recovery and hardware experiments are retained in
-[`docs/research/`](research/); they are provenance, not product instructions.
+| Location | Responsibility |
+| --- | --- |
+| `/etc/t2-touchid.conf` | Protected account, transport, and installation configuration. |
+| `/etc/credstore.encrypted/t2-touchid-password` | Encrypted credential supplied to the systemd service that needs it. |
+| `/var/lib/t2-touchid` | Account mapping, activation bundles, keybags, Catacomb generations, mutation journals, and PAM backups. |
+| `/run/t2-touchid` | Volatile operation state, locks, worker sockets, and readiness data. |
+
+An activation bundle preserves the saved keybag and the 16-byte creation input
+needed by a fresh ACM context. The bundle is private credential material; its
+checksums detect inconsistent generations but do not encrypt its contents.
+
+Mutation intent is journaled before dispatch. Completion requires the expected
+identity set and committed paired state, not just a successful command return
+or 100-percent capture progress. A failed client can leave a hardware operation
+completed but its persistence unfinished. Recovery reconciles that existing
+operation; it never blindly repeats an ambiguous enrollment or deletion.
+Incomplete state blocks further mutation or authentication as appropriate.
+
+A cached biometric endpoint is a routing hint only. Every connection validates
+its RemoteXPC handshake and advertised service. Neither a cache entry nor a
+previous match grants authority for a new operation.
+
+## Privilege and authentication
+
+A D-Bus claim is bound to its unique sender, kernel process identity, Linux
+account generation, and session. PolicyKit grants and mapping capabilities are
+rechecked at the worker boundary. A username or Finger N label is not authority
+to mutate another account. Multi-user service exposure is not supported.
+
+Credentials, keybags, and private template identifiers stay inside protected
+service state. The desktop receives neutral inventory names, progress, and
+validated operation results. Finger presence or transport success never counts
+as authentication. Password fallback remains independently usable when
+biometrics fail or the service is unavailable.
+
+This Linux stack does not establish Apple's Secure Boot trust chain or provide
+FileVault-equivalent guarantees. See [Security](../SECURITY.md).
+
+## Updates, uninstall, and support limits
+
+A matching-transport reinstall restarts the product's userspace services in the
+current session. SEP retains registered DMA addresses, so a transport change
+requires a planned kernel restart. [`uninstall.sh`](../uninstall.sh) restores
+managed PAM state, removes the installed software and future transport startup,
+and leaves a pinned live transport resident until the next kernel start.
+It preserves private account and biometric state for reinstall.
+
+The installer selects s2idle through systemd sleep policy. Deep-sleep recovery,
+cross-macOS persistence of Linux-only fingerprints, multiple Linux users, and
+additional hardware models are outside the demonstrated product scope.
+Validation covers MacBookPro16,1. Clean-volume first activation of the packaged
+applesmc prerequisite is not established by a reinstall on an already-capable
+kernel. See [Troubleshooting](TROUBLESHOOTING.md) and
+[Compatibility](COMPATIBILITY.md).

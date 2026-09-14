@@ -101,4 +101,4 @@ authentication service. These initial protocol experiments did not test
 fprintd/PAM or password fallback. The completed installed work later exercised
 standard fprintd enrollment, matching and selected deletion across reboot, as
 well as real sudo/PAM fingerprint success and an independent unavailable-service
-password fallback; see the [integration follow-up](integration-followup.md).
+password fallback; see the [integration contracts](integration-contracts.md).

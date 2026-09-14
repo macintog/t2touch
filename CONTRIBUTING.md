@@ -43,8 +43,8 @@ tests and the userspace build do not prove that a module is safe to load.
 ## Public evidence
 
 Start with the [architecture](docs/ARCHITECTURE.md),
-[service-interface audit](docs/SERVICE_INTERFACE_AUDIT.md), and
-[integration evidence](docs/research/integration-followup.md). Keep hardware
+[fprintd contracts](docs/FPRINT_INTEGRATION.md), and
+[protocol research](docs/research/README.md). Keep hardware
 claims tied to a named platform, source revision, client boundary, and retained
 redacted evidence.
 
@@ -53,10 +53,9 @@ For another Mac or bridge generation, follow
 capability evidence before adding model conditionals; one untested manifest
 entry is not a support claim.
 
-Record results in
-[`docs/REFERENCE_PLATFORM.md`](docs/REFERENCE_PLATFORM.md). A useful entry
-identifies the kernel, T2 transport revision, evidence level, expected result,
-and recovery result. Report positive and negative controls together.
+A hardware report should identify the kernel, T2 transport revision, expected
+result, observed result, and recovery behavior. Report positive and negative
+controls together and distinguish source checks from hardware observations.
 
 Never commit or publish keybags, Catacombs, credentials, packet captures,
 Apple binaries, raw BridgeXPC replies, biometric payloads, device addresses,
@@ -76,6 +75,6 @@ diagnostic output, and manually inspect it before sharing.
 - Keep upstream-facing kernel changes independent of PAM and distro policy.
 
 Each pull request should state its hardware risk level, tests run, hardware and
-firmware coverage, user-visible failure mode, and recovery path. See
-[`docs/UPSTREAMING.md`](docs/UPSTREAMING.md) for subsystem boundaries and
-handoff gates.
+firmware coverage, user-visible failure mode, and recovery path. Kernel
+transport, biometric protocol, fprintd integration, and distribution packaging
+have different review boundaries; keep changes scoped to the layer they affect.
