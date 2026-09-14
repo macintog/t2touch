@@ -26,7 +26,7 @@ class T2TouchCLITests(unittest.TestCase):
         ):
             self.assertEqual(t2touch.configured_user(), "mapped")
 
-    def test_delete_uses_standard_fprintd_for_one_numbered_slot(self):
+    def test_delete_authenticates_before_starting_one_numbered_deletion(self):
         completed = SimpleNamespace(returncode=0)
         with (
             mock.patch.object(t2touch, "require_current_user"),
@@ -37,11 +37,22 @@ class T2TouchCLITests(unittest.TestCase):
         ):
             self.assertEqual(t2touch.delete("mapped", "finger-5"), 0)
             run.assert_called_once_with(
-                ["/usr/bin/fprintd-delete", "mapped", "-f", "finger-5"],
+                ["/usr/bin/pkexec", "/usr/local/sbin/t2-touchid-delete", "finger-5"],
                 check=False,
             )
             with self.assertRaisesRegex(t2touch.T2TouchError, "Finger N"):
                 t2touch.delete("mapped", "right-index-finger")
+
+    def test_cancelled_authorization_returns_without_a_deletion_fallback(self):
+        with (
+            mock.patch.object(t2touch, "require_current_user"),
+            mock.patch.object(t2touch, "service_ready", return_value=True),
+            mock.patch.object(t2touch.subprocess, "run",
+                              return_value=SimpleNamespace(returncode=126)) as run,
+        ):
+            self.assertEqual(t2touch.delete("mapped", "finger-2"), 126)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0][0], "/usr/bin/pkexec")
 
 
 if __name__ == "__main__":

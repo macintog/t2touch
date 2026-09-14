@@ -54,6 +54,10 @@ t2touch verify
 t2touch delete finger-2
 ```
 
+Deletion first opens the system authorization dialog. Authenticate with an
+existing fingerprint or your password; only then does deletion take the reader.
+Cancelling that dialog leaves the fingerprint unchanged.
+
 Fingerprint names are five neutral slots: `Finger 1` through `Finger 5`. They
 do not claim which physical finger you used. Deleting one slot never renumbers
 the others; the next successful enrollment takes the lowest vacant slot. An

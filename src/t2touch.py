@@ -15,6 +15,7 @@ from pathlib import Path
 
 CONFIG = Path("/etc/t2-touchid.conf")
 ENROLL = Path("/usr/local/sbin/t2-fprintd-enroll-tui-launch")
+DELETE = Path("/usr/local/sbin/t2-touchid-delete")
 FINGER = re.compile(r"finger-[1-5]")
 
 
@@ -108,7 +109,7 @@ def delete(user: str, finger: str) -> int:
     if FINGER.fullmatch(finger) is None:
         raise T2TouchError("fingerprint must be named Finger N, for example finger-2")
     return subprocess.run(
-        ["/usr/bin/fprintd-delete", user, "-f", finger], check=False
+        ["/usr/bin/pkexec", str(DELETE), finger], check=False
     ).returncode
 
 
