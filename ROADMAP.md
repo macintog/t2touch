@@ -1,7 +1,7 @@
 # Product roadmap
 
 t2touch is an experimental Omarchy integration validated on one MacBookPro16,1.
-See the [validation record](docs/RELEASE.md) for the scope of that evidence.
+The [README](README.md#what-has-been-proven) describes the tested scope.
 
 ## Implemented
 

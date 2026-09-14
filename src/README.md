@@ -1214,9 +1214,9 @@ research drop-ins are retained only as historical staging artifacts.
 
 ## Multi-user policy and broker (non-exposed)
 
-None of this is reachable on an installed system. See
-[`../docs/DEVELOPMENT_STATUS.md`](../docs/DEVELOPMENT_STATUS.md) for what gates
-each piece.
+The mapped-user broker is not exposed by the installed service. Its internal
+components and authorization boundaries are described below; they do not enable
+multi-user Touch ID.
 
 ### Mapping, account evidence, and administration
 

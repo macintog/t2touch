@@ -22,7 +22,7 @@ T1 backend is recorded in [`../docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md)
 ## Current achieved boundary
 
 The product-boundary correction and completed outcome are summarized in the
-[integration follow-up](../docs/research/integration-followup.md). D220–D228's
+[integration contracts](../docs/research/integration-contracts.md). D220–D228's
 macOS-state recovery is superseded. Native research proof below remains valid,
 but archived working identities cannot seed the new installed demonstration.
 Fresh creation, first enrollment, standard service use, automatic reactivation

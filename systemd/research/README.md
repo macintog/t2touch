@@ -4,9 +4,9 @@ These units are design artifacts for the future mapped-user broker. They are
 not copied by `install.sh`, contain no `[Install]` section, and must not be
 manually installed or started yet.
 
-See [`../../docs/DEVELOPMENT_STATUS.md`](../../docs/DEVELOPMENT_STATUS.md) for
-the surrounding non-exposed components and the gates that must pass before any
-of this is installed.
+See the [broker reference](../../src/README.md#multi-user-policy-and-broker-non-exposed)
+for the surrounding components. These units are not part of the supported
+installation.
 
 `t2-touchid-user-broker.socket` uses `ListenSequentialPacket=` with
 `Accept=yes`, so systemd accepts one connection and passes only that connected

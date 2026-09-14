@@ -14,44 +14,21 @@ work from this project's native activation and enrollment contribution.
 
 Upstream: <https://github.com/standardagents/t1bridge>
 
-Baseline reviewed here: commit
-[`7003b8d`](https://github.com/standardagents/t1bridge/tree/7003b8d)
-(`main`, reviewed 2026-09-06). The 2026-09-12 daily check found current `main`
-at `02885e4b3c51bc7ae609681495b5b22dd0f529ae`, with signed release `v0.1.9`
-at `379f65310bc27059c923da0da6b86fa7a6e6d4f1`. Since the prior check, upstream
-added recovery when enrollment finds a stopped failed keybag relay, complete
-signed-repository publication staging, redacted relay diagnostics, ambient-
-light integration, and reporting of SEP cleanup failure alongside an original
-operation error. It did not change the saved-user-secret construction,
-operation-`0x21` activation layout, Catacomb transaction, or fingerprint wire
-protocol. The relay recovery is an **adapt-now** input for standard T2 service
-integration; D178-D218 have since closed the native activation and enrollment
-discriminators. The explicit dual operation/cleanup
-error is already the required failure shape of the T2 ACM lifecycle and is
-retained as a comparison check, not copied code. At the beginning of work on
-this project, check upstream at most once per calendar day before relying on
-behavior that may have changed, and record the newer commit and relevant diff.
-An optional local checkout is a convenience, never a runtime or build
-dependency.
-
-The 2026-09-13 21-source check found no changed tracked source. D207 separately
-re-read pinned commit `7003b8d9f791` for its minimum-prefix enrollment witness
-and fresh identity-list rule; D218 adapted that ordering and proved it on T2
-without adopting T1 payloads or transport.
+The comparisons below are pinned to
+[`7003b8d9f791`](https://github.com/standardagents/t1bridge/tree/7003b8d9f791)
+and, where identified,
+[`02885e4b3c51`](https://github.com/standardagents/t1bridge/tree/02885e4b3c51bc7ae609681495b5b22dd0f529ae).
+They describe those source versions, not a claim about the latest release.
+T1Bridge is not a runtime or build dependency of t2touch.
 
 ## Evidence boundary
 
-T1Bridge is implementation evidence and limited hardware evidence, not proof
-that T1 and T2 are interchangeable. Its public release reports working Touch ID
-on two MacBookPro13,3 machines, while its detailed fresh-install and complete
-published-package operation matrix remains open. One MacBookPro14,3 enrollment
-failure is also undiagnosed. Its release checklist says the complete
-source/history provenance review remains pending. Inspect and attribute code
-before adapting it; do not treat the squashed public history as provenance
-proof.
-
-Both projects are GPL-2.0-only, but license compatibility does not remove the
-need to preserve applicable notices and identify adapted code.
+T1Bridge is comparison evidence, not proof that T1 and T2 are interchangeable.
+The pinned sources use the
+[MIT license](https://github.com/standardagents/t1bridge/blob/02885e4b3c51bc7ae609681495b5b22dd0f529ae/LICENSE);
+t2touch's integration is GPL-2.0-only. Preserve the applicable notices and
+identify any adapted code. Similar names and opcodes do not establish matching
+payloads, credentials, transport lifetimes, or hardware behavior.
 
 ## What the projects demonstrably share
 
@@ -105,14 +82,13 @@ minimal Enrollment/Retry/Success vocabulary, backend-owned progress, automatic
 activation for an authorized operation, and cosmetic failure isolation. Its
 standard overlay is activated inside an already user-initiated request; it is
 not evidence that an unattended caller may consume Mesa's first-touch window.
-D192 adapts those product invariants without copying the beta implementation
-blindly. T2 keeps progress monotonic if the backend regresses, preserves an
+T2 adapts the event-driven capture model. It keeps progress monotonic if the
+backend regresses, preserves an
 explicit Q/Escape enrollment cancellation path, and adds accessible textual
 brief-touch/lift guidance that distinguishes presence from accepted progress.
-The D191 hardware trace and operator observation establish that sensor contact
-is a fraction-of-a-second touch, never a sustained hold: status 63 must cue an
+T2 sensor contact is a brief touch, not a sustained hold: status 63 must cue an
 immediate lift while still leaving progress unchanged.
-During bring-up, T2 deliberately does not adopt cosmetic-failure independence:
+T2 does not adopt cosmetic-failure independence:
 losing safety-critical capture guidance remains a fail-closed outcome.
 T1Bridge `02885e4` also sends best-effort cancel after a start may have reached
 Mesa and after every later primary failure, without replacing the primary
@@ -182,52 +158,28 @@ its descriptor, poison, and reboot-only replacement rules.
 
 ### Persisted identity activation
 
-T1Bridge correctly establishes the high-level lifetime used after reboot:
-load the saved user blob, retain its positive handle, bind/promote the user
-alias, resolve state, unlock, and then release the handle. T2 D160/D161 hardware
-results confirm that skipping the reload/rebind sequence fails, while also
-showing that the raw T1 unlock credential itself is not portable. D190/D191
-further confirm that a clean reboot may leave the negative alias absent: this
-is an instruction to perform the same load/rebind lifetime, not a quarantine
-condition or reason to require the alias before positive-handle load.
+T1Bridge uses a saved-user-blob lifecycle: load the blob, retain its positive
+handle, bind/promote the user alias, resolve state, unlock, and release the
+handle. T2 also needs a fresh load/bind lifetime; an absent negative alias after
+boot does not by itself imply corrupt saved state.
 
-T1Bridge persists a separate random 32-byte user secret beside its blob and
-uses it to verify the promoted biometric keybag into a fresh ACM context. Its
-enrollment path then installs a passphrase credential, proves the enrollment
-policy against the live keybag UUID, and lends that authorized external form
-to Mesa. The D137 T2 request-10 identity instead stores only the exported
-keybag, but D163 proves its transient type-5 *creation* context is not by itself
-a valid operation-`0x18` login credential. D166 recovers the missing portable
-distinction from the exact T2 identity verifier: option `0x100` interprets its
-secret field as an ACM reference containing type-5 password data, verifies the
-extracted password against the simultaneously owned positive handle, and adds
-the validated keybag credential to its optional authorization context. D167's
-hardware result falsified using one reference for both roles. D168 separated
-them but destroyed the input context before verification; SEP status `-1`
-proved that the external form did not survive that deletion. D169 keeps the
-input live while creating a distinct policy-1007 target. The verifier reads the
-first and authorizes the second; only that target is policy-checked and consumed
-against the bound negative alias, then both contexts are destroyed in reverse
-order.
+The credential representations differ. T1Bridge persists a separate random
+32-byte user secret. T2 preserves the 16-byte creation-time ACM external form,
+then installs those bytes as type-5 data in a fresh live input context. AKS
+option `0x100` extracts that input and verifies it against the owned positive
+handle. The verifier authorizes a distinct `TouchIdEnrollment` target context.
+Both contexts must remain alive while the original input reference is used for
+T2 operation `0x18`; deleting the input or substituting the target reference
+changes the credential contract.
 
-Decision: **adapt** T1Bridge's load/bind/resolve/unlock/release lifetime.
-Also **adapt** its distinction between keybag-creation material and an
-authorized enrollment credential. The exact random 32-byte value, T1 payloads,
-and USB transport remain **rejected** as T2 authority. The separate persisted-
-secret concept is now **adapted as a lifecycle requirement**: matching T2 SEP
-code proves D137 derived its verifier from the raw creation-time external
-reference, while D170 reconstructed the inner password. The T2 plan selects
-its own exact mechanism: persist the creation-time 16-byte external form, then
-install those bytes as type-5 data in a fresh live input context so normal
-identity option `0x100` extracts the original KDF input. This is not T1's
-32-byte secret or wire format. The fixed T2 `0x18` codec, operation-`0x21`
-positive-load-handle binding, one-shot rule, independent read-back, and
-immediate cleanup remain authoritative here.
+Reuse the load/bind/resolve/unlock/release lifetime and the distinction between
+creation material and enrollment authorization. Do not copy T1's secret size,
+payloads, or USB transport. The T2 derivation and request sequence are detailed
+in [identity and authorization](research/identity-and-authorization.md).
 
 ### Standard fingerprint integration
 
-This is the largest solved product gap relative to this repository. T1Bridge
-implements a root broker protocol and a libfprint driver for capabilities,
+T1Bridge implements a root broker protocol and a libfprint driver for capabilities,
 open, list, enroll, verify, identify, delete, progress, cancellation, and typed
 terminal results. A committed metadata catalog maps standard finger labels to
 opaque Mesa identities, retains unlabeled legacy identities as hidden recovery
@@ -262,12 +214,11 @@ authority; a T1 configuration-selector rebind is not a T2 recovery action.
 
 ### Services, PAM, and packaging
 
-T1Bridge provides a useful next-stage product layout: minimal privileged
-services, socket activation, explicit readiness dependencies, dynamic udev
-discovery, DKMS packaging, a read-only status command, ordinary `pam_fprintd`,
-and password fallback. E4, positive/negative controls, and continuous
-additional enrollment are now complete, so these should inform the next T2
-integration while unproven services remain disabled in the research boot.
+T1Bridge separates privileged services, socket activation, readiness,
+udev discovery, DKMS packaging, status reporting, and PAM fallback. These are
+useful design comparisons. t2touch already installs its own native service
+chain and PAM integration; its [architecture](ARCHITECTURE.md) describes the
+actual T2 dependencies.
 
 References:
 [`systemd/`](https://github.com/standardagents/t1bridge/tree/7003b8d/systemd),
@@ -287,20 +238,13 @@ Do not use T1Bridge as authority for:
 - a clean-wipe claim without imported Apple state. T1Bridge requires preserved
   machine-specific EFI/FDR data, whereas the T2 target deliberately does not.
 
-T1Bridge also does not solve suspend/resume; both projects currently fail
-closed and use reboot as the known recovery boundary.
+The referenced T1 lifecycle does not establish T2 suspend/resume behavior.
+T2 sleep and recovery limits are documented in [Troubleshooting](TROUBLESHOOTING.md).
 
-## Required reuse workflow
+## Comparing a new implementation
 
-Before implementing or substantially revising a covered layer:
-
-1. Identify the matching T1Bridge source above and inspect it at the recorded
-   commit or a newly recorded upstream commit.
-2. Compare contracts and failure behavior, not only names or command numbers.
-3. Classify the relevant approach as **adopt**, **adapt**, or **reject**.
-4. Record the classification and the T2-specific reason in the change, research
-   log, or decision record. A rejection needs evidence, not preference.
-5. Preserve attribution and licensing for adapted code.
-
-This review is not a new hardware gate and does not justify speculative ports.
-It is a bounded design check intended to prevent duplicate implementation work.
+Inspect the relevant source at a pinned commit, compare its contracts and
+failure behavior, and explain which parts transfer to T2. Preserve attribution
+for adapted code and validate differences in credentials, framing, ownership,
+and persistence independently. A useful reference does not remove the need for
+T2-specific evidence.

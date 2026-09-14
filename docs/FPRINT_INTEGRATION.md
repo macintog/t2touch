@@ -19,7 +19,7 @@ interface.
 - [Mutation worker boundary](#mutation-worker-boundary)
 - [Enrollment status translation](#enrollment-status-translation)
 - [Deletion policy](#deletion-policy)
-- [Delivery status](#delivery-status)
+- [Authentication semantics](#authentication-semantics)
 - [Support limits](#support-limits)
 
 ## Implemented verification boundary
@@ -240,8 +240,8 @@ errno or child exit status when available. Raw stderr, paths, identifiers, and
 payloads are not copied into the service journal. The service still exits
 nonzero, so the existing fprintd dependency gate is unchanged.
 
-The audited service boundaries are summarized in
-[`SERVICE_INTERFACE_AUDIT.md`](SERVICE_INTERFACE_AUDIT.md).
+The service layers and their ownership are summarized in
+[architecture](ARCHITECTURE.md).
 
 ## Enrollment status translation
 
@@ -391,26 +391,13 @@ enrollment boundary.
 and the separate enrollment flag; each path still requires its own transient
 worker, caller binding, and journaled reconciliation.
 
-Both hardened transient launchers explicitly set the root-owned installed
-module path `/opt/t2-touchid/src` and execute their entry points with the
-installed `/opt/t2-touchid/.venv/bin/python`. This is part of the packaging
-contract, not caller-controlled state: omitting the module path caused the
-first standard enrollment request to stop before physical readiness, while an
-installed smoke gate then proved that the system interpreter also lacks the
-required `dbus_next` package. The enrollment and deletion launcher contracts
-pin both dependencies so an installed daemon cannot pass its preflight and
-then fail only after transient-service dispatch.
+Both transient launchers use the root-owned installed module path
+`/opt/t2-touchid/src` and interpreter `/opt/t2-touchid/.venv/bin/python`.
+Those paths are fixed by packaging, not supplied by the caller.
 
-The worker's kernel-pinned caller liveness check uses nonblocking pidfd polling,
-not `pidfd_send_signal(pidfd, 0)`. The latter is signal-permission-gated across
-UIDs and caused the installed hardened root worker to stop at `pin-caller` with
-`IPCSessionError`/`PermissionError` before sensor readiness. Granting
-`CAP_KILL` merely to ask whether the caller exited would unnecessarily broaden
-the worker. A pidfd becomes readable when its process exits, so polling retains
-the same race-resistant liveness decision without signal authority; the worker
-still revalidates PID, UID, start time, session, account, and PolicyKit state.
-The initially suspected `CAP_SYS_PTRACE` addition did not change the failure
-and was removed from both enrollment and deletion workers.
+Caller liveness uses nonblocking pidfd polling. A pidfd becomes readable when
+its process exits, so the worker can detect exit without signal authority.
+It also revalidates PID, UID, start time, session, account, and PolicyKit state.
 
 The installed enrollment TUI is a direct D-Bus client. It owns its claim and
 operation, handles service-owner loss, and takes touch/lift cues from live
@@ -424,13 +411,9 @@ would create a partially deleted set with unclear client semantics. Keep
 an explicit batch journal and deterministic recovery. Support for deleting the
 final named identity does not establish an atomic batch-delete contract.
 
-## Delivery status
+## Authentication semantics
 
-The reference-machine gates for caller binding and pre-dispatch denial,
-cancellation/recovery, first and additional enrollment, fresh list/verify,
-reboot persistence, named deletion with survivor or clean-empty proof,
-unattended startup, sudo/PAM fingerprint success, and password fallback have
-passed. Authentication is deliberately set-wide: a client-supplied numbered
+Authentication is deliberately set-wide: a client-supplied numbered
 handle is presentation syntax and must exist, but any enrolled fingerprint can
 satisfy the verification transaction. The facade reports the actual matched
 neutral handle without treating the requested label as an anatomical or
@@ -441,5 +424,5 @@ origin-specific restriction.
 The installed native lifecycle is proven on the reference machine. Batch
 deletion remains disabled; named final-fingerprint deletion is supported.
 Broader hardware coverage, multi-user operation, deep sleep, and cross-macOS
-persistence remain unproven. See the [validation record](RELEASE.md) for the
-specific installation paths exercised.
+persistence remain unproven. The [README](../README.md#what-has-been-proven)
+describes the supported installation path and tested scope.
