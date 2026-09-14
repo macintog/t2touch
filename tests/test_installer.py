@@ -23,7 +23,11 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(stage_call, installer)
         self.assertLess(installer.index(stage_call), installer.index(first_product_write))
         self.assertIn("/usr/src/$package_name-$package_version", installer)
-        self.assertIn("mkinitcpio -P", installer)
+        self.assertGreaterEqual(installer.count("mkinitcpio -P"), 2)
+        self.assertLess(
+            installer.index("/etc/modprobe.d/t2-sep-boot-state.conf\nchmod"),
+            installer.rindex("mkinitcpio -P"),
+        )
         self.assertIn(
             "dkms remove -m applesmc-t2touch -v 0.1.0 --all",
             uninstaller,

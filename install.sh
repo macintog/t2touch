@@ -484,6 +484,10 @@ chmod 0644 /etc/modprobe.d/t2-sep-transport.conf
   printf 'softdep t2_sep_transport pre: applesmc\n'
 } >/etc/modprobe.d/t2-sep-boot-state.conf
 chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf
+# Persist both the selected applesmc module and its boot-state options. This is
+# required even when the running module was already capable: uninstall may have
+# rebuilt the image without this product-owned configuration.
+mkinitcpio -P
 
 install -d -o "$target_user" -g "$target_user" -m 0755 "$target_home/.config/systemd/user"
 install -o "$target_user" -g "$target_user" -m 0644 \
