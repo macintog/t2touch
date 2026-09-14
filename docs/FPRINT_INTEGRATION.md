@@ -1,8 +1,8 @@
 # Proper fprint integration design
 
 This document records the implemented boundary between the proven T2 mutation
-brokers and the standard fprint D-Bus API, plus the remaining installed-machine
-release controls. It is deliberately stricter than a subprocess wrapper:
+brokers and the standard fprint D-Bus API, including installed service contracts.
+It is deliberately stricter than a subprocess wrapper:
 `fprintd` is privileged, so forwarding a label or username from D-Bus directly
 to a root command would lose the caller identity and turn presentation data
 into authority.
@@ -20,7 +20,7 @@ interface.
 - [Enrollment status translation](#enrollment-status-translation)
 - [Deletion policy](#deletion-policy)
 - [Delivery status](#delivery-status)
-- [Release expansion](#release-expansion)
+- [Support limits](#support-limits)
 
 ## Implemented verification boundary
 
@@ -349,20 +349,18 @@ cooperative cancel predicate and wait for its reconciled terminal result; they
 never kill the worker thread or replay a command. Worker, feedback, or result
 failures terminate as `enroll-unknown-error`.
 
-After an immediate E3 success, E4 still requires a reboot. The boot-time
-authority dispatcher completes that proof automatically when every binding and
-digest reproduces exactly. Failure remains visible in its private
-systemd journal and leaves the blocking E3 journal untouched; desktop-visible
-failure feedback remains best-effort. The installed automatic path and its
-standard-client enrollment, deletion, rename, and survivor controls passed on
-the reference machine.
+The installed first-enrollment path completes persistence, fresh-owner
+verification, and authority publication before returning success in the current
+session. Historical E3/E4 records include different-boot proof; boot-time
+reconciliation remains available for eligible journals and subsequent starts.
+A proof failure leaves the operation blocked and visible in the private journal.
 
 ## Deletion policy
 
 The installed facade exposes `DeleteEnrolledFinger` through its injected
 credential-free worker client. It binds the method to the exact claim owner,
 rejects `any`, requires a fresh complete projection and an enrolled canonical
-name, refuses the final remaining identity, and keeps
+name, permits the final named identity to reconcile an empty inventory, and keeps
 verification/enrollment/deletion mutually exclusive. Release or D-Bus peer loss
 waits for deletion reconciliation; it never cancels and replays an ambiguous
 command. Success requires an exact typed result proving the named mutation
@@ -414,26 +412,23 @@ still revalidates PID, UID, start time, session, account, and PolicyKit state.
 The initially suspected `CAP_SYS_PTRACE` addition did not change the failure
 and was removed from both enrollment and deletion workers.
 
-The companion enrollment TUI is presentation only; `/usr/bin/fprintd-enroll`
-still owns the standard D-Bus request. It adapts T1Bridge's compact Apple-like
-overlay style while deriving touch and lift cues solely from the facade's live
-`finger-needed` and `finger-present` properties. Its percentage bar consumes
-the native backend's monotonic `t2-enroll-progress` property, not a fixed
-capture count. Retry and terminal results are explicit, and raw client output
-is not rendered. The alternate-screen terminal remains on its final result
-until closed, rather than returning to a held shell prompt.
+The installed enrollment TUI is a direct D-Bus client. It owns its claim and
+operation, handles service-owner loss, and takes touch/lift cues from live
+`finger-needed` and `finger-present` properties. Its progress display follows
+`t2-enroll-progress`; it does not infer progress from a fixed capture count.
+Standard fprintd clients independently exercise the same service boundary.
 
 Do not implement bulk deletion as a loop over the single-delete API. A crash
 would create a partially deleted set with unclear client semantics. Keep
 `DeleteEnrolledFingers` and `DeleteEnrolledFingers2` fail-closed until there is
-an explicit batch journal, deterministic recovery, and a tested policy for the
-last remaining identity.
+an explicit batch journal and deterministic recovery. Support for deleting the
+final named identity does not establish an atomic batch-delete contract.
 
 ## Delivery status
 
 The reference-machine gates for caller binding and pre-dispatch denial,
 cancellation/recovery, first and additional enrollment, fresh list/verify,
-reboot persistence, selected non-final deletion with survivor proof,
+reboot persistence, named deletion with survivor or clean-empty proof,
 unattended startup, sudo/PAM fingerprint success, and password fallback have
 passed. Authentication is deliberately set-wide: a client-supplied numbered
 handle is presentation syntax and must exist, but any enrolled fingerprint can
@@ -441,10 +436,10 @@ satisfy the verification transaction. The facade reports the actual matched
 neutral handle without treating the requested label as an anatomical or
 origin-specific restriction.
 
-## Release expansion
+## Support limits
 
-The reference-machine greenfield acceptance sequence is complete. Keep batch
-and final-identity deletion disabled until they have a separate atomic journal
-and recovery design. Remaining work is release engineering: broader hardware
-coverage, review of the complete patch against upstream, and packaging/CI—not
-another fingerprint enrollment on this machine.
+The installed native lifecycle is proven on the reference machine. Batch
+deletion remains disabled; named final-fingerprint deletion is supported.
+Broader hardware coverage, multi-user operation, deep sleep, and cross-macOS
+persistence remain unproven. See the [validation record](RELEASE.md) for the
+specific installation paths exercised.

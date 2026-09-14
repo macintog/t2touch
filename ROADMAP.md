@@ -1,26 +1,30 @@
 # Product roadmap
 
-t2touch is a working single-machine proof of concept. The next work is about
-making the supported user experience broader and easier to distribute.
+t2touch is an experimental Omarchy integration validated on one MacBookPro16,1.
+See the [validation record](docs/RELEASE.md) for the scope of that evidence.
 
-## v0.1
+## Implemented
 
-- [x] One-command Omarchy dependency and system installation
-- [x] Automatic T2 interface detection and encrypted Linux-owned authority setup
-- [x] Enrollment through the polished `t2touch enroll` terminal UI
-- [x] Immediate use through fprintd, sudo, PolicyKit, and the Omarchy lock screen
-- [x] Neutral `Finger N` slots with origin-independent verification and deletion
-- [x] Password fallback and reversible PAM installation
-- [x] Same-session upgrades and uninstall without a reboot
-- [ ] Complete the release test, privacy, and documentation gates
-- [ ] Publish experimental GitHub releases for t2touch and t2touch-mini
+- Omarchy dependency installation, T2 interface detection, and Linux-owned authority setup.
+- Packaged applesmc boot-state prerequisite for kernels that lack the publisher.
+- Percentage-driven enrollment through `t2touch enroll` and standard fprintd clients.
+- Any-enrolled-finger authentication through fprintd, sudo, PolicyKit, and the lock screen.
+- Five stable neutral slots, lowest-vacancy allocation, and named deletion through an empty inventory.
+- Password fallback, reversible PAM installation, and private-state preservation on uninstall.
+- Same-session userspace reinstall when the resident transport matches.
 
-## Next
+The applesmc prerequisite needs one restart when absent. A different resident
+transport requires a planned kernel restart before installation can proceed.
 
-- Validate and document more Intel T2 Mac models.
-- Package t2touch so users do not need a source checkout.
-- Add a guided compatibility importer for machines retaining macOS Touch ID state.
-- Preserve Linux-only additions across a later macOS boot.
-- Support multiple Linux desktop users.
-- Integrate enrollment into graphical desktop settings while retaining the TUI.
-- Validate future `linux-t2` kernel upgrades through DKMS CI and real hardware.
+## Support gaps
+
+- Validation on additional Intel T2 Mac models and bridgeOS versions.
+- Distribution packages that do not require a source checkout.
+- A guided importer for machines retaining macOS Touch ID state.
+- Persistence of Linux-only additions across a later macOS boot.
+- Multiple Linux desktop users.
+- Graphical settings integration and deep-sleep recovery.
+- Kernel-upgrade coverage through DKMS CI and real hardware.
+
+Batch delete-all and private-state purge are not exposed. Broader support or a
+release tag does not follow from the single-machine demonstration alone.

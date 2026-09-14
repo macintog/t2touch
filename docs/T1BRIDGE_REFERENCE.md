@@ -143,7 +143,7 @@ protocol, and the facade exposes it through the additive
 directly; it does not derive a percentage from a fixed capture count. It
 **retains** T2's event-authoritative brief-touch and immediate-
 lift cues, audible actionable transitions, terminal fail-closed state, and
-standard `fprintd-enroll` ownership. It **rejects** the T1 Touch Bar framebuffer,
+the standard fprintd service boundary through its direct D-Bus client. It **rejects** the T1 Touch Bar framebuffer,
 Inter raster masks, touch gestures/cancellation, T1 protocol payloads, and
 cosmetic-failure isolation. No T1Bridge source is a runtime dependency.
 

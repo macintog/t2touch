@@ -1,44 +1,36 @@
-# Experimental release checklist
+# Validation record
 
-## Product contract
+This record describes completed checks and their limits. It is not a release
+queue or an instruction to repeat hardware operations.
 
-- [ ] A fresh supported Omarchy installation completes `./install-omarchy.sh`
-      without a reboot or manual service sequencing.
-- [x] `t2touch enroll` shows the polished percentage-driven TUI and creates the
-      lowest vacant slot among neutral `Finger 1` through `Finger 5`, without
-      renumbering existing slots.
-- [x] That fingerprint immediately authenticates through fprintd, sudo,
-      graphical PolicyKit, and the Omarchy lock screen.
-- [x] Any enrolled fingerprint works; supported named deletion, including the
-      final named slot, completes in the running system.
-- [x] Password fallback remains available.
-- [x] Reinstall updates userspace in the running session when the resident
-      transport matches; a changed transport is staged only across a planned
-      kernel restart because SEP pins its PCI/DMA owner.
-- [x] Uninstall restores PAM, disables future transport startup, stops the
-      userspace integration, and preserves private state for a later reinstall;
-      a transport already pinned by SEP remains safely resident until the next
-      ordinary power cycle.
+## Product behavior
 
-## Release validation
+Enrollment, named deletion through an empty inventory, password fallback, and
+matching-transport userspace reinstall were demonstrated on MacBookPro16,1.
+The installed TUI allocates the lowest vacant slot among Finger 1 through
+Finger 5 and never renumbers survivors. Enrolled fingerprints immediately work
+through fprintd, sudo, graphical PolicyKit, and the Omarchy lock screen.
 
-- [x] Targeted product tests pass (130 focused deletion-path tests).
-- [x] Full Python test suite passes (1,173 tests, one intentional skip).
-- [x] ShellCheck passes installed shell scripts.
-- [x] Userspace tools and the DKMS module build without warnings.
-- [x] Privacy checks find no private biometric identifiers, keybags, credentials,
-      machine-local paths, or private media.
-- [x] The installed doctor reports no unexpected failure on the reference Mac.
-- [x] The README commands and support limits match the shipped behavior.
+A kernel without the typed applesmc boot-state publisher needs the included
+DKMS prerequisite and one restart before installation completes. A different
+or unidentified resident T2 transport stops installation before installed-state
+changes. The installer does not unload SEP-pinned DMA or reboot the machine.
 
-## Outstanding acceptance gate
+Uninstall restores PAM, stops userspace, disables future transport startup,
+and preserves private state. A pinned live transport remains resident until
+the next ordinary kernel start.
 
-The repository now supplies a package-managed DKMS replacement when the
-ordinary `linux-t2` package lacks the required typed `applesmc` SEP boot-state
-publisher. The remaining release gate is to repeat the exact public quick start
-from a clean, fully updated supported Omarchy volume. This is an acceptance
-gate, not a reason to weaken the live-driver check or add manual service
-sequencing.
+## Recorded validation
+
+The integrated lifecycle review recorded 130 focused deletion-path tests and
+1,173 full Python tests with one intentional skip, ShellCheck for installed
+scripts, warning-free userspace and DKMS builds, privacy checks, and a passing
+installed doctor. These are results for that source generation, not an assertion
+that every later revision reran those checks.
+
+Clean-volume first activation of the packaged applesmc prerequisite has not
+been demonstrated by the acceptance runs below. The reference machine already
+had a capable live driver. Broader hardware coverage remains unproven.
 
 ## Updated reference-machine acceptance — 2026-09-14
 
@@ -56,7 +48,7 @@ The included applesmc source applies to the current public
 expected `updates/dkms/applesmc.ko` with all three typed boot-state parameters,
 and an isolated DKMS removal removed that module while preserving source. The
 reference system already boots a capable applesmc, so this run did not replace
-its live driver or claim the still-pending clean-volume first activation.
+its live driver or claim clean-volume first activation.
 
 ## Uninstall and reinstall acceptance — 2026-09-14
 
@@ -77,10 +69,3 @@ transport installed for the running kernel, the doctor passed every check,
 fprintd reported an enrollable empty inventory, and every mutation queue was
 empty and unblocked. No reboot, password entry, manual service sequencing, or
 fingerprint operation was used.
-
-## Publication
-
-- [x] Review the final diff, privacy boundary, and licenses.
-- [ ] Push t2touch and t2touch-mini to their public GitHub repositories.
-- [ ] Tag `v0.1.0`.
-- [ ] Mark both releases experimental and name the hardware model actually tested.

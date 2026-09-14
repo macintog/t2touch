@@ -1,5 +1,11 @@
 # Linux bring-up troubleshooting
 
+These procedures describe earlier low-level and compatibility bring-up. For
+the installed Linux-native product, start with [the README](../README.md) and
+`t2-touchid-doctor`; manual keybag loading and service sequencing are not normal
+installation steps. Apply a procedure only to its matching failure and authority
+mode. The current installer supplies the applesmc prerequisite when absent.
+
 This guide records a successful manual bring-up on a MacBookPro15,2 running
 Omarchy, `linux-t2` 6.19.11, bridgeOS 23P350, and fprintd 1.94.5. Both an
 enrolled-finger `verify-match` and an unenrolled-finger `verify-no-match` were

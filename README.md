@@ -72,8 +72,7 @@ fprintd starts.
 ## Requirements
 
 - An Intel Mac with an Apple T2 chip
-- Omarchy with the T2 Linux kernel and matching headers
-- A T2 kernel and matching headers. The installer supplies a DKMS build of the
+- Omarchy with the T2 Linux kernel and matching headers. The installer supplies a DKMS build of the
   typed `applesmc` SEP boot-state publisher from
   [`linux_native/patches/applesmc-t2-sep-boot-state.patch`](linux_native/patches/applesmc-t2-sep-boot-state.patch).
   It is used only when the running kernel does not already provide that
@@ -116,6 +115,9 @@ macOS removes the sole remaining fingerprint, Linux automatically discards its
 stale local inventory entry and permits a new `t2touch enroll`; it does not
 restore or replace the fingerprint macOS removed. This does not affect
 Linux-only systems.
+
+See the [documentation index](docs/README.md) for service contracts, research,
+and recorded validation.
 
 ## Troubleshooting
 

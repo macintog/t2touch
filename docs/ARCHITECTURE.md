@@ -14,8 +14,12 @@ install in the current session
   -> verify or delete through ordinary fprintd semantics
 ```
 
-No normal install, enrollment, deletion, upgrade, or uninstall operation
-requires a reboot.
+Enrollment, named deletion, uninstall, and a matching-transport userspace
+reinstall complete in the current session. A missing applesmc boot-state
+publisher requires the packaged prerequisite and one restart before installation
+can complete. A different or unidentified resident transport stops installation
+before installed-state changes; changing transports requires a planned kernel
+restart. See [installation](../README.md#requirements).
 
 ## Runtime layers
 
@@ -72,9 +76,10 @@ authentication, regardless of whether it was imported or enrolled on Linux.
 The service loader owns transport configuration. During install or upgrade it
 keeps a matching live transport bound, restarts this product's userspace
 service chain, and starts fprintd again in the same running system. SEP retains
-the transport's registered DMA addresses, so a changed kernel module is staged
-for the next planned kernel restart rather than unsafely unbound. Uninstall
-stops userspace while leaving a pinned live transport safely resident.
+the transport's registered DMA addresses, so the installer rejects a different
+or unidentified resident module before changing installed state. A transport
+change must use a planned kernel restart. Uninstall stops userspace while
+leaving a pinned live transport safely resident.
 
 Ambiguous transport failures fail closed. They are reported by
 `t2-touchid-doctor`; they are not converted into a successful authentication
@@ -88,10 +93,10 @@ journals, and runtime authority. The encrypted first-run credential lives in
 the systemd credential store. Volatile locks, sockets, and readiness state live
 under `/run/t2-touchid` and are never treated as durable authority.
 
-Uninstall preserves private state for reinstall. The proof of concept does not
-expose Linux-initiated final-identity deletion or a private-state purge. A
-stable external deletion of the sole identity is handled separately: the
-startup reconciler commits an empty Linux projection before fprintd starts,
+Uninstall preserves private state for reinstall. Named deletion supports the
+final fingerprint and reconciles a clean, enrollable empty inventory. Batch
+delete-all and private-state purge are not exposed. A stable external deletion
+of the sole identity is handled separately: the startup reconciler commits an empty Linux projection before fprintd starts,
 without issuing an SEP deletion or restoring the removed identity. The next
 enrollment reuses that empty authority and persists a fresh one-identity
 generation.

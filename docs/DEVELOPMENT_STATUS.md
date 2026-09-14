@@ -1,4 +1,4 @@
-# Development status: internals and product gates
+# Internal components and research interfaces
 
 This document describes both internal research components and the product paths
 now connected to the installed service. Standard verification, enrollment, and
@@ -6,15 +6,10 @@ named single-deletion are exposed through the fprint facade; multi-user
 operation and the separately identified research transports remain unexposed.
 Each section states its own boundary.
 
-For the evidence-based checklist and the order in which this work resumes, see
-[`../ROADMAP.md`](../ROADMAP.md). For the caller, authorization, cancellation,
-recovery, and D-Bus lifecycle required before native `fprintd` enrollment or
-deletion can be exposed, see
-[`FPRINT_INTEGRATION.md`](FPRINT_INTEGRATION.md).
-
-The terms *operation lock*, *mutation journal*, *post-reboot proof*,
-*generation pinning*, and *compatibility alias* are defined in the README's
-Concepts section.
+For current support gaps, see the [roadmap](../ROADMAP.md). For the installed
+caller, authorization, cancellation, recovery, and D-Bus contracts, see
+[fprintd integration](FPRINT_INTEGRATION.md) and
+[architecture](ARCHITECTURE.md).
 
 ## Contents
 
@@ -26,8 +21,8 @@ Concepts section.
 - [Socket-activation adapter and client core](#socket-activation-adapter-and-client-core)
 - [Candidate systemd units](#candidate-systemd-units)
 - [Keybag activation core](#keybag-activation-core)
-- [Native fprintd enrollment and deletion staging](#native-fprintd-enrollment-and-deletion-staging)
-- [Endpoint-10 / ACM research transport](#endpoint-10--acm-research-transport)
+- [Native fprintd enrollment and deletion integration](#native-fprintd-enrollment-and-deletion-integration)
+- [Endpoint-10 / ACM transport](#endpoint-10--acm-transport)
 - [Staging gates](#staging-gates)
 
 ## Multi-user mapping
@@ -234,8 +229,9 @@ fingerprint-survivor, mapping, and negative-caller gates all pass.
 
 ## Keybag activation core
 
-The activation core is implemented behind injected interfaces only. It durably
-records load intent before obtaining a temporary handle, verifies that handle's
+The mapped-user research activation core is implemented behind injected
+interfaces only. It is distinct from the installed Linux-native first-run and
+activation-bundle path. It durably records load intent before obtaining a temporary handle, verifies that handle's
 independently observed bag UUID, records bind intent before selecting the
 derived alias, re-reads the alias regardless of the command return, and records
 unlock intent before using a wipeable password buffer. It trusts only the final
@@ -272,22 +268,21 @@ worker clients. `src/t2_fprint_delete_worker.py` is the credential-free,
 caller-pidfd-bound transient worker for exact-name `delete-one`; native
 enrollment and deletion both retain their distinct worker protocols.
 
-The staged native `EnrollStart` path refuses to run until the canonical fprint
-projection is complete, and refuses a canonical name already present in it.
-This prevents standard fprint clients from compounding ambiguous or duplicate
-labels before the mutation worker starts. The transient worker independently
-repeats that same rule against its own fresh reconciled inventory while holding
-the machine-wide operation lock, before recovery anchoring, ACM, journaling, or
-SEP dispatch.
+The installed `EnrollStart` path accepts neutral numbered syntax and legacy
+stock-client anatomy tokens without treating either as physical-finger identity.
+The authorized worker reconciles the inventory under the operation lock and
+allocates the lowest vacant neutral slot. Incomplete or ambiguous projections
+fail closed; retained slots are never renumbered.
 
 The normal service supplies both exact activation flags. Its installer writes
 authority-specific dependencies: imported keybag/credential services are
 required only for `macos-control-oracle`; `linux-native` uses its persistent E4
 activation bundle.
 
-## Endpoint-10 / ACM research transport
+## Endpoint-10 / ACM transport
 
-The in-development endpoint-10 transport is separately opt-in. Setting
+The Linux-native service enables endpoint-10 ACM as part of normal activation.
+The separate compatibility research path is opt-in: setting
 `T2_TOUCHID_ENABLE_ACM_RESEARCH=1` in the private root-owned configuration
 registers dedicated ACM DMA buffers on the next boot and creates a root-only
 `/dev/t2-acm`. This does not enable enrollment and does not expose a generic
@@ -308,13 +303,14 @@ requires a reboot; never unload the active module.
 
 ## Staging gates
 
-Two installed read-only reports collect the prerequisites for the staging steps
-above. Their acknowledgements are statements about controls already performed;
+Two installed read-only reports support the separate research interfaces
+above. Neither is required by the normal installer or enrollment command. Their
+acknowledgements are statements about controls already performed;
 they do not run those controls and they authorize no mutation.
 
 The fprint enrollment staging gate collects the complete set of prerequisites
-for the separate native-enrollment and combined identity-management research
-drop-ins:
+for historical research drop-ins. The installed product enables its native
+workers directly; this report is not an installation step:
 
 ```sh
 sudo t2-touchid-fprint-enrollment-gate \
@@ -335,7 +331,7 @@ sudo t2-touchid-user-broker-gate \
   --acknowledge-two-distinct-fingers-verified-this-boot
 ```
 
-The report distinguishes the reconciled T2 identity count from fprintd's one
-compatibility alias, and never installs or starts the candidate socket. A
+The report retains the research broker boundary independently of the installed
+five-slot fprintd inventory, and never installs or starts the candidate socket. A
 successful report means only that an unmapped/inactive caller negative test may
 be staged.

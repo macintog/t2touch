@@ -40,10 +40,16 @@ fprintd unavailable were also demonstrated. The
 [follow-up](integration-followup.md) separates those results from source-only
 repairs and explains the client boundaries used for the observations.
 
-The Mac continues to run Apple's bridgeOS and SEP firmware. Release packaging,
-multi-user operation, unsupported deletion modes, deep-sleep recovery, and
-broader hardware coverage remain separate work at this review's evidence
-boundary.
+The installed t2touch product subsequently demonstrated named final-fingerprint
+deletion through a clean empty inventory, immediate use after enrollment,
+graphical PolicyKit, the Omarchy lock screen, and matching-transport userspace
+reinstall. Omarchy installation and the applesmc prerequisite are packaged in
+t2touch; mini remains a protocol reference.
+
+The Mac continues to run Apple's bridgeOS and SEP firmware. Multi-user
+operation, batch deletion, deep-sleep recovery, cross-macOS persistence, and
+broader hardware coverage remain outside the demonstrated scope. The original
+research checkpoints below retain their narrower historical evidence boundary.
 
 ## Reuse
 

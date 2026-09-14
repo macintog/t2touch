@@ -182,25 +182,23 @@ read-only commands work, while user-scoped identity reconciliation does not.
   non-portable. The corresponding request-10 candidate is original flags `6`,
   transformed by the kext to internal flags `0x4100`.
 
-## Historical next-observation sequence
+## Historical startup-race investigation
 
-Matching firmware now identifies the Intel host as the xART slave and the
+Matching firmware identified the Intel host as the xART slave and the
 BridgeOS side as owner of an asynchronous master/backing-store rendezvous. The
-current boot autoloaded the transport before T2 CDC-NCM enumeration, while a
+initial boot autoloaded the transport before T2 CDC-NCM enumeration, while a
 later dynamic RemoteXPC discovery and BridgeXPC HELO-only exchange succeeded.
 
-D015's next observation is one reboot with modalias autoload suppressed and
-one explicit transport load after that capability gate. A zero opcode-8 status
-supports a startup race; another `0x2d` falsifies HELO as sufficient. Do not
-retry, start PAM integration, or issue an identity mutation.
+D015 tested one reboot with modalias autoload suppressed and one explicit
+transport load after that capability gate. A zero opcode-8 status would have
+supported a startup race; another `0x2d` would falsify HELO as sufficient.
 
-That observation is complete. Boot `b00e4d1d-ce8a-46ba-bce8-0077edee7e40`
+The completed test boot `b00e4d1d-ce8a-46ba-bce8-0077edee7e40`
 logged HELO readiness before the sole explicit load and still returned
-`0x2d`. No endpoint-7 request occurred. The next observation must exercise a
-recovered clean-install gigalocker provisioning or attachment boundary, not a
-longer delay.
+`0x2d`. No endpoint-7 request occurred. This ruled out a longer readiness delay as
+the explanation and motivated the subsequent gigalocker investigation.
 
-Matching-image recovery now constrains that boundary: normal bridgeOS invokes
+Matching-image recovery constrained that boundary: normal bridgeOS invokes
 an attach-only `init_data_protection` path, while restore/Ramrod alone invokes
 the creator form that makes the 6 MiB backing before migration and attachment.
 Live service inventory provides no targeted creator; the advertised multiboot

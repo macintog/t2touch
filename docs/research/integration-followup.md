@@ -33,6 +33,28 @@ client result still proves only the service call it made, so retain which client
 and source generation supplied each result. The PAM claims above come from the
 separate recorded `sudo` controls, not from the TUI.
 
+## Current product behavior
+
+The installed t2touch lifecycle now completes first enrollment and fresh-owner
+authority publication in the current session. Named deletion includes the final
+fingerprint and reconciles an enrollable empty inventory. The next enrollment
+uses Finger 1. Batch delete-all remains unexposed.
+
+The Omarchy installer supplies a missing applesmc boot-state prerequisite and
+then requires one restart; a capable running kernel supports same-session
+installation. A different resident transport is rejected before installed-state
+changes. These kernel boundaries are distinct from enrollment completion.
+
+The current source comparison is pinned to t2touch
+`01ef002bcae2aa257f968071e7bcde5b626d3858` and t2touch-mini
+`f28146248e4e9c78b07e60e18302adc2aa3fce40`. All three mini modules match the
+t2touch implementations after excluding license comments and module docstrings.
+The [evidence index](integration-evidence.json) retains the original checkpoint
+hashes and limitations; it is not a current capability checklist.
+
+The checkpoint results below describe earlier experiments. Their boot counts,
+slot history, and absent controls are not instructions for the current product.
+
 ## Account proof and the current identity set
 
 The first enrollment's later-boot proof, called E4 in the engineering project,
@@ -87,9 +109,9 @@ existing operation from observed absence. It did not repeat biometric command
 `0x0d`. Recovery still had to persist the paired state, confirm the exact survivors,
 and verify the deletion after reboot.
 
-Keep first enrollment and additions distinct as well. The first enrollment
-requires its later-boot account proof. An addition to an already verified account
-uses its own same-boot, identity-specific completion gate. Do not restart that
+Keep first enrollment and additions distinct as well. The original research
+established first-enrollment authority through later-boot proof; the installed product also completes it through a fresh owner in the
+current session. An addition to an already verified account uses its own same-boot, identity-specific completion gate. Do not restart that
 proof sequence merely because both operations are called enrollment.
 
 ## Service ownership and startup
@@ -126,7 +148,7 @@ specific to this implementation.
 The review did not originally establish multi-user operation, delete-all or
 last-fingerprint deletion, deep-sleep recovery, persistence across a macOS boot,
 a dedicated live adaptive-update control, or release-level support across
-additional hardware. Subsequent integration hardware-proved final-identity
+additional hardware. Subsequent full integration hardware-proved final-identity
 forward recovery to a clean empty inventory; the other limits remain.
 Those limits do not weaken the completed greenfield lifecycle on the reference
 machine.
