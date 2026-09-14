@@ -426,3 +426,23 @@ deletion remains disabled; named final-fingerprint deletion is supported.
 Broader hardware coverage, multi-user operation, deep sleep, and cross-macOS
 persistence remain unproven. The [README](../README.md#what-has-been-proven)
 describes the supported installation path and tested scope.
+
+
+### Product deletion authorization ordering
+
+`t2touch delete finger-N` authorizes `/usr/local/sbin/t2-touchid-delete` through
+pkexec before opening any biometric connection or taking the operation lock.
+The existing identity-management action requires fresh `auth_self` authorization for an active
+local user; it does not retain an authorization cache. The isolated Python
+helper requires root, validates pkexec's original UID against the protected
+native configuration, and accepts only one neutral finger handle. It then uses
+`run_delete` with the existing administrative authority, mapping capability,
+exact-inventory, global-lock, mutation-journal and reconciliation checks.
+Terminal cancellation after authorization cannot interrupt that transaction.
+
+This ordering avoids recursively asking the reader to authenticate deletion
+while its D-Bus claim and global operation lock are already held. Existing
+low-level `DeleteEnrolledFinger` clients remain supported, but their interactive
+authorization can fall back to a password while holding the reader. The product
+command takes the corrected path. This change does not alter sudo PAM,
+Polkit's general PAM stack, desktop locking, or enrollment policy.

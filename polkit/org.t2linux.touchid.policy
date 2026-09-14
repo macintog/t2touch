@@ -55,5 +55,7 @@
       <allow_inactive>no</allow_inactive>
       <allow_active>auth_self</allow_active>
     </defaults>
+    <!-- Authenticate before the helper takes the reader or mutation lock. -->
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/t2-touchid-delete</annotate>
   </action>
 </policyconfig>

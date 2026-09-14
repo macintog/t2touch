@@ -243,6 +243,9 @@ class NativeIdentityManagementTests(unittest.TestCase):
             )
         )
         with (
+            patch.object(MANAGE, "BOOT_ID", SimpleNamespace(
+                read_text=lambda **_: "11111111-1111-4111-8111-111111111111\n"
+            )),
             patch.object(MANAGE, "delete_journals", return_value=[(Path("journal"), history)]),
             patch.object(MANAGE, "_native_management_lease", return_value=native),
             patch.object(MANAGE, "keybag_runtime") as legacy_keybag,
