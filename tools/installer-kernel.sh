@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # Sourced by install.sh; functions are also exercised by hardware-free fixtures.
+# shellcheck disable=SC2154 # source_dir is supplied by the sourcing caller.
 
 stage_applesmc_prerequisite() {
   local package_name=applesmc-t2touch
