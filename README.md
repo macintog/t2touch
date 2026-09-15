@@ -9,25 +9,32 @@ models need testing.
 
 ## Try it on Omarchy
 
-When the kernel prerequisite below is already installed, the installation and
-enrollment flow runs entirely in the current Linux session. It does not require
-a reboot.
+Run as your normal Omarchy desktop user:
 
 ```bash
 git clone https://github.com/macintog/t2touch.git
 cd t2touch
 ./install-omarchy.sh
-t2touch enroll
 ```
 
-On a kernel whose stock `applesmc` lacks the required publisher, the first
-installer run will stage the included DKMS prerequisite and stop safely. After
-an ordinary restart, rerun `./install-omarchy.sh`, then `t2touch enroll`. If
-firmware then returns `response-received:3`, the installer stops for T2 reset recovery; see [boot-policy troubleshooting](docs/TROUBLESHOOTING.md#applesmc-reports-response-received3-after-reboot).
+Follow the installer’s instructions, including any restart or recovery steps.
+Rerun the installer when instructed:
 
-On the first installation, **log out and sign back in before enrolling** so
-the installed UWSM display selection and Omarchy UI changes are active. A
-terminal opened in the old desktop session does not reload those changes.
+```bash
+./install-omarchy.sh
+```
+
+After installation completes, **log out and sign back in**.
+
+Enroll a fingerprint, then check and test it:
+
+```bash
+t2touch enroll
+t2touch status
+t2touch verify
+```
+
+Follow the prompts and wait for the reader-ready message before touching the sensor.
 
 The enrollment command opens the Touch ID terminal interface. Briefly touch and
 lift the same finger as prompted. SEP reports real, non-linear progress; the
@@ -123,9 +130,8 @@ and installs reversible PAM integration.
 
 If the running `applesmc` driver lacks the boot-state publisher, the first
 installer run stages the included `applesmc-t2touch` DKMS prerequisite and
-stops before changing biometric, PAM, or service state. Restart once at a
-convenient time and rerun `./install-omarchy.sh`; it then completes the product
-installation in that session. The installer never reboots the machine itself.
+stops before changing biometric, PAM, or service state. Follow the installer’s
+restart or recovery instructions, then rerun `./install-omarchy.sh`. The installer never reboots the machine itself.
 
 Run the installer as your desktop account, not as root. It invokes `sudo` only
 for the system changes it owns.
