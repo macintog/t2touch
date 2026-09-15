@@ -130,6 +130,82 @@ def _load(lease, secure_data: bytes, label: str, apple_user_id: int) -> None:
         raise NativeStateRestoreError(f"{label} returned unexpected output")
 
 
+def _load_biolockout(
+    lease,
+    store: t2_biolockout_store.BioLockoutStore,
+    current: t2_biolockout_store.BioLockoutGeneration,
+    apple_user_id: int,
+) -> None:
+    """Load the host head or recover a strictly newer SEP-owned generation."""
+
+    reply, events = lease.biometric_command(
+        0x4B,
+        version=1,
+        value=0,
+        data=current.payload,
+        output_capacity=0,
+    )
+    try:
+        t2_bridge_inventory.require_preparation_service_events(
+            events, apple_user_id
+        )
+    except t2_bridge_inventory.BridgeInventoryError as error:
+        raise NativeStateRestoreError(
+            "BioLockout load emitted an unexpected service event"
+        ) from error
+    if type(reply) is list and len(reply) in (1, 2) and reply[0] == 0:
+        output = b"" if len(reply) == 1 else reply[1]
+        if wire.is_biometric_nil_output(output):
+            output = b""
+        if output:
+            raise NativeStateRestoreError(
+                "BioLockout load returned unexpected output"
+            )
+        return
+    if (
+        type(reply) is not list
+        or len(reply) not in (1, 2)
+        or type(reply[0]) is not int
+        or reply[0] == 0
+    ):
+        raise NativeStateRestoreError("BioLockout load reply is malformed")
+
+    export_reply, export_events = lease.biometric_command(
+        0x4A,
+        version=1,
+        value=0,
+        data=b"",
+        output_capacity=4096,
+    )
+    recovered_payload = _output(
+        export_reply, export_events, "BioLockout export", apple_user_id
+    )
+    if (
+        not recovered_payload.startswith(b"HRLB")
+        or recovered_payload == current.payload
+    ):
+        raise NativeStateRestoreError(
+            "SEP did not provide a newer BioLockout generation"
+        )
+    recovered = store.commit(recovered_payload)
+    recovered_reply, recovered_events = lease.biometric_command(
+        0x4B,
+        version=1,
+        value=0,
+        data=recovered.payload,
+        output_capacity=0,
+    )
+    if _output(
+        recovered_reply,
+        recovered_events,
+        "recovered BioLockout load",
+        apple_user_id,
+    ):
+        raise NativeStateRestoreError(
+            "recovered BioLockout load returned unexpected output"
+        )
+
+
 def _identities(lease, apple_user_id: int) -> set[tuple[int, str]]:
     reply, events = lease.biometric_command(
         0x42,
@@ -307,15 +383,7 @@ def restore_for_enrollment(
         rolling = biolockout_store.current()
         if rolling is None:
             raise NativeStateRestoreError("rolling BioLockout authority is absent")
-        reply, events = lease.biometric_command(
-            0x4B,
-            version=1,
-            value=0,
-            data=rolling.payload,
-            output_capacity=0,
-        )
-        if _output(reply, events, "BioLockout load", apple_user_id):
-            raise NativeStateRestoreError("BioLockout load returned unexpected output")
+        _load_biolockout(lease, biolockout_store, rolling, apple_user_id)
         return len(committed_identities)
     except NativeStateRestoreError:
         try:

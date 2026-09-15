@@ -36,6 +36,7 @@ ACCOUNT_KEYS = frozenset(
         "source",
         "protected_password_record",
         "home_object_bound",
+        "compatible_generations",
     }
 )
 SESSION_KEYS = frozenset(
@@ -121,6 +122,9 @@ class StartRequest:
                     self.account.protected_password_record
                 ),
                 "home_object_bound": self.account.home_object_bound,
+                "compatible_generations": sorted(
+                    self.account.compatible_generations
+                ),
             },
             "session": {
                 "binding": self.session.binding,
@@ -249,6 +253,11 @@ def decode_start(data: bytes) -> StartRequest:
     value = _decode(data)
     caller = value.get("caller")
     account = value.get("account")
+    compatible_generations = (
+        account.get("compatible_generations")
+        if isinstance(account, dict)
+        else None
+    )
     session = value.get("session")
     if (
         set(value) != START_KEYS
@@ -260,6 +269,14 @@ def decode_start(data: bytes) -> StartRequest:
         or set(caller) != CALLER_KEYS
         or not isinstance(account, dict)
         or set(account) != ACCOUNT_KEYS
+        or not isinstance(compatible_generations, list)
+        or len(compatible_generations) != len(set(compatible_generations))
+        or any(
+            not isinstance(generation, str)
+            or len(generation) != 64
+            or any(character not in "0123456789abcdef" for character in generation)
+            for generation in compatible_generations
+        )
         or not isinstance(session, dict)
         or set(session) != SESSION_KEYS
     ):
@@ -275,6 +292,7 @@ def decode_start(data: bytes) -> StartRequest:
             account.get("source"),
             account.get("protected_password_record"),
             account.get("home_object_bound"),
+            frozenset(compatible_generations),
         ),
         t2_ipc_session.SessionEvidence(
             session.get("binding"),
