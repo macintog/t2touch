@@ -64,43 +64,8 @@ class EnrollmentUI:
         "dim": "38;2;153;153;178",
         "white": "38;2;218;218;232",
     }
-    # Ridge occupancy recovered from the completed fingerprint in the supplied
-    # 1080p reference frame, then normalized to the terminal's dot grid.
-    FINGERPRINT_MASK = (
-        "            #### ##            ",
-        "        # ###### #### ##       ",
-        "      ### ##       ## ###      ",
-        "     ###               ### #   ",
-        "   # ##   ###### ####    # ##  ",
-        "  ##   ## ###### #### ##   ##  ",
-        "  ##  ### #           ###      ",
-        "   # ###  ###### ####  ### #   ",
-        "  ## #  # ##       ## ##   ##  ",
-        "  ##   ## #   ##      ###   ## ",
-        " ##   ##    #### ###   ###  ## ",
-        " ##  ###  ####   ####   ##     ",
-        " #   ## # ##       ## #  # # # ",
-        "   # #  # #  ### #  # ## # # ##",
-        "  ## # ##   #### ##   ## # # ##",
-        " ###   ##  ###    ##  ##   # ##",
-        "###   ##   ##     ##  ##   # ##",
-        "##   ###  ##  ##  ##  ## # # ##",
-        "  ## #  # #  ##   ##  ## # # ##",
-        " ###   ## #  ##   ##  ##   # ##",
-        "###   ###   ##   ###  ## # # ##",
-        "##   ###   ###   ##   ## # # ##",
-        "   # ##   ###  # #    #  # # ##",
-        "  ## #  # ##  ## #    ## # # ##",
-        " ###   ## #  ###  ##  ## # #   ",
-        "##   ####  ####   ##  ##   ### ",
-        "   # ##   ###     #    ##    # ",
-        "  ## #  # ##      ##   ### #   ",
-        "  ##   ## # ####  ###    # ##  ",
-        "      ###  ##### # ## #        ",
-        "     ###  ###  # #  # #        ",
-        "          ##   # ##   #        ",
-        "                 #             ",
-    )
+    # Fixed artwork in terminal cells. A taller window adds surrounding space,
+    # not a different mask with a taller aspect ratio.
     COMPACT_FINGERPRINT_MASK = (
         "         #######         ",
         "      ###       ###      ",
@@ -417,13 +382,8 @@ class EnrollmentUI:
         message, message_color, detail = self._reference_view()
         panel_width = 58
         bar_width = 48
-        # Select one fixed authored mask; never rescale either axis to fill the
-        # available terminal. Surrounding space absorbs geometry differences.
-        mask = (
-            self.FINGERPRINT_MASK
-            if size.lines >= 40
-            else self.COMPACT_FINGERPRINT_MASK
-        )
+        # Keep the artwork's size and proportions stable across window heights.
+        mask = self.COMPACT_FINGERPRINT_MASK
         # A terminal failure must never make an incomplete capture look like a
         # durable partly-filled fingerprint slot.  Keep the last percentage
         # internally for diagnostics, but clear it from the finished view.

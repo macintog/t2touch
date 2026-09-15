@@ -63,3 +63,11 @@ existing operation and its journal before starting another one.
 Discovery caches only a per-boot endpoint hint. Every new connection still
 performs a fresh RemoteXPC handshake and validates the advertised biometric
 service; the cache carries no authentication authority.
+
+## Enrollment artwork sizing
+
+The enrollment and verification view keeps the same compact fingerprint artwork
+at every terminal height. Enlarging the window adds surrounding space instead of
+switching to a taller, differently proportioned mask. Progress still colors the
+art from the live reported percentage. Layout regression checks include the old
+40-row transition and tall windows; the normal 76×28 view remains unchanged.
