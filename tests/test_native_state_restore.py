@@ -144,6 +144,81 @@ class NativeStateRestoreTests(unittest.TestCase):
         )
         self.assertFalse(lease.invalidated)
 
+    def test_sep_ahead_biolockout_is_exported_appended_and_reloaded(self):
+        identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes
+
+        class SepAheadLease(FakeLease):
+            def __init__(self):
+                super().__init__(
+                    state_reads=(states(3, 3), states(3, 3)),
+                    identity_reads=(identity, identity),
+                )
+                self.load_count = 0
+
+            def biometric_command(
+                self, command, *, version, value, data, output_capacity
+            ):
+                if command == 0x4B:
+                    self.commands.append(command)
+                    self.load_count += 1
+                    return ([-5], []) if self.load_count == 1 else ([0, b""], [])
+                if command == 0x4A:
+                    self.commands.append(command)
+                    return [0, b"HRLB-sep-ahead"], []
+                return super().biometric_command(
+                    command,
+                    version=version,
+                    value=value,
+                    data=data,
+                    output_capacity=output_capacity,
+                )
+
+        lease = SepAheadLease()
+        catacomb = SimpleNamespace(
+            read_committed_components=lambda: {
+                "master.cat": b"master",
+                "user_000001f5.cat": b"user",
+            }
+        )
+        committed = []
+        current = SimpleNamespace(payload=b"HRLB-host-head")
+        biolockout = SimpleNamespace(
+            current=lambda: current,
+            commit=lambda payload: (
+                committed.append(payload)
+                or SimpleNamespace(payload=payload)
+            ),
+        )
+        with (
+            patch.object(
+                restore.t2_catacomb_codec,
+                "decode_master_catacomb",
+                return_value=SimpleNamespace(secure_data=b"LTFC-master"),
+            ),
+            patch.object(
+                restore.t2_catacomb_codec,
+                "decode_user_catacomb",
+                return_value=SimpleNamespace(
+                    secure_data=b"LTFC-user",
+                    identities=(
+                        SimpleNamespace(
+                            user_id=USER, uuid=str(uuid.UUID(int=1))
+                        ),
+                    ),
+                ),
+            ),
+        ):
+            count = restore.restore_for_enrollment(
+                lease,
+                apple_user_id=USER,
+                catacomb_store=catacomb,
+                biolockout_store=biolockout,
+            )
+        self.assertEqual(count, 1)
+        self.assertEqual(committed, [b"HRLB-sep-ahead"])
+        self.assertEqual(lease.commands[-3:], [0x4B, 0x4A, 0x4B])
+        self.assertFalse(lease.invalidated)
+
     def test_missing_user_after_master_load_dispatches_saved_user(self):
         identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes
         lease = FakeLease(

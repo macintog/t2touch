@@ -20,6 +20,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Recover a newer SEP-owned BioLockout generation when another Linux volume
+  advances the secure state beyond the local append-only head.
+- Preserve compatible Linux account generations across the private enrollment
+  and deletion worker protocols so Btrfs accounts retain their caller binding.
 - Preserve an existing native account migration binding when another publication
   attempt fails, and reject authorization sessions when a compatible account
   binding changes or is removed.

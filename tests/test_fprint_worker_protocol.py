@@ -25,7 +25,11 @@ def request() -> protocol.StartRequest:
     return protocol.StartRequest(
         "finger-2",
         subject,
-        account.AccountEvidence(subject.uid, "a" * 64),
+        account.AccountEvidence(
+            subject.uid,
+            "a" * 64,
+            compatible_generations=frozenset({"b" * 64}),
+        ),
         ipc.SessionEvidence(
             "pidfd-session",
             "session-1",

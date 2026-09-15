@@ -24,7 +24,11 @@ def request():
     return protocol.DeleteRequest(
         "finger-2",
         subject,
-        account.AccountEvidence(subject.uid, "a" * 64),
+        account.AccountEvidence(
+            subject.uid,
+            "a" * 64,
+            compatible_generations=frozenset({"b" * 64}),
+        ),
         ipc.SessionEvidence(
             "pidfd-session", "session-1", "wayland", "user", True, 1
         ),

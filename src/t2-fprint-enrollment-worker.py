@@ -25,6 +25,27 @@ def _exception_classes(error: BaseException) -> str:
     return ">".join(names)
 
 
+def _authorization_reason(error: BaseException) -> str:
+    allowed = {
+        "authorization login session differs from the claim": "session-changed",
+        "authorization account differs from the claim": "account-changed",
+        "caller has no unique active local physical login session": "session-unavailable",
+        "authorization target must be the pinned non-root peer": "peer-mismatch",
+        "Linux account assertion failed": "account-unavailable",
+        "Linux account collector returned invalid evidence": "account-invalid",
+    }
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        reason = allowed.get(str(current))
+        if reason is not None:
+            return reason
+        cause = current.__cause__
+        current = cause if isinstance(cause, BaseException) else None
+    return "unclassified"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", required=True, type=Path)
@@ -41,7 +62,8 @@ def main() -> int:
             stage = "outside-request"
         print(
             "t2-fprint-enrollment-worker: enrollment stopped "
-            f"stage={stage} classes={_exception_classes(error)}",
+            f"stage={stage} classes={_exception_classes(error)} "
+            f"reason={_authorization_reason(error)}",
             file=sys.stderr,
         )
         return 1
