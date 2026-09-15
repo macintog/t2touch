@@ -28,6 +28,44 @@ KNOWN_COMPONENT_STATE_BITS = 0x07
 SECURELY_LOADED_STATE_BITS = 0x03
 
 
+def is_cold_unloaded_inventory(live: object, apple_user_id: int) -> bool:
+    """Recognize only a stable master-only bridgeOS restore generation.
+
+    An empty loaded user can be an external deletion or corruption. It must
+    never be treated as permission to restore the committed identities.
+    """
+    if not isinstance(live, dict):
+        return False
+    catacomb = live.get("catacomb")
+    if not isinstance(catacomb, dict):
+        return False
+    states = catacomb.get("user_states")
+    if (
+        not isinstance(states, list)
+        or len(states) != 1
+        or not isinstance(states[0], dict)
+        or type(states[0].get("state")) is not int
+        or type(states[0].get("user_id")) is not int
+        or states[0].get("needs_save") is not False
+        or states[0].get("state") not in (1, 3)
+    ):
+        return False
+    return (
+        live.get("double_collection_equal") is True
+        and live.get("apple_uid") == apple_user_id
+        and live.get("biometric_protocol_version") == 2
+        and live.get("per_user_identity_records") == []
+        and live.get("global_identity_records") == []
+        and catacomb.get("present") is False
+        and catacomb.get("uuid") == str(uuid.UUID(int=0))
+        and catacomb.get("hash") == "0" * 64
+        and states == [
+            {"kind": "master", "user_id": 0xFFFFFFFF,
+             "state": states[0]["state"], "needs_save": False}
+        ]
+    )
+
+
 def _output(
     reply: object, events: object, label: str, apple_user_id: int
 ) -> bytes:
@@ -245,9 +283,12 @@ def restore_for_enrollment(
                 )
                 if after_master[master_component].state != 0x03:
                     raise NativeStateRestoreError("master Catacomb did not load")
+                if user_component not in after_master:
+                    raise NativeStateRestoreError(
+                        "restored master Catacomb does not advertise the selected user"
+                    )
                 if (
-                    user_component in after_master
-                    and after_master[user_component].state != 0x01
+                    after_master[user_component].state != 0x01
                 ):
                     raise NativeStateRestoreError(
                         "selected user Catacomb is not loadable"

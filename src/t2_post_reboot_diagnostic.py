@@ -24,6 +24,21 @@ STAGES = frozenset(
 )
 
 
+CHILD_FAILURE_REASONS = {
+    b"t2-touchid-manage: restored master Catacomb does not advertise the selected user": "restore-user-not-advertised",
+    b"t2-touchid-manage: selected user Catacomb load did not succeed": "restore-user-load-rejected",
+    b"t2-touchid-manage: SEP Catacomb is not clean after the external deletion": "external-catacomb-not-clean",
+    b"t2-touchid-manage: local and live identity inventories disagree": "inventory-mismatch",
+}
+
+
+def child_failure_reason(stderr: object) -> str | None:
+    """Map exact known messages to public reasons; never retain raw stderr."""
+    if not isinstance(stderr, bytes) or len(stderr) > 512:
+        return None
+    return CHILD_FAILURE_REASONS.get(stderr.strip())
+
+
 def _class_name(value: BaseException | None) -> str | None:
     if value is None:
         return None
@@ -57,9 +72,12 @@ class PostRebootStageError(RuntimeError):
         error: BaseException,
         *,
         child_exit_status: int | None = None,
+        reason: str | None = None,
     ) -> None:
         if stage not in STAGES:
             raise ValueError("post-reboot diagnostic stage is not allowlisted")
+        if reason is not None and reason not in CHILD_FAILURE_REASONS.values():
+            raise ValueError("post-reboot diagnostic reason is not allowlisted")
         if child_exit_status is not None and (
             type(child_exit_status) is not int
             or not -(1 << 31) <= child_exit_status < (1 << 31)
@@ -71,6 +89,7 @@ class PostRebootStageError(RuntimeError):
         self.cause_class = _class_name(error.__cause__ or error.__context__)
         self.errno = _numeric_errno(error)
         self.child_exit_status = child_exit_status
+        self.reason = reason
 
     def redacted(self) -> dict[str, Any]:
         return {
@@ -81,6 +100,7 @@ class PostRebootStageError(RuntimeError):
             "cause_class": self.cause_class,
             "errno": self.errno,
             "child_exit_status": self.child_exit_status,
+            "reason": self.reason,
             "identifiers_redacted": True,
         }
 
@@ -90,11 +110,12 @@ def staged(
     error: BaseException,
     *,
     child_exit_status: int | None = None,
+    reason: str | None = None,
 ) -> PostRebootStageError:
     if isinstance(error, PostRebootStageError):
         return error
     return PostRebootStageError(
-        stage, error, child_exit_status=child_exit_status
+        stage, error, child_exit_status=child_exit_status, reason=reason
     )
 
 

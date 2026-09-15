@@ -66,6 +66,32 @@ against the reference kernel. The operator subsequently completed the normal ins
 `mapping-ready` and fprintd started. A later actual lock-screen fingerprint
 authentication succeeded with the same compositor still running.
 
+## fprintd dependency failure after a cold bridgeOS boot
+
+If `t2-native-first-run.service` and `t2-biometric-ready.service` pass but
+`t2-touchid-post-reboot.service` reports `external-deletion-reconciliation`,
+inspect that service's journal. The automatic management child previously
+mistook a cold unloaded Catacomb for an external fingerprint deletion and
+stopped with “SEP Catacomb is not clean after the external deletion.”
+
+The exact cold generation has an absent Catacomb, empty live inventories, and
+only a clean master component at state 1 (unloaded) or 3 (master restored, user
+still absent). Startup now restores the committed Linux-owned master, user,
+and rolling BioLockout state through
+the existing guarded restore routine, then requires fresh exact inventory
+equality. Loaded-empty, dirty, foreign, and ambiguous states do not qualify;
+external deletion reconciliation retains its existing checks. Preserve the
+private state and journals rather than reenrolling or deleting recovery evidence.
+
+If the master loads but does not advertise the selected user, startup reports
+`reason=restore-user-not-advertised` and stops before attempting the user load.
+This is a separate failure of the saved generation's live restore proof, not
+an attested external deletion. Do not register an empty replacement user or
+prune the host identity to force startup. Retain the generation for investigation.
+Booting the same T2 through multiple volumes with different t2touch revisions
+can leave bridgeOS and one volume's committed state on different generations;
+record that boot history when diagnosing this reason.
+
 ## Enrollment remains on “Preparing sensor” without a permission dialog
 
 Preparation includes caller authorization before the reader is armed. Inspect

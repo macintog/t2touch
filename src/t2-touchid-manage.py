@@ -1593,9 +1593,36 @@ def run_external_delete_reconciliation(
         components = store.read_committed_components()
         user_name = f'user_{configuration["apple_uid"]:08x}.cat'
         if if_needed:
+            cold_restored = False
+            # Cold bridgeOS has not loaded the Linux-owned Catacombs yet.
+            # Its empty inventory is not evidence of an external deletion.
+            # Restore only that exact master-only state, then independently
+            # compare the fresh inventory before admitting fprintd startup.
+            if (
+                configuration.get("authority_mode") == "linux-native"
+                and t2_native_state_restore.is_cold_unloaded_inventory(
+                    live, configuration["apple_uid"]
+                )
+            ):
+                t2_native_state_restore.restore_for_enrollment(
+                    lease,
+                    apple_user_id=configuration["apple_uid"],
+                    catacomb_store=store,
+                    biolockout_store=t2_biolockout_store.BioLockoutStore(
+                        str(STATE_ROOT / "biolockout")
+                    ),
+                )
+                live = t2_bridge_inventory.collect_stable_private_inventory(
+                    lease, configuration["apple_uid"]
+                )
+                cold_restored = True
             try:
                 inventory = t2_identity_inventory.summarize(local, live)
             except t2_identity_inventory.IdentityInventoryError:
+                if cold_restored:
+                    # A restored generation must match exactly. Never prune
+                    # local identities to disguise a failed cold-start proof.
+                    raise
                 pass
             else:
                 return {

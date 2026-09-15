@@ -329,6 +329,9 @@ def reconcile_external_deletion_if_needed(
             "external-deletion-reconciliation",
             error,
             child_exit_status=getattr(completed, "returncode", None),
+            reason=t2_post_reboot_diagnostic.child_failure_reason(
+                getattr(completed, "stderr", None)
+            ),
         ) from error
     try:
         document = json.loads(getattr(completed, "stdout", None))
