@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.0.3 - 2026-09-15
+
 ### Added
 
 - Explicit AKS identity-create v4 support for MacBookPro16,2 with bridgeOS
