@@ -219,6 +219,27 @@ class NativeStateRestoreTests(unittest.TestCase):
         self.assertEqual(lease.commands[-3:], [0x4B, 0x4A, 0x4B])
         self.assertFalse(lease.invalidated)
 
+    def test_biolockout_load_rejects_falsey_nonbyte_output(self):
+        current = SimpleNamespace(payload=b"HRLB-host-head")
+        for malformed in ([], False, 0, ""):
+            with self.subTest(output=malformed):
+                lease = SimpleNamespace(
+                    biometric_command=lambda *args, **kwargs: (
+                        [0, malformed],
+                        [],
+                    )
+                )
+                with self.assertRaisesRegex(
+                    restore.NativeStateRestoreError,
+                    "BioLockout load output is malformed",
+                ):
+                    restore._load_biolockout(
+                        lease,
+                        SimpleNamespace(),
+                        current,
+                        USER,
+                    )
+
     def test_missing_user_after_master_load_dispatches_saved_user(self):
         identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes
         lease = FakeLease(
