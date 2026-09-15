@@ -98,7 +98,7 @@ class InstallerTests(unittest.TestCase):
         positions = [helper.rindex(item) for item in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertIn(
-            "Existing fingerprint, keybag, mapping, and mutation state was preserved.",
+            "Earlier stages may have completed; no automatic rollback or account rebinding was attempted.",
             helper,
         )
         self.assertIn("Account rebinding is intentionally never automatic.", helper)
@@ -151,8 +151,8 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertNotIn("start fprintd.service", calls)
         self.assertIn("pending mutation reconciliation", completed.stderr)
-        self.assertIn("state was preserved", completed.stderr)
-        self.assertNotIn("rebind", completed.stderr.lower())
+        self.assertIn("no automatic rollback or account rebinding", completed.stderr)
+        self.assertNotIn("sudo t2-touchid-user-map", completed.stderr)
 
     def test_product_scripts_do_not_require_a_reboot(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
