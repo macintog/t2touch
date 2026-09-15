@@ -91,6 +91,12 @@ class PostRebootReconcilerTests(unittest.TestCase):
         message = b"t2-touchid-manage: restored master Catacomb does not advertise the selected user"
         self.assertEqual(post_reboot_diagnostic.child_failure_reason(message + b"\n"),
                          "restore-user-not-advertised")
+        self.assertEqual(
+            post_reboot_diagnostic.child_failure_reason(
+                b"t2-touchid-manage: live T2 authority belongs to another installation\n"
+            ),
+            "foreign-live-authority",
+        )
         for private in (b"private payload", message + b" private identifier", b"x" * 513,
                         "private payload", None):
             self.assertIsNone(post_reboot_diagnostic.child_failure_reason(private))

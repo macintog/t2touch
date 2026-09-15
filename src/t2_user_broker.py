@@ -328,8 +328,17 @@ def run_self_service(
                 raise UserBrokerError(
                     "caller has no enabled mapping for this operation"
                 ) from error
-            if authorization.account.generation != selected.linux_account_generation:
+            if not authorization.account.matches_generation(
+                selected.linux_account_generation
+            ):
                 raise UserBrokerError("caller account generation is not mapped")
+            if authorization.account.generation != selected.linux_account_generation:
+                binder = getattr(authorization, "bind_account_generation", None)
+                if not callable(binder):
+                    raise UserBrokerError(
+                        "authorization session cannot bind a compatible account generation"
+                    )
+                binder(selected.linux_account_generation)
             keybag_sha256 = _keybag(selected, keybag_reader)
 
             live_manager = live_factory()
@@ -401,7 +410,9 @@ def run_self_service(
                 authorization.revalidate()
                 _stable_mapping(directory, name, protected_mapping_set)
                 _stable_compatibility_authority(target_uid, runtime_authority)
-                if authorization.account.generation != selected.linux_account_generation:
+                if not authorization.account.matches_generation(
+                    selected.linux_account_generation
+                ):
                     raise UserBrokerError(
                         "caller account changed during authorization"
                     )

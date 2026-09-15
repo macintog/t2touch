@@ -264,10 +264,7 @@ def run(
         mapping_set = authority.mapping_set
         selected = _select_mapping(mapping_set, candidate)
         account = account_collector(selected.linux_uid)
-        expected_account = t2_linux_account.AccountEvidence(
-            selected.linux_uid, selected.linux_account_generation
-        )
-        if account != expected_account:
+        if not account.matches_generation(selected.linux_account_generation):
             raise PostRebootReconcilerError(
                 "Linux account changed before post-reboot reconciliation"
             )
@@ -299,10 +296,10 @@ def run(
             )
         with manager as live:
             first = live.collect(
-                selected, account.generation, keybag_sha256
+                selected, selected.linux_account_generation, keybag_sha256
             )
             second = live.collect(
-                selected, account.generation, keybag_sha256
+                selected, selected.linux_account_generation, keybag_sha256
             )
             if first != second:
                 raise PostRebootReconcilerError(

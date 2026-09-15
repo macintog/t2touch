@@ -92,6 +92,21 @@ class FakeAuthorizationSession:
         if self.revalidate_error:
             raise ipc_session.IPCSessionError("peer changed")
 
+    def bind_account_generation(self, generation):
+        if not self._account.matches_generation(generation):
+            raise ipc_session.IPCSessionError("account generation is incompatible")
+        self._account = linux_account.AccountEvidence(
+            self._account.linux_uid,
+            generation,
+            compatible_generations=self._account.compatible_generations,
+        )
+        self.caller = policy.CallerEvidence(
+            self.caller.linux_uid,
+            generation,
+            self.caller.authenticated,
+            self.caller.active_local_session,
+        )
+
     def collect(self, **arguments):
         self.actions.append(arguments["action"])
         issued = arguments["clock"]()
@@ -250,6 +265,30 @@ class UserBrokerTests(unittest.TestCase):
         rendered = json.dumps(result.redacted(), sort_keys=True)
         self.assertNotIn(identifier(1), rendered)
         self.assertNotIn(str(self.uid), rendered)
+
+    def test_migrated_account_binds_grants_to_preserved_generation(self):
+        evidence = (persistent(), READY)
+        authorization = FakeAuthorizationSession(self.uid)
+        authorization._account = linux_account.AccountEvidence(
+            self.uid,
+            "c" * 64,
+            compatible_generations=frozenset({"a" * 64}),
+        )
+        authorization.caller = policy.CallerEvidence(
+            self.uid, "c" * 64, True, True
+        )
+        live = FakeLiveSession((evidence, evidence, evidence))
+
+        result = self.invoke(
+            authorization,
+            live,
+            lambda authority, _session: authority.selected.linux_account_generation,
+        )
+
+        self.assertTrue(result.consumer_invoked)
+        self.assertEqual(result.value, "a" * 64)
+        self.assertEqual(authorization.account.generation, "a" * 64)
+        self.assertEqual(authorization.caller.linux_account_generation, "a" * 64)
 
     def test_compatibility_uses_validated_runtime_mapping(self):
         protected = mapping.load(self.path)

@@ -6,6 +6,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -22,6 +23,42 @@ SPEC.loader.exec_module(MODULE)
 
 
 class IdentityManagementCommandTests(unittest.TestCase):
+    def test_foreign_live_authority_has_a_specific_failure(self):
+        selected = SimpleNamespace(
+            linux_uid=1000,
+            linux_account_generation="a" * 64,
+            special_bag_alias=-501,
+        )
+        authority = SimpleNamespace(
+            selected=selected,
+            mapping_set=object(),
+            persistent=object(),
+        )
+        transport = SimpleNamespace(
+            runtime_generation=str(uuid.UUID(int=1)),
+            observe_alias=lambda _alias: object(),
+        )
+        with (
+            mock.patch.object(
+                MODULE.t2_user_policy,
+                "authorize",
+                return_value=SimpleNamespace(
+                    state="target-quarantined",
+                    readiness_state="alias-binding-mismatch",
+                ),
+            ),
+            mock.patch.object(MODULE, "_native_grant", return_value=object()),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.IdentityManagementError, "belongs to another installation"
+            ):
+                MODULE._authorize_native_management(
+                    authority,
+                    transport,
+                    operation="rename",
+                    linux_boot_uuid=str(uuid.UUID(int=2)),
+                )
+
     def test_automatic_external_check_restores_cold_state_before_comparison(self):
         configuration = {"authority_mode": "linux-native", "apple_uid": 501}
         store = mock.Mock()

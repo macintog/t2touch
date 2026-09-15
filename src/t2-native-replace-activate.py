@@ -187,7 +187,7 @@ def _authorization(
 
 def _authority():
     linux_uid, apple_uid = _configuration()
-    account_generation = t2_linux_account.collect(linux_uid).generation
+    account = t2_linux_account.collect(linux_uid)
     replacement = t2_aks_replacement_journal.read(REPLACEMENT_JOURNAL)
     if (
         replacement.phase != "complete"
@@ -227,6 +227,11 @@ def _authority():
             "canonical replacement mapping is not one schema-2 authority"
         )
     selected = mappings.mappings[0]
+    if not account.matches_generation(selected.linux_account_generation):
+        raise NativeReplacementActivationError(
+            "replacement activation Linux account generation changed"
+        )
+    account_generation = selected.linux_account_generation
     if (
         selected.linux_uid != linux_uid
         or selected.linux_account_generation != account_generation

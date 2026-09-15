@@ -322,6 +322,7 @@ def _collect_account(
         or evidence.source != "local-files-v2"
         or evidence.protected_password_record is not True
         or evidence.home_object_bound is not True
+        or not evidence.generations_are_valid()
     ):
         raise UserMappingAdminError("live Linux account assertion is invalid")
     try:
@@ -468,7 +469,7 @@ def rebind_disabled(
         if keybag_reader(keybag_path) != selected.keybag_sha256:
             raise UserMappingAdminError("protected keybag digest changed")
         first_account = _collect_account(linux_uid, account_collector)
-        if first_account.generation == selected.linux_account_generation:
+        if first_account.matches_generation(selected.linux_account_generation):
             raise UserMappingAdminError("account generation is already current")
         replacement = replace(
             selected,
@@ -586,8 +587,8 @@ def status(
         if repeated is None or repeated.generation != current.generation:
             raise UserMappingAdminError("mapping changed during status collection")
         selected = matches[0]
-        matches_generation = (
-            evidence.generation == selected.linux_account_generation
+        matches_generation = evidence.matches_generation(
+            selected.linux_account_generation
         )
         return _result(
             "status",

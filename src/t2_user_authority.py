@@ -447,7 +447,7 @@ def publish_compatibility_account_rebind(
     authority = load_compatibility(target_linux_uid, state_root=state_root)
     current = t2_linux_account.collect(target_linux_uid)
     previous = authority.selected.linux_account_generation
-    if current.generation == previous:
+    if current.matches_generation(previous):
         raise UserAuthorityError("compatibility account already has current binding")
     user_root = state_root / "users" / str(target_linux_uid)
     _private_directory(user_root)

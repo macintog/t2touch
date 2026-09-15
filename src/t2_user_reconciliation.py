@@ -202,7 +202,7 @@ def enable_reconciled(
             raise UserReconciliationError("protected mapping is already enabled")
 
         first_account = _collect_account(linux_uid, account_collector)
-        if first_account.generation != selected.linux_account_generation:
+        if not first_account.matches_generation(selected.linux_account_generation):
             raise UserReconciliationError("Linux account generation changed")
         keybag_path = Path(selected.keybag_path)
         first_keybag = _read_keybag(keybag_path, keybag_reader)
@@ -219,7 +219,7 @@ def enable_reconciled(
                 first = _collect_live(
                     session,
                     selected,
-                    first_account.generation,
+                    selected.linux_account_generation,
                     first_keybag,
                 )
                 candidate = _require_ready(selected, *first)
@@ -237,7 +237,7 @@ def enable_reconciled(
                 second = _collect_live(
                     session,
                     selected,
-                    second_account.generation,
+                    selected.linux_account_generation,
                     second_keybag,
                 )
                 if second != first:

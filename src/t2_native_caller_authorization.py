@@ -64,6 +64,19 @@ def collect(
     policy = t2_user_policy.OPERATION_POLICIES.get(operation)
     selected = authority.selected
     if (
+        policy is not None
+        and session.account.matches_generation(
+            selected.linux_account_generation
+        )
+        and session.account.generation != selected.linux_account_generation
+    ):
+        try:
+            session.bind_account_generation(selected.linux_account_generation)
+        except t2_ipc_session.IPCSessionError as error:
+            raise NativeCallerAuthorizationError(
+                "caller account generation cannot bind to the native authority"
+            ) from error
+    if (
         policy is None
         or policy.mutation is not True
         or session.caller.linux_uid != selected.linux_uid

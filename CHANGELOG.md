@@ -12,12 +12,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   23P2048, contributed by [@tonibergholm](https://github.com/tonibergholm) in
   [PR #1](https://github.com/macintog/t2touch/pull/1). Version 5 remains the
   default; see the [setup and hardware coverage](docs/MACBOOKPRO16_2.md).
+- Add `t2-native-authority-rebind` for moving a complete Linux-native
+  authority between installations. It preserves the source mapping and
+  enrollment lineage while binding it explicitly to the destination account.
 
 ### Fixed
 
 - Preserve existing Linux account bindings across Btrfs kernel filesystem-ID
   changes by deriving the prior stable value from persistent filesystem and
-  subvolume identity; account replacement checks remain enforced.
+  subvolume identity while accepting mappings written with the Linux 7.2
+  device-derived value; account replacement checks remain enforced.
+- Diagnose a T2 identity activated by another OS installation as a foreign live
+  authority instead of reporting it as a generic external-deletion failure.
 - Restore the committed master and user on the same pristine cold connection
   even when the master does not yet advertise the user. Reject partially
   restored master-only state as a fresh cold start.

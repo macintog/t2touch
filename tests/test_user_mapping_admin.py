@@ -221,6 +221,24 @@ class MappingAdminTests(unittest.TestCase):
             )
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_compatible_filesystem_generation_is_current(self):
+        self.bind()
+        compatible = lambda uid: linux_account.AccountEvidence(
+            uid,
+            "c" * 64,
+            compatible_generations=frozenset({"a" * 64}),
+        )
+        status = admin.status(
+            linux_uid=self.uid,
+            path=self.path,
+            account_collector=compatible,
+        )
+        self.assertTrue(status.account_generation_current)
+        with self.assertRaisesRegex(
+            admin.UserMappingAdminError, "already current"
+        ):
+            self.rebind(account_collector=compatible)
+
     def test_status_distinguishes_current_changed_and_aggregate(self):
         self.bind()
         aggregate = admin.status(path=self.path)

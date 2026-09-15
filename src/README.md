@@ -1276,6 +1276,13 @@ keybag, mode, and capability field but still disables a previously enabled
 record. Revocation requires no live hardware or account evidence, so loss of a
 dependency can never prevent an administrator from disabling authority.
 
+`t2-native-authority-rebind` handles a complete authority copied from another
+Linux installation without rewriting `users.json` or its enrollment lineage.
+It validates the imported E4 authority, derives the current strict local-files
+account generation, and publishes a root-private per-UID migration record. The
+account collector accepts the prior generation only while that record matches
+the exact current account and the complete native authority still validates.
+
 `t2_current_user_authority.py` removes Apple UID/account UUID/bag UUID values
 from the public mapping command line. It reads one exact configured Apple user
 and matching negative alias from the root-private configuration, holds the

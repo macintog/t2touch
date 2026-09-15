@@ -29,6 +29,7 @@ import t2_aks_provisioning
 import t2_aks_provisioning_operation
 import t2_aks_transport
 import t2_linux_account
+import t2_user_mapping
 import t2_user_mapping_store
 
 
@@ -107,12 +108,20 @@ def main() -> int:
             )
         linux_uid, apple_uid = _configuration()
         account = t2_linux_account.collect(linux_uid)
+        mappings = t2_user_mapping.load(MAPPING)
+        if len(mappings.mappings) != 1 or not account.matches_generation(
+            mappings.mappings[0].linux_account_generation
+        ):
+            raise NativeProvisioningVerificationError(
+                "native provisioning Linux account generation changed"
+            )
+        account_generation = mappings.mappings[0].linux_account_generation
         keybag_path = STATE_ROOT / "users" / str(linux_uid) / "user.kb"
         mapping_writer = t2_user_mapping_store.InitialUserMappingStore(
             path=MAPPING,
             operation_id=history.operation_id,
             linux_uid=linux_uid,
-            linux_account_generation=account.generation,
+            linux_account_generation=account_generation,
             apple_uid=apple_uid,
             keybag_path=keybag_path,
         )

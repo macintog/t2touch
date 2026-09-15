@@ -131,6 +131,29 @@ Booting macOS can reconcile fingerprints from its own database and remove
 Linux-only additions. It is not a general recovery step for a Linux enrollment
 failure. See [existing Apple state](../README.md#existing-apple-touch-id-state).
 
+The same ownership rule applies when another Linux volume last activated its
+own T2 identity. A new volume cannot adopt a retained fingerprint from the T2
+alone: the template remains bound to that installation's protected keybag,
+activation material, and Catacomb state. The post-reboot service reports
+`foreign-live-authority` instead of treating this as an external deletion.
+Boot the installation that owns the live identity, or migrate its complete
+private state through an explicit native account rebind and live validation.
+State imported from macOS additionally requires the matching
+keybag and Catacomb control archives; a fingerprint template by itself is not
+an authority credential.
+
+For state copied from another t2touch Linux installation, preserve the former
+`/var/lib/t2-touchid` as a rollback backup and run:
+
+```bash
+sudo t2-native-authority-rebind --linux-uid 1000 \
+  --acknowledge-complete-native-authority-migration
+```
+
+This validates the complete imported Linux-native authority and binds its
+unchanged history to the current local account. It does not apply to macOS
+state, which still has no supported end-user migration command.
+
 ## Fingerprint inventory or enrollment is unavailable
 
 An empty inventory is normal before first enrollment and after deleting the
