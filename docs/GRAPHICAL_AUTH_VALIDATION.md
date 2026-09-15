@@ -96,3 +96,32 @@ fingerprint trial. Final selector portability guards were added afterward;
 evaluating that final script on the live machine produced the same device
 selection as the rebooted session. The exact final script was not separately
 reboot-tested. Actual lock and Polkit touch results above precede this reboot.
+
+## Fresh-install follow-up — September 14, 2026
+
+A later fresh Omarchy installation exposed two separate first-run blockers.
+`applesmc` received boot-policy result 3 rather than a missing response. Ordinary
+Linux reboot and poweroff did not clear it; the operator's documented physical
+SMC reset produced result 1. Then the driver incorrectly counted initial
+provisioning as consuming the later replacement-create attempt. Restricting
+that mark to an armed replacement create fixed the reproduced admission error.
+The operator reran the normal installer, which reached `mapping-ready` and
+started fprintd. The source fix passed 10 Linux AKS tests, 50 replacement,
+first-run and ACM tests, 18 installer tests, and a target-kernel module build.
+These counts cover that repair, separately from the earlier 142-test GUI pass.
+
+Enrollment in the still-running pre-install desktop timed out during PolicyKit
+authorization. The operator saw no permission dialog; the session exposed a
+phantom framebuffer output. No sensor-ready event occurred in that attempt.
+The installed display selector was added after the session started. The
+quickstart now explicitly requires a new login before first enrollment.
+
+After the desktop session changed, live lock status reported one display.
+An actual lock request at 22:23:26 local time started fingerprint PAM, emitted
+“Place your finger on the fingerprint reader” at 22:23:30, and authenticated
+successfully at 22:23:31. The session unlocked with the same Hyprland process
+still running. This proves the actual fingerprint authentication path and
+immediate compositor survival; it is not a multi-machine qualification or a
+new visual confirmation of every label. The earlier nonfunctional lock preview
+is excluded from authentication evidence. The operator also reported a harmless
+PolicyKit dialog worked, without specifying its authentication method.

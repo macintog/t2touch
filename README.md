@@ -25,6 +25,10 @@ installer run will stage the included DKMS prerequisite and stop safely. After
 an ordinary restart, rerun `./install-omarchy.sh`, then `t2touch enroll`. If
 firmware then returns `response-received:3`, the installer stops for T2 reset recovery; see [boot-policy troubleshooting](docs/TROUBLESHOOTING.md#applesmc-reports-response-received3-after-reboot).
 
+On the first installation, **log out and sign back in before enrolling** so
+the installed UWSM display selection and Omarchy UI changes are active. A
+terminal opened in the old desktop session does not reload those changes.
+
 The enrollment command opens the Touch ID terminal interface. Briefly touch and
 lift the same finger as prompted. SEP reports real, non-linear progress; the
 fingerprint graphic fills to match that percentage. Enrollment returns success

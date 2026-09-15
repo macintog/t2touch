@@ -62,8 +62,28 @@ Keep `/var/lib/t2-touchid` and its journals intact. An interrupted
 `absence-reconciled` operation is resumed from saved activation material with
 fresh absence checks; deleting its journal would discard that recovery evidence.
 This repair was regression-tested against the actual C admission code and built
-against the reference kernel. The operator owns the subsequent live installer
-verification; passing source tests is not a completed installation.
+against the reference kernel. The operator subsequently completed the normal installer: first-run reported
+`mapping-ready` and fprintd started. A later actual lock-screen fingerprint
+authentication succeeded with the same compositor still running.
+
+## Enrollment remains on “Preparing sensor” without a permission dialog
+
+Preparation includes caller authorization before the reader is armed. Inspect
+the enrollment worker and PolicyKit journals. A 120-second `PolkitGrantError` /
+`TimeoutExpired` means authorization timed out; it is not evidence that the
+sensor failed to initialize. The current TUI does not distinguish that wait
+from sensor preparation.
+
+After a first installation, log out and sign back in before enrollment. The
+UWSM selector and QML integration take effect in the next desktop session.
+On the reference installation, the old session still exposed a phantom
+`Unknown-1` output and the operator saw no permission prompt. The prompt's
+location was not captured, so invisible-output placement remains an inference.
+A fresh session had one real display and actual fingerprint unlock succeeded.
+
+The lock preview is a layout demonstration with input disabled. It neither
+starts PAM nor proves fingerprint readiness. Use an actual authentication
+request to test the preparation/placement messages and final unlock.
 
 ## Installation reports a different running transport
 

@@ -27,7 +27,9 @@ poweroff cleared result 3 on that installation. A new Linux boot ID therefore
 does not prove that the T2 restarted or accepted the new OS identity. The
 operator then performed the documented physical SMC reset; the next Linux boot
 reported result 1. Installation testing exposed a separate replacement-attempt
-guard bug, so this policy result alone is not end-to-end qualification.
+guard bug. After that correction, the operator completed installation and a
+later real fingerprint lock/unlock succeeded. The policy result alone remains
+insufficient to establish end-to-end readiness.
 
 An earlier raw endpoint-0 `0x22` attempt confused an internal bridgeOS selector
 path with an Intel mailbox command. The recovered `sepStartVersionedApps` caller
