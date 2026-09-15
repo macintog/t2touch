@@ -87,6 +87,17 @@ class Live:
 
 
 class PostRebootReconcilerTests(unittest.TestCase):
+    def test_child_failure_reason_accepts_only_exact_public_messages(self):
+        message = b"t2-touchid-manage: restored master Catacomb does not advertise the selected user"
+        self.assertEqual(post_reboot_diagnostic.child_failure_reason(message + b"\n"),
+                         "restore-user-not-advertised")
+        for private in (b"private payload", message + b" private identifier", b"x" * 513,
+                        "private payload", None):
+            self.assertIsNone(post_reboot_diagnostic.child_failure_reason(private))
+        with self.assertRaises(ValueError):
+            post_reboot_diagnostic.staged("external-deletion-reconciliation",
+                                          RuntimeError(), reason="private identifier")
+
     def test_external_reconciliation_skips_only_empty_initial_state(self):
         mapping_set = SimpleNamespace(
             mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)

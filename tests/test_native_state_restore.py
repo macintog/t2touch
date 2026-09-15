@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
+import copy
 import struct
 import sys
 import unittest
@@ -52,6 +53,55 @@ class FakeLease:
 
 
 class NativeStateRestoreTests(unittest.TestCase):
+    def test_cold_inventory_requires_exact_unloaded_master_only_state(self):
+        cold = {
+            "double_collection_equal": True,
+            "apple_uid": USER,
+            "biometric_protocol_version": 2,
+            "per_user_identity_records": [],
+            "global_identity_records": [],
+            "catacomb": {
+                "present": False,
+                "uuid": str(uuid.UUID(int=0)),
+                "hash": "0" * 64,
+                "user_states": [{"kind": "master", "user_id": 0xFFFFFFFF,
+                                 "state": 1, "needs_save": False}],
+            },
+        }
+        self.assertTrue(restore.is_cold_unloaded_inventory(cold, USER))
+        master_loaded = copy.deepcopy(cold)
+        master_loaded["catacomb"]["user_states"][0]["state"] = 3
+        self.assertTrue(restore.is_cold_unloaded_inventory(master_loaded, USER))
+        changes = (
+            ("double_collection_equal", False),
+            ("apple_uid", USER + 1),
+            ("biometric_protocol_version", 1),
+            ("per_user_identity_records", [object()]),
+            ("global_identity_records", [object()]),
+        )
+        for field, value in changes:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(cold)
+                changed[field] = value
+                self.assertFalse(restore.is_cold_unloaded_inventory(changed, USER))
+        for state in (0, 7, 9, True):
+            with self.subTest(master_state=state):
+                changed = copy.deepcopy(cold)
+                changed["catacomb"]["user_states"][0]["state"] = state
+                self.assertFalse(restore.is_cold_unloaded_inventory(changed, USER))
+        for field, value in (("present", True), ("uuid", str(uuid.UUID(int=1))),
+                             ("hash", "a" * 64), ("user_states", [])):
+            with self.subTest(catacomb_field=field):
+                changed = copy.deepcopy(cold)
+                changed["catacomb"][field] = value
+                self.assertFalse(restore.is_cold_unloaded_inventory(changed, USER))
+        loaded_empty = copy.deepcopy(cold)
+        loaded_empty["catacomb"]["user_states"] = [
+            {"kind": "master", "user_id": 0xFFFFFFFF, "state": 3, "needs_save": False},
+            {"kind": "user", "user_id": USER, "state": 3, "needs_save": False},
+        ]
+        self.assertFalse(restore.is_cold_unloaded_inventory(loaded_empty, USER))
+
     def test_master_then_user_then_biolockout_restore_order(self):
         lease = FakeLease()
         catacomb = SimpleNamespace(
@@ -93,6 +143,24 @@ class NativeStateRestoreTests(unittest.TestCase):
             [0x3C, 0x50, 0x42, 0x40, 0x3C, 0x40, 0x3C, 0x50, 0x42, 0x4B],
         )
         self.assertFalse(lease.invalidated)
+
+    def test_missing_user_after_master_load_stops_before_user_dispatch(self):
+        lease = FakeLease(state_reads=(master_state(1), master_state(3)))
+        catacomb = SimpleNamespace(read_committed_components=lambda: {
+            "master.cat": b"master", "user_000001f5.cat": b"user",
+        })
+        with (
+            patch.object(restore.t2_catacomb_codec, "decode_master_catacomb",
+                         return_value=SimpleNamespace(secure_data=b"LTFC-master")),
+            patch.object(restore.t2_catacomb_codec, "decode_user_catacomb",
+                         return_value=SimpleNamespace(secure_data=b"LTFC-user", identities=(
+                             SimpleNamespace(user_id=USER, uuid=str(uuid.UUID(int=1))),))),
+        ):
+            with self.assertRaisesRegex(restore.NativeStateRestoreError, "does not advertise"):
+                restore.restore_for_enrollment(lease, apple_user_id=USER,
+                    catacomb_store=catacomb, biolockout_store=object())
+        self.assertEqual(lease.commands.count(0x40), 1)
+        self.assertTrue(lease.invalidated)
 
     def test_live_identity_allows_secure_dirty_user_for_following_enrollment(self):
         identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes

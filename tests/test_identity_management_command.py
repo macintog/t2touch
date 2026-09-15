@@ -22,6 +22,41 @@ SPEC.loader.exec_module(MODULE)
 
 
 class IdentityManagementCommandTests(unittest.TestCase):
+    def test_automatic_external_check_restores_cold_state_before_comparison(self):
+        configuration = {"authority_mode": "linux-native", "apple_uid": 501}
+        store = mock.Mock()
+        store.read_committed_components.return_value = {}
+        lease = object()
+        local = object()
+        cold = object()
+        restored = object()
+        context = mock.MagicMock()
+        context.__enter__.return_value = (None, store, {}, local, lease, cold)
+        with (
+            mock.patch.object(MODULE, "require_mapping_capability"),
+            mock.patch.object(MODULE.t2_mutation_registry, "blocks_new_mutation", return_value=False),
+            mock.patch.object(MODULE.os.path, "lexists", return_value=False),
+            mock.patch.object(MODULE, "_private_root_owned"),
+            mock.patch.object(MODULE, "_native_management_lease", return_value=context),
+            mock.patch.object(MODULE.t2_native_state_restore, "is_cold_unloaded_inventory", return_value=True),
+            mock.patch.object(MODULE.t2_native_state_restore, "restore_for_enrollment") as restore,
+            mock.patch.object(MODULE.t2_bridge_inventory, "collect_stable_private_inventory", return_value=restored) as collect,
+            mock.patch.object(MODULE.t2_identity_inventory, "summarize", return_value={"identity_count": 1}) as summarize,
+            mock.patch.object(MODULE.t2_external_delete_reconcile, "plan") as plan,
+        ):
+            result = MODULE.run_external_delete_reconciliation(configuration, if_needed=True)
+            restore.assert_called_once()
+            self.assertIs(restore.call_args.args[0], lease)
+            self.assertIs(restore.call_args.kwargs["catacomb_store"], store)
+            collect.assert_called_once_with(lease, 501)
+            summarize.assert_called_once_with(local, restored)
+            summarize.side_effect = MODULE.t2_identity_inventory.IdentityInventoryError("mismatch")
+            with self.assertRaises(MODULE.t2_identity_inventory.IdentityInventoryError):
+                MODULE.run_external_delete_reconciliation(configuration, if_needed=True)
+            plan.assert_not_called()
+        self.assertFalse(result["external_deletion_reconciled"])
+        self.assertFalse(result["local_catacomb_mutated"])
+
     def test_status_is_redacted_and_counts_only_rename_operations(self):
         entries = (
             SimpleNamespace(
