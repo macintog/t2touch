@@ -26,6 +26,21 @@ SPEC.loader.exec_module(FIRST_RUN)
 
 
 class NativeFirstRunTests(unittest.TestCase):
+    def test_authority_failure_is_bounded_without_a_traceback(self):
+        class NativeEnrollmentError(RuntimeError):
+            pass
+
+        native = SimpleNamespace(
+            NativeEnrollmentError=NativeEnrollmentError,
+            _load_provisioned_authority=mock.Mock(
+                side_effect=NativeEnrollmentError("account generation changed")
+            ),
+        )
+        with self.assertRaisesRegex(
+            FIRST_RUN.NativeFirstRunError, "account generation changed"
+        ):
+            FIRST_RUN._validate_provisioned_authority(native, 1000, 501)
+
     def test_owner_surfaces_only_bounded_printable_parser_error(self):
         completed = SimpleNamespace(
             returncode=2,

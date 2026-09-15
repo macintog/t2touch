@@ -171,6 +171,14 @@ The doctor reports the failed component without exposing private biometric
 identifiers or keybag material. Normal installation should not require manual
 service sequencing or research acknowledgement flags.
 
+Upgrades validate Linux account authority, biometric readiness, pending
+mutation reconciliation, and fprintd as separate stages. A stopped stage leaves
+fingerprints, keybags, mappings, and mutation journals intact and prints that
+unit's bounded status. Account-generation changes are never rebound
+automatically: use the redacted mapping status named by the installer, then
+perform the explicit disabled-rebind and live-reconciliation procedure only
+after confirming that the mapped Linux account is still the intended account.
+
 ## Uninstall
 
 Restore the original PAM configuration and remove the software while preserving

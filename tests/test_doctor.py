@@ -61,6 +61,18 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(check.status, "pass")
         self.assertNotIn("example.service", check.detail)
 
+    def test_completed_post_reboot_reconciliation_may_be_inactive(self):
+        completed = mock.Mock(
+            returncode=0,
+            stdout="loaded\ninactive\ndead\nsuccess\n0\n",
+        )
+        with mock.patch.object(doctor, "run", return_value=completed):
+            check = doctor.service_check(
+                "t2-touchid-post-reboot.service", inactive_success_ok=True
+            )
+        self.assertEqual(check.status, "pass")
+        self.assertIn("no pending reconciliation", check.detail)
+
     def test_manual_unlock_mode_does_not_require_conditional_services(self):
         with tempfile.TemporaryDirectory() as directory:
             with (

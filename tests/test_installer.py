@@ -3,6 +3,9 @@
 """Hardware-free checks for installer portability assumptions."""
 
 from pathlib import Path
+import os
+import subprocess
+import tempfile
 import unittest
 
 
@@ -78,6 +81,78 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn(
             "\n  /usr/local/sbin/t2-sep-transport-unload\n", installer
         )
+
+    def test_native_activation_reports_each_prerequisite_before_fprintd(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        helper = (ROOT / "tools/installer-services.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('source "$source_dir/tools/installer-services.sh"', installer)
+        self.assertIn("start_linux_native_touchid_chain || exit $?", installer)
+        ordered = (
+            "start_touchid_stage t2-native-first-run.service",
+            "start_touchid_stage t2-biometric-ready.service",
+            "start_touchid_stage t2-touchid-post-reboot.service",
+            "start_touchid_stage fprintd.service",
+        )
+        positions = [helper.rindex(item) for item in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn(
+            "Existing fingerprint, keybag, mapping, and mutation state was preserved.",
+            helper,
+        )
+        self.assertIn("Account rebinding is intentionally never automatic.", helper)
+
+    def test_native_activation_stops_at_exact_failed_boundary(self):
+        helper = ROOT / "tools/installer-services.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "systemctl.log"
+            systemctl = root / "systemctl"
+            systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >>\"$SYSTEMCTL_LOG\"\n"
+                "if [[ $1 == start && $2 == \"$FAIL_UNIT\" ]]; then exit 1; fi\n"
+                "if [[ $1 == --no-pager ]]; then echo 'bounded status'; exit 3; fi\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{root}:/usr/bin:/bin",
+                "SYSTEMCTL_LOG": str(log),
+                "FAIL_UNIT": "t2-touchid-post-reboot.service",
+            }
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'target_uid=1000; source "$1"; start_linux_native_touchid_chain',
+                    "installer-test",
+                    str(helper),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            calls = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(
+            calls[:3],
+            [
+                "start t2-native-first-run.service",
+                "start t2-biometric-ready.service",
+                "start t2-touchid-post-reboot.service",
+            ],
+        )
+        self.assertIn(
+            "--no-pager --full status t2-touchid-post-reboot.service", calls
+        )
+        self.assertNotIn("start fprintd.service", calls)
+        self.assertIn("pending mutation reconciliation", completed.stderr)
+        self.assertIn("state was preserved", completed.stderr)
+        self.assertNotIn("rebind", completed.stderr.lower())
 
     def test_product_scripts_do_not_require_a_reboot(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
