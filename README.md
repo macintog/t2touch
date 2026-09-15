@@ -157,8 +157,9 @@ stale local inventory entry and permits a new `t2touch enroll`; it does not
 restore or replace the fingerprint macOS removed. This does not affect
 Linux-only systems.
 
-See the [documentation index](docs/README.md) for service contracts, research,
-and recorded validation.
+See the [changelog](CHANGELOG.md) for release notes and the
+[documentation index](docs/README.md) for service contracts, research, and
+recorded validation.
 
 ## Troubleshooting
 
