@@ -53,12 +53,14 @@ Omarchy package updates may replace it; rerunning the installer reapplies it
 when compatible. The UI change takes effect at the next shell start/login.
 
 The Omarchy installer also installs a small UWSM environment drop-in for the
-next graphical login. When both boot-framebuffer and native DRM devices exist,
+next graphical login. When boot-framebuffer devices and a connected native DRM display exist,
 it excludes the boot framebuffer from Hyprland, preventing the observed crash
 when unlocking re-enabled a phantom display. It discovers device paths at each
-login, prefers a connected internal panel, retains other native GPUs, and
+login, prefers a connected internal panel regardless of GPU vendor, then other
+connected displays, retains the remaining native GPUs, and
 preserves an explicit `AQ_DRM_DEVICES` selection. Native-only and
-framebuffer-only systems keep Hyprland's default selection. Remove
+framebuffer-only systems, and native GPUs without connected displays keep
+Hyprland's default selection. Remove
 `~/.config/uwsm/env-hyprland.d/20-t2touch-drm-devices.sh` to undo this part
 (or the corresponding path under `XDG_CONFIG_HOME`).
 

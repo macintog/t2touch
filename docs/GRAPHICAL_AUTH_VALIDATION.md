@@ -10,9 +10,12 @@ output and the subsequent actual fingerprint unlock returned to a stable desktop
 
 The installer now supplies a UWSM drop-in which discovers native DRM devices at
 login. It does not embed GPU addresses, card numbers, a username, or a model
-allowlist. Explicit selections and systems without both fallback and native DRM
-devices retain their prior behavior. Multi-GPU fixtures retain other native GPUs
-and put a connected internal panel first. Physical testing is on one
+allowlist. Explicit selections and systems without both fallback and connected native DRM
+displays retain their prior behavior. A headless native GPU never displaces the
+only usable framebuffer display. Multi-GPU fixtures retain other native GPUs
+and put a connected internal panel first, whether it belongs to the integrated
+or discrete GPU. With external displays only, their GPU precedes headless native
+GPUs. Single-GPU and native-only layouts retain the expected selection. Physical testing is on one
 MacBookPro16,1; fixture coverage is not a claim of qualification on every T2 Mac.
 
 ## Authentication latency
