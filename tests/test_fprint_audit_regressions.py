@@ -18,9 +18,13 @@ import re
 import signal
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import t2_fprint_result
 
 SOURCE = Path(__file__).resolve().parents[1] / "src"
 
@@ -54,7 +58,9 @@ NS = dict(
     process_signal=signal, AUTO_SYNC_ADAPTIVE=False,
     NATIVE_AUTHORITY="linux-native-e4", COMPATIBILITY_AUTHORITY="macos-control-oracle-v1",
     UNSET_ENROLLMENT_PROGRESS=object(), COMPLETED_CLAIM_SECONDS=0,
-    UNSTARTED_CLAIM_SECONDS=0, ServiceInterface=object, method=decorator,
+    UNSTARTED_CLAIM_SECONDS=0, NATIVE_CANCEL_SECONDS=0.1,
+    ServiceInterface=object, method=decorator,
+    INVENTORY_CACHE_SECONDS=0.0,
     signal_decorator=decorator, dbus_property=decorator,
     PropertyAccess=SimpleNamespace(READ=1), Message=Message, MessageType=TYPES,
     BusType=SimpleNamespace(SYSTEM=1), BUS_NAME="net.reactivated.Fprint",
@@ -66,6 +72,9 @@ NS = dict(
         type(value) is str and re.fullmatch(r"finger-[1-5]", value) is not None),
     t2_dbus_identity=SimpleNamespace(collect=None),
     t2_fprint_claim=SimpleNamespace(collect=None),
+    t2_performance=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    t2_fprint_result=t2_fprint_result,
+    time=time,
 )
 # The production name `signal` is the D-Bus decorator, not the stdlib module.
 NS["signal"] = decorator
@@ -347,7 +356,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         device._require_claim_owner = mock.Mock()
         device._arm_unstarted_claim_expiry = mock.Mock()
         device.backend = SimpleNamespace(operation_lock=asyncio.Lock(),
-            runtime_projection=mock.AsyncMock(return_value=Projection()))
+            runtime_projection=mock.AsyncMock(return_value=Projection()),
+            invalidate_inventory=mock.Mock())
         device.deletion_client = SimpleNamespace(delete=delete)
         device.verify_task = device.enrollment_client = device.delete_task = None
         device.claim_expiry_task = device.claimed_caller = device.claimed_evidence = None
@@ -425,6 +435,11 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         backend.linux_uid = 1000
         backend.match_seconds = 0
         backend.process = None
+        backend.process_owner = None
+        backend.native_worker = None
+        backend.native_worker_stderr_task = None
+        backend.native_worker_feedback = None
+        backend.native_worker_cue_sent = False
         backend.schedule_feedback = mock.Mock()
         return backend
 
@@ -472,7 +487,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(asyncio.CancelledError):
                         await asyncio.wait_for(task, 2)
                 else:
-                    with self.assertRaises((RuntimeError, ValueError)):
+                    with self.assertRaises((RuntimeError, ValueError, TimeoutError)):
                         await asyncio.wait_for(task, 2)
             self.assertIsNotNone(children[0].returncode, "helper was not reaped")
             self.assertIsNone(backend.process)
@@ -497,6 +512,39 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeated_native_cancellation_still_reaps_child(self):
         await self._native_with_child("import time; time.sleep(30)", cancel=True, repeated=True)
+
+    async def test_stuck_request_cancellation_kills_the_worker_session(self):
+        spawn = asyncio.create_subprocess_exec
+        children = []
+
+        async def child(*_args, **kwargs):
+            process = await spawn(
+                sys.executable,
+                "-c",
+                "import signal,time; "
+                "print('{\"schema_version\":1,\"ready\":true}', flush=True); "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+                **kwargs,
+            )
+            children.append(process)
+            return process
+
+        backend = self.backend()
+        with (
+            mock.patch.object(asyncio, "create_subprocess_exec", child),
+            mock.patch.object(backend, "_schedule_native_worker_warm"),
+        ):
+            task = asyncio.create_task(backend._run_native_match())
+            for _ in range(100):
+                if backend.process is not None:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertIsNotNone(backend.process)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        self.assertIsNotNone(children[0].returncode)
+        self.assertIsNone(backend.process)
 
     async def test_stop_does_not_terminate_other_operation(self):
         backend = self.backend()
@@ -527,18 +575,46 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_healthy_native_child_result_is_preserved(self):
         backend = self.backend()
-        expected = dict(configured_identity_records_reconciled=True,
-            bridge_os_transaction_released_after_match=True, termination_requested=False)
+        expected = {
+            "schema_version": 1,
+            "selector": "all",
+            "verdict": "verify-no-match",
+            "finger_name": None,
+        }
         spawn = asyncio.create_subprocess_exec
         children = []
         async def child(*_args, **kwargs):
-            process = await spawn(sys.executable, "-c", f"print({json.dumps(expected)!r})", **kwargs)
+            response = {
+                "schema_version": 1,
+                "request_id": 1,
+                "ok": True,
+                "result": expected,
+            }
+            program = "print('{\"schema_version\":1,\"ready\":true}', flush=True);"
+            if not children:
+                program += f"print({json.dumps(response)!r}, flush=True)"
+            else:
+                program += "import time; time.sleep(30)"
+            process = await spawn(sys.executable, "-c", program, **kwargs)
             children.append(process)
             return process
         with mock.patch.object(asyncio, "create_subprocess_exec", child):
             self.assertEqual(await backend._run_native_match(), expected)
-        self.assertEqual(children[0].returncode, 0)
+            for _ in range(100):
+                if (
+                    len(children) == 2
+                    and backend.native_worker is children[1]
+                    and getattr(backend, "native_worker_warm_task", None) is None
+                ):
+                    break
+                await asyncio.sleep(0.01)
+        self.assertEqual(len(children), 2)
+        self.assertIsNot(backend.native_worker, children[0])
+        self.assertIs(backend.native_worker, children[1])
         self.assertIsNone(backend.process)
+        await backend._discard_native_worker(children[1])
+        self.assertIsNotNone(children[0].returncode)
+        self.assertIsNotNone(children[1].returncode)
 
     async def test_audio_timeout_reaps_helper(self):
         backend = self.backend()
@@ -571,24 +647,64 @@ class KernelDiagnosticTests(unittest.TestCase):
 
 
 class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
-    async def run_main(self, reply):
+    async def run_main(
+        self, reply, lifecycle_message=None, owner_lookup_message=None
+    ):
         calls = []
+        handlers = []
         ready = asyncio.Event()
+        owner_message_sent = False
+        current_owner = ":1.42"
         class Bus:
             async def connect(self):
                 return self
-            def add_message_handler(self, _handler):
-                pass
+            def add_message_handler(self, handler):
+                handlers.append(handler)
             def export(self, *_args):
                 pass
             async def call(self, message):
+                nonlocal owner_message_sent
                 calls.append(message)
+                if message.member == "GetNameOwner":
+                    if owner_lookup_message is not None and not owner_message_sent:
+                        owner_message_sent = True
+                        for handler in handlers:
+                            if handler.__name__ == "system_sleep_handler":
+                                handler(owner_lookup_message)
+                    return Message(
+                        message_type=TYPES.METHOD_RETURN,
+                        signature="s",
+                        body=[current_owner],
+                    )
+                if message.member == "Get":
+                    return Message(
+                        message_type=TYPES.METHOD_RETURN,
+                        signature="v",
+                        body=[SimpleNamespace(signature="b", value=False)],
+                    )
                 return reply
             async def request_name(self, _name):
                 ready.set()
         bus = Bus()
+        backend = SimpleNamespace(system_sleeping=True, runtime_warm_task=None)
+        backend.warm_runtime = mock.AsyncMock()
+        def schedule_warm():
+            if backend.system_sleeping:
+                return None
+            task = backend.runtime_warm_task
+            if task is not None and not task.done():
+                return task
+            task = asyncio.create_task(backend.warm_runtime())
+            backend.runtime_warm_task = task
+            return task
+        backend._schedule_runtime_warm = mock.Mock(side_effect=schedule_warm)
+        def sleep_changed(sleeping):
+            backend.system_sleeping = sleeping
+            if not sleeping:
+                schedule_warm()
+        backend.system_sleep_changed = mock.Mock(side_effect=sleep_changed)
         changes = dict(
-            T2Backend=lambda *_args: object(), SenderAwareMessageBus=lambda **_kwargs: bus,
+            T2Backend=lambda *_args, **_kwargs: backend, SenderAwareMessageBus=lambda **_kwargs: bus,
             FprintDevice=lambda *_args, **_kwargs: object(), FprintManager=lambda: object(),
             enrollment_client_for_arguments=lambda _args: None,
             deletion_client_for_arguments=lambda _args: None,
@@ -596,33 +712,152 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch.dict(NS, changes):
             task = asyncio.create_task(FPRINT.main_async(argparse.Namespace(match_seconds=0)))
-            for _ in range(20):
+            for _ in range(100):
                 if task.done() or ready.is_set():
                     break
                 await asyncio.sleep(0)
+            if ready.is_set() and lifecycle_message is not None:
+                if lifecycle_message.member == "NameOwnerChanged":
+                    current_owner = lifecycle_message.body[2]
+                for handler in handlers:
+                    if (
+                        handler.__name__ == "system_sleep_handler"
+                        and lifecycle_message.member == "PrepareForSleep"
+                    ) or (
+                        handler.__name__ == "sender_departure_handler"
+                        and lifecycle_message.member == "NameOwnerChanged"
+                    ):
+                        handler(lifecycle_message)
+                for _ in range(10):
+                    await asyncio.sleep(0)
             error = task.exception() if task.done() else None
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        return calls, ready.is_set(), error
+        return calls, ready.is_set(), error, backend
 
     async def test_subscription_installed_before_exposure(self):
-        calls, ready, error = await self.run_main(Message(
+        calls, ready, error, _backend = await self.run_main(Message(
             message_type=TYPES.METHOD_RETURN, signature="", body=[]))
         self.assertIsNone(error)
         self.assertTrue(ready)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 4)
         self.assertEqual(calls[0].member, "AddMatch")
         self.assertIn("NameOwnerChanged", calls[0].body[0])
         self.assertIn("sender='org.freedesktop.DBus'", calls[0].body[0])
+        self.assertIn("PrepareForSleep", calls[1].body[0])
+        self.assertEqual(calls[2].member, "GetNameOwner")
+        self.assertEqual(calls[2].body, ["org.freedesktop.login1"])
+        self.assertEqual(calls[3].member, "Get")
+        self.assertEqual(
+            calls[3].body,
+            ["org.freedesktop.login1.Manager", "PreparingForSleep"],
+        )
+        _backend.system_sleep_changed.assert_called_once_with(False)
+        _backend.warm_runtime.assert_awaited_once_with()
 
     async def test_subscription_failure_prevents_exposure(self):
         for reply in (Message(message_type=TYPES.ERROR, signature="s", body=["denied"]),
                       Message(message_type=TYPES.METHOD_RETURN, signature="s", body=["bad"]),
                       None):
             with self.subTest(reply=reply):
-                _calls, ready, error = await self.run_main(reply)
+                _calls, ready, error, _backend = await self.run_main(reply)
                 self.assertFalse(ready)
                 self.assertIsInstance(error, RuntimeError)
+
+    async def test_resume_invalidates_then_rewarms_runtime(self):
+        reply = Message(message_type=TYPES.METHOD_RETURN, signature="", body=[])
+        lifecycle = Message(
+            message_type=TYPES.SIGNAL,
+            sender=":1.42",
+            path="/org/freedesktop/login1",
+            interface="org.freedesktop.login1.Manager",
+            member="PrepareForSleep",
+            signature="b",
+            body=[False],
+        )
+        _calls, ready, error, backend = await self.run_main(reply, lifecycle)
+        self.assertTrue(ready)
+        self.assertIsNone(error)
+        self.assertEqual(
+            backend.system_sleep_changed.call_args_list,
+            [mock.call(False), mock.call(False)],
+        )
+
+    async def test_suspend_invalidates_without_starting_a_warmup(self):
+        reply = Message(message_type=TYPES.METHOD_RETURN, signature="", body=[])
+        lifecycle = Message(
+            message_type=TYPES.SIGNAL,
+            sender=":1.42",
+            path="/org/freedesktop/login1",
+            interface="org.freedesktop.login1.Manager",
+            member="PrepareForSleep",
+            signature="b",
+            body=[True],
+        )
+        _calls, ready, error, backend = await self.run_main(reply, lifecycle)
+        self.assertTrue(ready)
+        self.assertIsNone(error)
+        self.assertEqual(
+            backend.system_sleep_changed.call_args_list,
+            [mock.call(False), mock.call(True)],
+        )
+
+    async def test_spoofed_sleep_sender_is_ignored(self):
+        reply = Message(message_type=TYPES.METHOD_RETURN, signature="", body=[])
+        lifecycle = Message(
+            message_type=TYPES.SIGNAL,
+            sender="org.freedesktop.login1",
+            path="/org/freedesktop/login1",
+            interface="org.freedesktop.login1.Manager",
+            member="PrepareForSleep",
+            signature="b",
+            body=[True],
+        )
+        _calls, ready, error, backend = await self.run_main(reply, lifecycle)
+        self.assertTrue(ready)
+        self.assertIsNone(error)
+        backend.system_sleep_changed.assert_called_once_with(False)
+
+    async def test_sleep_signal_during_owner_lookup_is_preserved(self):
+        reply = Message(message_type=TYPES.METHOD_RETURN, signature="", body=[])
+        lifecycle = Message(
+            message_type=TYPES.SIGNAL,
+            sender=":1.42",
+            path="/org/freedesktop/login1",
+            interface="org.freedesktop.login1.Manager",
+            member="PrepareForSleep",
+            signature="b",
+            body=[True],
+        )
+        _calls, ready, error, backend = await self.run_main(
+            reply, owner_lookup_message=lifecycle
+        )
+        self.assertFalse(ready)
+        self.assertIsNone(error)
+        backend.system_sleep_changed.assert_called_once_with(True)
+        backend.warm_runtime.assert_not_awaited()
+
+    async def test_login1_owner_change_fails_closed_until_reconciled(self):
+        reply = Message(message_type=TYPES.METHOD_RETURN, signature="", body=[])
+        owner_change = Message(
+            message_type=TYPES.SIGNAL,
+            sender="org.freedesktop.DBus",
+            path="/org/freedesktop/DBus",
+            interface="org.freedesktop.DBus",
+            member="NameOwnerChanged",
+            signature="sss",
+            body=["org.freedesktop.login1", ":1.42", ":1.43"],
+        )
+        _calls, ready, error, backend = await self.run_main(
+            reply, lifecycle_message=owner_change
+        )
+        self.assertTrue(ready)
+        self.assertIsNone(error)
+        self.assertEqual(
+            backend.system_sleep_changed.call_args_list,
+            [mock.call(False), mock.call(True), mock.call(False)],
+        )
+        self.assertEqual(backend.warm_runtime.await_count, 2)
 
 
 if __name__ == "__main__":

@@ -786,6 +786,26 @@ class PostRebootReconcilerTests(unittest.TestCase):
             external_runner.call_args.kwargs["env"]["SUDO_UID"], "1000"
         )
 
+    def test_native_dispatch_leaves_active_purge_for_explicit_resume(self):
+        history = SimpleNamespace(
+            baseline={"target_linux_uid": 1000, "caller_linux_uid": 1000}
+        )
+        candidate = reconciler.PendingMutation(
+            "delete-batch",
+            "identity-management",
+            Path("/var/lib/t2-touchid/mutations/batch.jsonl"),
+            history,
+        )
+        with mock.patch.object(native_reconciler, "ROOT_UID", os.geteuid()):
+            result = native_reconciler.run(
+                candidate_loader=lambda: candidate,
+                enrollment_verifier=mock.Mock(),
+                publication_recoverer=mock.Mock(),
+                management_runner=mock.Mock(),
+            )
+        self.assertEqual(result.state, "delete-batch-awaits-resume")
+        self.assertFalse(result.journal_updated)
+
 
 if __name__ == "__main__":
     unittest.main()

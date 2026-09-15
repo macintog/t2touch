@@ -13,6 +13,7 @@ import t2_catacomb_sync_journal
 import t2_enrollment_journal
 import t2_external_delete_reconcile
 import t2_identity_delete_journal
+import t2_identity_delete_batch_journal
 import t2_identity_rename_journal
 import t2_mutation_journal
 
@@ -110,6 +111,19 @@ def _delete_entry(records) -> MutationEntry:
     return MutationEntry("delete-one", phase.value, not complete, post_reboot)
 
 
+def _delete_batch_entry(records) -> MutationEntry:
+    try:
+        history = t2_identity_delete_batch_journal.validate_history(records)
+    except t2_identity_delete_batch_journal.IdentityDeleteBatchJournalError as error:
+        raise MutationRegistryError("batch-delete journal is invalid") from error
+    phase = history.phase
+    complete = phase in {
+        t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.BASELINE,
+        t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.RECONCILED,
+    }
+    return MutationEntry("delete-batch", phase.value, not complete, False)
+
+
 def _catacomb_sync_entry(records) -> MutationEntry:
     try:
         history = t2_catacomb_sync_journal.validate_history(records)
@@ -166,11 +180,13 @@ def scan(root: Path) -> tuple[MutationEntry, ...]:
             result.append(_rename_entry(records))
         elif kind == "delete-one":
             result.append(_delete_entry(records))
+        elif kind == "delete-batch":
+            result.append(_delete_batch_entry(records))
         elif kind == "sync-user-catacomb":
             result.append(_catacomb_sync_entry(records))
         elif kind == "reconcile-external-delete":
             result.append(_external_delete_entry(records))
-        elif kind in {"delete-batch", "recovery"}:
+        elif kind == "recovery":
             # No typed completion state exists yet, so these are conservatively
             # owned by their future broker and always block another mutation.
             result.append(MutationEntry(kind, "unrouted", True, False))

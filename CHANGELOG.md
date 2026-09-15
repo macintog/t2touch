@@ -6,6 +6,46 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.0.5 - 2026-09-15
+
+### Added
+
+- Add privacy-safe `t2touch list`, `t2touch count`, and `t2touch status --json`
+  output backed by the caller-bound fprintd inventory.
+- Add `t2touch purge` with destructive confirmation, fresh PolicyKit
+  authorization, an ordered outer mutation journal, exact resume validation,
+  and redacted partial-completion reporting.
+
+### Changed
+
+- Render `t2touch status` from validated neutral handles instead of passing
+  through localized `fprintd-list` text.
+- Reduce Touch ID preparation latency with a generation-bound inventory cache
+  and a rotating prewarmed native matcher. Measured median list-to-reader-armed
+  time fell from 5.049 seconds to 2.214 seconds while each match still rebuilds
+  its authorization and hardware state.
+- Add privacy-safe preparation timing events and a reusable latency probe for
+  distinguishing inventory, authorization, hardware, and match phases.
+
+### Fixed
+
+- Refresh fingerprint inventory after purge or other mutations through separate
+  administrative helpers, including changes that do not advance account authority.
+- Report an empty fingerprint inventory successfully in list, count, and status
+  commands instead of treating fprintd's `NoEnrolledPrints` response as a failure.
+- Explain the active local session requirement before SSH deletion attempts and
+  distinguish authorization denial or cancellation from incomplete deletion.
+- Confirm the empty final inventory after successful purge and clearly report
+  an already empty inventory as having nothing to delete.
+- Send expected typed D-Bus errors, including empty inventory, without logging
+  them as failed asynchronous callbacks.
+
+- Block and drain inventory, warmup, and matcher work across authenticated
+  system sleep transitions so no new Touch ID hardware phase starts while the
+  host is entering sleep.
+- Validate and bound resident matcher replies while preserving exact terminal
+  verdicts, cancellation, exclusive ownership, and crash recovery.
+
 ## 0.0.4 - 2026-09-15
 
 ### Fixed

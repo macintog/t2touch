@@ -35,6 +35,7 @@ Enroll a fingerprint, then check and test it:
 ```bash
 t2touch enroll
 t2touch status
+t2touch list
 t2touch verify
 ```
 
@@ -89,16 +90,41 @@ t2touch enroll
 # Show the service and neutral fingerprint slots
 t2touch status
 
+# List only the enrolled neutral slots, or print their count
+t2touch list
+t2touch count
+
+# Emit machine-readable, privacy-safe status
+t2touch status --json
+
 # Test any enrolled fingerprint
 t2touch verify
 
 # Delete one fingerprint
 t2touch delete finger-2
+
+# Delete every fingerprint (prompts before authorization)
+t2touch purge
 ```
 
 Deletion first opens the system authorization dialog. Authenticate with an
 existing fingerprint or your password; only then does deletion take the reader.
 Cancelling that dialog leaves the fingerprint unchanged.
+
+`t2touch purge` confirms the full scope, obtains a separate fresh system
+authorization, and deletes the inventory in its recorded slot order. The
+operation is durable rather than atomic: if power, transport, or persistence
+fails after some deletions, it reports incomplete progress and keeps all other
+fingerprint mutations blocked. Run the doctor, then continue the exact recorded
+operation with `t2touch purge --resume`. For noninteractive use, the initial
+command requires `t2touch purge --yes`.
+
+Run deletion commands as the mapped account in an active local desktop session,
+outside SSH. `--yes` skips the confirmation, but still requires authorization.
+Successful purge confirms that no fingerprints remain enrolled. Subsequent
+`count` and `list` reflect the deletion immediately: an empty inventory prints
+`0` or `No fingerprints enrolled.`, and JSON output contains count `0` and an
+empty fingerprint list.
 
 Fingerprint names are five neutral slots: `Finger 1` through `Finger 5`. They
 do not claim which physical finger you used. Deleting one slot never renumbers
@@ -110,8 +136,9 @@ All enrolled fingerprints are equivalent for authentication. Existing and new
 entries use the same fprintd inventory and the same add, verify, and delete
 operations; their origin is not an authentication distinction. Deleting the
 final named fingerprint produces a clean, enrollable empty inventory; the next
-successful enrollment is `Finger 1`. A batch delete-all operation is not
-exposed. If another trusted owner, such as macOS, removes the final fingerprint,
+successful enrollment is `Finger 1`. Purging fingerprints preserves the mapped
+account, keybag, activation authority, recovery evidence, and installer state.
+If another trusted owner, such as macOS, removes the final fingerprint,
 the service detects the stable empty SEP inventory and reconciles Linux before
 fprintd starts.
 
@@ -179,7 +206,7 @@ The architectural boundary and contributor work are described in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Once connected, imported and
 Linux-enrolled fingerprints are designed to share one neutral fprintd inventory
 and the same verify/delete behavior without regard to origin; that migration is
-not part of the four-command proof of concept.
+not part of the supported administration surface.
 
 Booting macOS may reconcile SEP from macOS’s own database. Linux-only additions
 therefore are not currently guaranteed to survive a later macOS boot. When
@@ -187,6 +214,17 @@ macOS removes the sole remaining fingerprint, Linux automatically discards its
 stale local inventory entry and permits a new `t2touch enroll`; it does not
 restore or replace the fingerprint macOS removed. This does not affect
 Linux-only systems.
+
+The `status` and `list` commands obtain one caller-bound inventory through the
+same fprintd D-Bus interface used by desktop clients. Their JSON output contains
+only service readiness, neutral `finger-N` handles, display labels, and a count;
+it never exposes SEP identity UUIDs or biometric data. `count` prints only the
+decimal count for scripts.
+
+macOS `bioutil` informed this small administration surface, but its system
+preferences do not map directly onto Linux. t2touch does not expose Apple Pay,
+timeout, global enable/disable, cross-user, or private-authority purge commands.
+See the [administration decisions](docs/ADMINISTRATION.md).
 
 See the [changelog](CHANGELOG.md) for release notes and the
 [documentation index](docs/README.md) for service contracts, research, and

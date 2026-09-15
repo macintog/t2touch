@@ -246,7 +246,8 @@ class PolkitGrantTests(unittest.TestCase):
             SOURCE.parent / "polkit" / "org.t2linux.touchid.policy"
         ).getroot()
         actions = {item.attrib.get("id") for item in root.findall("action")}
-        self.assertEqual(actions, collector.ACTION_IDS)
+        self.assertEqual(actions, collector.MANIFEST_ACTION_IDS)
+        self.assertTrue(collector.EXEC_ACTION_IDS.isdisjoint(collector.ACTION_IDS))
         for item in root.findall("action"):
             defaults = item.find("defaults")
             self.assertIsNotNone(defaults)

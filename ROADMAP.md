@@ -10,6 +10,8 @@ The [README](README.md#what-has-been-proven) describes the tested scope.
 - Percentage-driven enrollment through `t2touch enroll` and standard fprintd clients.
 - Any-enrolled-finger authentication through fprintd, sudo, PolicyKit, and the lock screen.
 - Five stable neutral slots, lowest-vacancy allocation, and named deletion through an empty inventory.
+- Privacy-safe `status`, `list`, and `count` commands backed by the caller-bound fprintd inventory.
+- Confirmed, freshly authorized fingerprint purge with durable partial-progress resume.
 - Password fallback, reversible PAM installation, and private-state preservation on uninstall.
 - Same-session userspace reinstall when the resident transport matches.
 - Readiness messages in compatible Omarchy lock and permission dialogs.
@@ -33,5 +35,6 @@ transport requires a planned kernel restart before installation can proceed.
 - Automatic rollback/removal of the optional desktop changes during uninstall.
 - An untouched final-source clone/install/enroll replay and broader upgrade coverage.
 
-Batch delete-all and private-state purge are not exposed. Broader support or a
-release tag does not follow from the single-machine demonstration alone.
+Private-state purge and a single global biometric-policy toggle are not
+exposed. Broader support or a release tag does not follow from
+the single-machine demonstration alone.

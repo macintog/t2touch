@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+import asyncio
+from contextlib import contextmanager, redirect_stdout
 import fcntl
 import hashlib
+import io
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -41,6 +44,9 @@ import t2_acm_device
 import t2_activation_bundle
 import t2_aks_transport
 import t2_enrollment_journal
+import t2_fprint_result
+import t2_performance
+import t2_rsd
 import t2_user_activation_operation
 import t2_user_authority
 import t2_user_policy
@@ -58,12 +64,11 @@ OPERATION_LOCK = RUN_ROOT / "operation.lock"
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 SYSTEMD_INHIBIT = Path("/usr/bin/systemd-inhibit")
 CAT = Path("/usr/bin/cat")
-DISCOVERY_PYTHON = Path("/opt/t2-touchid/.venv/bin/python")
-DISCOVERY_TOOL = Path("/opt/t2-touchid/src/discover-biometric-port.py")
 PROBE = Path("/opt/t2-touchid/src/bridge-xpc-probe.py")
 FIRST_DYNAMIC_PORT = 49152
 DISCOVERY_TIMEOUT_SECONDS = 45
 MAX_RETAINED_RESULT_BYTES = 8 * 1024 * 1024
+MAX_WORKER_RESPONSE_BYTES = 4096
 
 
 class NativeMatchError(RuntimeError):
@@ -142,35 +147,21 @@ def _require_runtime() -> None:
 
 def _discover_port(host: str, interface: str) -> int:
     try:
-        completed = subprocess.run(
-            [
-                str(DISCOVERY_PYTHON),
-                str(DISCOVERY_TOOL),
-                "--host",
-                host,
-                "--interface",
-                interface,
-                "--probe-timeout",
-                "0.2",
-                "--concurrency",
-                "512",
-            ],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=DISCOVERY_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise NativeMatchError("BiometricKit endpoint discovery timed out") from error
-    if completed.returncode != 0:
-        raise NativeMatchError("BiometricKit endpoint discovery failed")
-    try:
-        value = completed.stdout.decode("ascii").strip()
-    except UnicodeDecodeError as error:
-        raise NativeMatchError("BiometricKit discovery output is invalid") from error
-    if not value.isdecimal() or not FIRST_DYNAMIC_PORT <= int(value) <= 65535:
+        async def discover():
+            return await asyncio.wait_for(
+                t2_rsd.discover_peer(host, interface, 0.2, 512),
+                DISCOVERY_TIMEOUT_SECONDS,
+            )
+
+        _scoped_host, peer = asyncio.run(discover())
+        port = t2_rsd.service_port(peer, "com.apple.eos.BiometricKit")
+    except (OSError, RuntimeError, asyncio.TimeoutError) as error:
+        raise NativeMatchError(
+            "BiometricKit endpoint discovery failed"
+        ) from error
+    if type(port) is not int or not FIRST_DYNAMIC_PORT <= port <= 65535:
         raise NativeMatchError("BiometricKit discovery output is invalid")
-    return int(value)
+    return port
 
 
 def _inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
@@ -200,6 +191,7 @@ def _inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
 
 @contextmanager
 def _sleep_inhibitor() -> Iterator[subprocess.Popen[bytes]]:
+    started = time.monotonic()
     process = subprocess.Popen(
         [
             str(SYSTEMD_INHIBIT),
@@ -223,6 +215,7 @@ def _sleep_inhibitor() -> Iterator[subprocess.Popen[bytes]]:
             time.sleep(0.05)
         else:
             raise NativeMatchError("sleep inhibitor could not be verified")
+        t2_performance.emit("native_match", "inhibitor_acquire", started)
         yield process
     finally:
         if process.stdin is not None:
@@ -805,6 +798,8 @@ def _run_probe(
     addition_journal: str | None = None,
     target_finger: str | None = None,
     resolve_any_finger: bool = False,
+    result_sink=None,
+    bridge_main=None,
 ) -> int:
     read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
     process: subprocess.Popen[bytes] | None = None
@@ -821,31 +816,53 @@ def _run_probe(
             target_finger=target_finger,
             resolve_any_finger=resolve_any_finger,
         )
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            pass_fds=(read_fd,),
-        )
-        os.close(read_fd)
-        read_fd = -1
         offset = 0
         while offset < len(credential_set):
             offset += os.write(write_fd, credential_set[offset:])
         os.close(write_fd)
         write_fd = -1
-        while True:
-            if cancellation.is_set() and process.poll() is None:
-                process.terminate()
+        if bridge_main is None:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                pass_fds=(read_fd,),
+            )
+            os.close(read_fd)
+            read_fd = -1
+            while True:
+                if cancellation.is_set() and process.poll() is None:
+                    process.terminate()
+                try:
+                    stdout, _stderr = process.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            returncode = process.returncode
+        else:
+            # The resident helper is single-use. Running the already-imported
+            # probe in that consumed process preserves per-request process
+            # isolation without paying a second Python import cold start.
+            read_fd = -1  # bridge main owns and closes the credential descriptor.
+            previous_argv = sys.argv
+            previous_signal = signal.getsignal(signal.SIGTERM)
+            captured = io.StringIO()
             try:
-                stdout, _stderr = process.communicate(timeout=0.1)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+                sys.argv = [str(PROBE), *command[2:]]
+                with redirect_stdout(captured):
+                    bridge_main()
+            finally:
+                sys.argv = previous_argv
+                signal.signal(signal.SIGTERM, previous_signal)
+            stdout = captured.getvalue().encode("utf-8")
+            returncode = 0
         if stdout:
-            sys.stdout.buffer.write(stdout)
-            sys.stdout.buffer.flush()
-        if process.returncode != 0:
+            if result_sink is None:
+                sys.stdout.buffer.write(stdout)
+                sys.stdout.buffer.flush()
+            else:
+                result_sink(stdout)
+        if returncode != 0:
             raise NativeMatchError(_probe_failure_reason(stdout))
         if expect_no_match and require_expected_result:
             _validate_negative_result(stdout)
@@ -860,7 +877,7 @@ def _run_probe(
                 Path(private_events),
                 str(uuid.UUID(BOOT_ID.read_text(encoding="ascii").strip())),
             )
-        return process.returncode
+        return returncode
     finally:
         for descriptor in (read_fd, write_fd):
             if descriptor >= 0:
@@ -874,9 +891,18 @@ def _run_probe(
                 process.wait()
 
 
-def _run(args: argparse.Namespace, cancellation: Event) -> int:
+def _run(
+    args: argparse.Namespace,
+    cancellation: Event,
+    *,
+    result_sink=None,
+    bridge_main=None,
+) -> int:
+    operation_started = time.monotonic()
+    phase_started = time.monotonic()
     configuration = _configuration()
     authority = t2_user_authority.load(int(configuration["linux_uid"]))
+    t2_performance.emit("native_match", "authority_load", phase_started)
     if (
         authority.origin != "linux-native-e4"
         or authority.selected.apple_uid != configuration["apple_uid"]
@@ -897,22 +923,33 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
             raise NativeMatchError("operation lock is unsafe")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with _sleep_inhibitor() as inhibitor:
+            phase_started = time.monotonic()
             port = _discover_port(
                 str(configuration["host"]), str(configuration["interface"])
             )
+            t2_performance.emit("native_match", "endpoint_discovery", phase_started)
             with (
                 t2_aks_transport.AKSActivationTransport() as transport,
                 t2_acm_device.ACMDevice() as acm_device,
             ):
+                phase_started = time.monotonic()
                 decision, operation_id = _authorize(
                     authority, transport, linux_boot_uuid
                 )
+                t2_performance.emit(
+                    "native_match", "operation_authorization", phase_started
+                )
                 selected = authority.selected
                 journal_path = ACTIVATION_ROOT / f"{operation_id}.jsonl"
+                phase_started = time.monotonic()
                 with t2_activation_bundle.activation_secret(
                     Path(selected.activation_secret_path),
                     selected.activation_secret_sha256,
                 ) as activation_material:
+                    t2_performance.emit(
+                        "native_match", "activation_secret_load", phase_started
+                    )
+                    phase_started = time.monotonic()
                     with t2_user_activation_operation.retain_ready_identity_handle(
                         journal_path,
                         authority.mapping_set,
@@ -923,13 +960,23 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
                         authorization=decision,
                         linux_boot_uuid=linux_boot_uuid,
                     ) as retained_state:
+                        t2_performance.emit(
+                            "native_match", "keybag_retain", phase_started
+                        )
                         if retained_state in {"device-locked", "before-first-unlock"}:
+                            phase_started = time.monotonic()
                             t2_user_activation_operation.prepare_retained_identity(
                                 journal_path, selected, transport
+                            )
+                            t2_performance.emit(
+                                "native_match",
+                                "identity_prepare",
+                                phase_started,
                             )
                         result = None
                         final_policy = None
                         try:
+                            phase_started = time.monotonic()
                             with t2_acm_device.identity_authorized_context(
                                 acm_device,
                                 selected.apple_uid,
@@ -937,6 +984,11 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
                                 transport.bind_loaded_identity_secret_to_acm_context,
                                 include_authorization_context=True,
                             ) as proof:
+                                t2_performance.emit(
+                                    "native_match",
+                                    "acm_context_authorization",
+                                    phase_started,
+                                )
                                 if len(proof) != 4:
                                     raise NativeMatchError(
                                         "native match authorization omitted its output context"
@@ -951,6 +1003,7 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
                                     "device-locked",
                                     "before-first-unlock",
                                 }:
+                                    phase_started = time.monotonic()
                                     t2_user_activation_operation.unlock_retained_identity(
                                         journal_path,
                                         selected,
@@ -959,11 +1012,17 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
                                         transport,
                                         identity_reference,
                                     )
+                                    t2_performance.emit(
+                                        "native_match",
+                                        "identity_unlock",
+                                        phase_started,
+                                    )
                                 _wipe(activation_material)
                                 if cancellation.is_set() or inhibitor.poll() is not None:
                                     raise NativeMatchError(
                                         "native match cancelled before sensor start"
                                     )
+                                phase_started = time.monotonic()
                                 result = _run_probe(
                                     configuration,
                                     port=port,
@@ -979,6 +1038,11 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
                                     addition_journal=args.addition_journal,
                                     target_finger=args.match_finger_name,
                                     resolve_any_finger=args.resolve_any_finger_name,
+                                    result_sink=result_sink,
+                                    bridge_main=bridge_main,
+                                )
+                                t2_performance.emit(
+                                    "native_match", "bridge_match", phase_started
                                 )
                         except t2_acm_device.ACMContextCleanupError as error:
                             if error.primary_error is not None:
@@ -993,9 +1057,161 @@ def _run(args: argparse.Namespace, cancellation: Event) -> int:
                             raise NativeMatchError(
                                 "native match authorization did not complete"
                             )
+                        t2_performance.emit(
+                            "native_match", "request_total", operation_started
+                        )
                         return result
     finally:
         os.close(lock_descriptor)
+
+
+def _worker_arguments(value: object) -> argparse.Namespace:
+    """Parse the narrow request used by the prepared verification worker."""
+
+    fields = {
+        "schema_version",
+        "request_id",
+        "observation_seconds",
+        "match_finger_name",
+        "resolve_any_finger_name",
+    }
+    if (
+        type(value) is not dict
+        or set(value) != fields
+        or value["schema_version"] != 1
+    ):
+        raise NativeMatchError("resident match request schema is invalid")
+    seconds = value["observation_seconds"]
+    request_id = value["request_id"]
+    target = value["match_finger_name"]
+    resolve_any = value["resolve_any_finger_name"]
+    if (
+        type(request_id) is not int
+        or not 1 <= request_id <= 2**63 - 1
+        or type(seconds) not in (int, float)
+        or not math.isfinite(seconds)
+        or seconds < 0
+        or (
+            target is not None
+            and (
+                type(target) is not str
+                or re.fullmatch(r"finger-[1-5]", target) is None
+            )
+        )
+        or type(resolve_any) is not bool
+        or (target is not None and resolve_any)
+    ):
+        raise NativeMatchError("resident match request is invalid")
+    return argparse.Namespace(
+        request_id=request_id,
+        observation_seconds=float(seconds),
+        private_match_events_output=None,
+        preflight_no_finger=False,
+        expect_no_match=False,
+        stop_on_first_verdict=True,
+        addition_journal=None,
+        match_finger_name=target,
+        resolve_any_finger_name=resolve_any,
+        reconcile_addition_match_result=None,
+    )
+
+
+def _worker_response_line(response: object) -> bytes:
+    """Encode the fixed terminal protocol within its explicit wire bound."""
+
+    payload = json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(payload) > MAX_WORKER_RESPONSE_BYTES:
+        raise NativeMatchError("resident match response exceeded its protocol bound")
+    return payload
+
+
+def _serve_worker() -> int:
+    """Prepare imported code, then serve one freshly authorized request."""
+
+    try:
+        from pymobiledevice3.remote import remotexpc as _remote_xpc
+    except ImportError as error:
+        raise NativeMatchError("resident discovery dependency is unavailable") from error
+    del _remote_xpc
+    bridge_spec = importlib.util.spec_from_file_location(
+        "t2_preloaded_bridge_xpc_probe", PROBE
+    )
+    if bridge_spec is None or bridge_spec.loader is None:
+        raise NativeMatchError("resident bridge probe could not be loaded")
+    bridge_probe = importlib.util.module_from_spec(bridge_spec)
+    bridge_spec.loader.exec_module(bridge_probe)
+    print(
+        json.dumps({"schema_version": 1, "ready": True}, separators=(",", ":")),
+        flush=True,
+    )
+
+    current_cancellation: Event | None = None
+    previous_signal = signal.getsignal(signal.SIGTERM)
+
+    def request_cancel(_signum: int, _frame: object) -> None:
+        if current_cancellation is not None:
+            current_cancellation.set()
+
+    signal.signal(signal.SIGTERM, request_cancel)
+    try:
+        while True:
+            line = sys.stdin.buffer.readline(64 * 1024)
+            if not line:
+                return 0
+            captured = io.BytesIO()
+            current_cancellation = Event()
+            request_id = None
+            request_valid = False
+            try:
+                request_value = json.loads(line)
+                arguments = _worker_arguments(request_value)
+                request_id = arguments.request_id
+                request_valid = True
+                returncode = _run(
+                    arguments,
+                    current_cancellation,
+                    result_sink=captured.write,
+                    bridge_main=bridge_probe.main,
+                )
+                result = json.loads(captured.getvalue())
+                if returncode != 0 or type(result) is not dict:
+                    raise NativeMatchError("resident match result is invalid")
+                terminal = t2_fprint_result.compact_worker_result(
+                    result,
+                    arguments.match_finger_name,
+                    arguments.resolve_any_finger_name,
+                )
+                response = {
+                    "schema_version": 1,
+                    "request_id": request_id,
+                    "ok": True,
+                    "result": terminal,
+                }
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+                response = {
+                    "schema_version": 1,
+                    "request_id": request_id,
+                    "ok": False,
+                    "error": type(error).__name__,
+                }
+            finally:
+                current_cancellation = None
+            if request_valid:
+                print(
+                    f"T2_WORKER_BOUNDARY {request_id}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            sys.stdout.buffer.write(_worker_response_line(response))
+            sys.stdout.buffer.flush()
+            if not request_valid:
+                return 1
+            # A prepared worker is consumed by one hardware transaction.
+            # fprintd starts a fresh imported replacement after this response,
+            # so process-global AKS/ACM/RemoteXPC state never crosses requests.
+            return 0
+    finally:
+        signal.signal(signal.SIGTERM, previous_signal)
 
 
 def main() -> int:
@@ -1009,9 +1225,26 @@ def main() -> int:
     parser.add_argument("--match-finger-name")
     parser.add_argument("--resolve-any-finger-name", action="store_true")
     parser.add_argument("--reconcile-addition-match-result")
+    parser.add_argument("--resident-worker", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("native match must run as root")
+    if args.resident_worker:
+        if any(
+            (
+                args.observation_seconds != 0,
+                args.private_match_events_output is not None,
+                args.preflight_no_finger,
+                args.expect_no_match,
+                args.stop_on_first_verdict,
+                args.addition_journal is not None,
+                args.match_finger_name is not None,
+                args.resolve_any_finger_name,
+                args.reconcile_addition_match_result is not None,
+            )
+        ):
+            parser.error("resident worker accepts requests only on standard input")
+        return _serve_worker()
     if args.observation_seconds < 0:
         parser.error("--observation-seconds cannot be negative")
     if args.preflight_no_finger and args.observation_seconds != 0:

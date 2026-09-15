@@ -1,7 +1,8 @@
 # Terminal clients
 
-For normal use, run `t2touch enroll`, `t2touch verify`, `t2touch status`, or
-`t2touch delete finger-N` from the active local desktop account. Enrollment
+For normal use, run `t2touch enroll`, `t2touch verify`, `t2touch status`,
+`t2touch list`, `t2touch count`, `t2touch delete finger-N`, or `t2touch purge`
+from the active local desktop account. Enrollment
 uses a direct D-Bus client, takes touch and lift cues from fprintd, and returns
 success only after durable persistence and fresh-owner verification.
 
@@ -24,7 +25,8 @@ Enrollment invokes the fprintd enrollment TUI. Verify and negative controls use
 the same direct D-Bus TUI; the negative control succeeds only for an unenrolled finger's
 `verify-no-match`. Named deletion uses `fprintd-delete` and preserves the
 caller's active-session authorization. Deleting the final named fingerprint is
-supported; batch deletion is not.
+supported. Product batch deletion is available through `t2touch purge`; this
+contributor control exercises only the standard named-delete client path.
 
 The sudo control invalidates sudo's cached timestamp and runs one `sudo -v`
 transaction. Any enrolled fingerprint may satisfy it. A successful biometric

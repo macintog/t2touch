@@ -30,6 +30,43 @@ import t2_mutation_registry as MUTATION_REGISTRY
 
 
 class NativeMatchSafetyTests(unittest.TestCase):
+    def test_resident_response_compacts_unbounded_probe_history(self):
+        result = {
+            "configured_identity_records_reconciled": True,
+            "bridge_os_transaction_released_after_match": True,
+            "termination_requested": False,
+            "match_cleanup_valid": True,
+            "match_events": [
+                {"event_kind": "status", "detail": "x" * 256}
+                for _ in range(400)
+            ] + [
+                {
+                    "event_kind": "match_result",
+                    "result_valid": True,
+                    "matched": False,
+                    "no_match": True,
+                }
+            ],
+        }
+        self.assertGreater(len(json.dumps(result)), 65536)
+        terminal = NATIVE_MATCH.t2_fprint_result.compact_worker_result(
+            result, None, False
+        )
+        response = {
+            "schema_version": 1,
+            "request_id": 1,
+            "ok": True,
+            "result": terminal,
+        }
+        line = NATIVE_MATCH._worker_response_line(response)
+        self.assertLessEqual(len(line), NATIVE_MATCH.MAX_WORKER_RESPONSE_BYTES)
+        self.assertEqual(
+            NATIVE_MATCH.t2_fprint_result.validate_worker_terminal_result(
+                terminal, None, False
+            ),
+            ("verify-no-match", None),
+        )
+
     def test_successful_cancel_drains_owned_callbacks_to_idle(self):
         """Protect the D206 match-to-enrollment handoff from callback spill."""
 

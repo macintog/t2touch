@@ -293,6 +293,7 @@ install -d -o root -g root -m 0700 /run/t2-touchid/workers
 install -o root -g root -m 0755 "$source_dir/src/"*.py "$target_dir/src/"
 install -o root -g root -m 0755 "$source_dir/src/t2touch.py" /usr/local/bin/t2touch
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-delete.sh" /usr/local/sbin/t2-touchid-delete
+install -o root -g root -m 0755 "$source_dir/src/t2-touchid-purge.sh" /usr/local/sbin/t2-touchid-purge
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-doctor.py" /usr/local/sbin/t2-touchid-doctor
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-inventory.py" /usr/local/sbin/t2-touchid-inventory
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-identities.py" /usr/local/sbin/t2-touchid-identities

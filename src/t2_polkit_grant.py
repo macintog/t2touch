@@ -29,6 +29,10 @@ ACTION_IDS = frozenset(
     {item.action for item in t2_user_policy.OPERATION_POLICIES.values()}
     | {t2_user_policy.ACTIVATE_ACTION}
 )
+# Exec helpers perform their own pkexec caller binding and are intentionally
+# outside the process-subject grant protocol used by the fprintd broker.
+EXEC_ACTION_IDS = frozenset({"org.t2linux.touchid.purge"})
+MANIFEST_ACTION_IDS = ACTION_IDS | EXEC_ACTION_IDS
 
 
 Runner = Callable[[list[str], int], subprocess.CompletedProcess[bytes]]

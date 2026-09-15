@@ -48,6 +48,7 @@ import t2_external_delete_reconcile
 import t2_fprint_projection
 import t2_fprint_sequence
 import t2_identity_delete
+import t2_identity_delete_batch_journal
 import t2_identity_delete_bridge
 import t2_identity_delete_journal
 import t2_identity_delete_operation
@@ -754,6 +755,8 @@ def status() -> dict[str, object]:
     delete_pending = 0
     sync_pending = 0
     external_pending = 0
+    batch_pending = 0
+    batch_phases: dict[str, int] = {}
     rename_post_reboot = 0
     delete_post_reboot = 0
     for entry in entries:
@@ -776,6 +779,9 @@ def status() -> dict[str, object]:
                 external_phases.get(entry.phase, 0) + 1
             )
             external_pending += 1
+        elif entry.kind == "delete-batch" and entry.blocks_new_mutation:
+            batch_phases[entry.phase] = batch_phases.get(entry.phase, 0) + 1
+            batch_pending += 1
     return {
         "schema_version": 1,
         "status_only": True,
@@ -789,6 +795,8 @@ def status() -> dict[str, object]:
         "external_reconciliation_pending_phases": dict(
             sorted(external_phases.items())
         ),
+        "delete_batch_pending_count": batch_pending,
+        "delete_batch_pending_phases": dict(sorted(batch_phases.items())),
         "post_reboot_pending_count": rename_post_reboot + delete_post_reboot,
         "rename_recovery_candidate": (
             rename_pending == 1
@@ -796,6 +804,7 @@ def status() -> dict[str, object]:
             and delete_pending == 0
             and sync_pending == 0
             and external_pending == 0
+            and batch_pending == 0
         ),
         "delete_recovery_candidate": (
             delete_pending == 1
@@ -803,6 +812,7 @@ def status() -> dict[str, object]:
             and rename_pending == 0
             and sync_pending == 0
             and external_pending == 0
+            and batch_pending == 0
         ),
         "new_mutation_blocked": any(item.blocks_new_mutation for item in entries),
         "identifiers_redacted": True,
@@ -2226,6 +2236,7 @@ def run_delete(
         Path, t2_enrollment_journal.EnrollmentHistory
     ] | None = None,
     authorization_session: object | None = None,
+    batch_operation_id: str | None = None,
 ) -> dict[str, object]:
     ordinary_selector = (slot is not None) ^ (finger_name is not None)
     rollback_selector = (
@@ -2257,6 +2268,27 @@ def run_delete(
             raise IdentityManagementError(
                 "unverified addition rollback binding is invalid"
             )
+    elif batch_operation_id is not None:
+        try:
+            batch_uuid = str(uuid.UUID(batch_operation_id))
+        except (ValueError, AttributeError) as error:
+            raise IdentityManagementError("batch deletion binding is invalid") from error
+        batch_path = MUTATION_ROOT / f"{batch_uuid}.jsonl"
+        if batch_uuid != batch_operation_id:
+            raise IdentityManagementError("batch deletion binding is invalid")
+        try:
+            batch = t2_identity_delete_batch_journal.read(batch_path)
+        except t2_identity_delete_batch_journal.IdentityDeleteBatchJournalError as error:
+            raise IdentityManagementError("batch deletion binding is invalid") from error
+        if (
+            batch.phase
+            is not t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.INTENT
+            or batch.pending != finger_name
+            or t2_mutation_registry.blocks_new_mutation(
+                MUTATION_ROOT, excluding_kind="delete-batch"
+            )
+        ):
+            raise IdentityManagementError("batch deletion is not ready to dispatch")
     elif t2_mutation_registry.blocks_new_mutation(MUTATION_ROOT):
         raise IdentityManagementError(
             "an earlier biometric mutation is unfinished or awaits verification"
@@ -2392,6 +2424,275 @@ def run_delete(
         "finger_name": plan.name,
         "identity_count": len(baseline["identity_records"]) - 1,
         "post_reboot_verification_required": False,
+        "identifiers_redacted": True,
+    }
+
+
+def _delete_batch_histories() -> tuple[
+    tuple[Path, t2_identity_delete_batch_journal.IdentityDeleteBatchHistory], ...
+]:
+    # Validate every shared journal before selecting the resumable batch.
+    t2_mutation_registry.scan(MUTATION_ROOT)
+    histories = []
+    for path in sorted(MUTATION_ROOT.iterdir(), key=lambda value: value.name):
+        records = t2_mutation_journal.read(path)
+        evidence = records[0].get("evidence") if records else None
+        if not isinstance(evidence, dict) or evidence.get("operation_kind") != "delete-batch":
+            continue
+        history = t2_identity_delete_batch_journal.validate_history(records)
+        if history.phase in {
+            t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.STARTED,
+            t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.INTENT,
+        }:
+            histories.append((path, history))
+    if len(histories) > 1:
+        raise IdentityManagementError("multiple batch deletions require recovery")
+    return tuple(histories)
+
+
+def delete_batch_progress() -> dict[str, object] | None:
+    active = _delete_batch_histories()
+    if not active:
+        return None
+    history = active[0][1]
+    return {
+        "schema_version": 1,
+        "completed_count": len(history.completed),
+        "total_count": len(history.finger_names),
+        "remaining_count": len(history.finger_names) - len(history.completed),
+        "item_pending": history.pending is not None,
+        "identifiers_redacted": True,
+    }
+
+
+def _delete_batch_projection(
+    configuration: dict[str, object],
+) -> t2_fprint_projection.FprintProjection:
+    with _native_management_lease(
+        configuration, operation="delete-one", operation_id=str(uuid.uuid4())
+    ) as (_authority, _store, _host, local, _lease, live):
+        projection = t2_fprint_projection.project(
+            t2_identity_inventory.summarize(local, live)
+        )
+    if not projection.complete:
+        raise IdentityManagementError(
+            "batch deletion requires a complete fingerprint inventory"
+        )
+    return projection
+
+
+def _recover_delete_batch_child(
+    configuration: dict[str, object],
+    history: t2_identity_delete_batch_journal.IdentityDeleteBatchHistory,
+) -> None:
+    pending_phases = {
+        t2_identity_delete_journal.IdentityDeletePhase.INTENT,
+        t2_identity_delete_journal.IdentityDeletePhase.DISPATCH_INTENT,
+        t2_identity_delete_journal.IdentityDeletePhase.COMMAND_OBSERVED,
+        t2_identity_delete_journal.IdentityDeletePhase.SEP_DELETED,
+        t2_identity_delete_journal.IdentityDeletePhase.PERSISTING,
+        t2_identity_delete_journal.IdentityDeletePhase.PERSISTENCE_READY,
+        t2_identity_delete_journal.IdentityDeletePhase.OUTCOME_UNKNOWN,
+    }
+    candidates = [
+        deletion
+        for _path, deletion in delete_journals()
+        if deletion.phase in pending_phases
+    ]
+    blockers = [
+        entry
+        for entry in t2_mutation_registry.scan(MUTATION_ROOT)
+        if entry.blocks_new_mutation and entry.kind != "delete-batch"
+    ]
+    expected_count = len(history.finger_names) - len(history.completed)
+    if (
+        history.pending is None
+        or len(candidates) != 1
+        or len(blockers) != 1
+        or blockers[0].kind != "delete-one"
+        or candidates[0].target_name_sha256
+        != hashlib.sha256(history.pending.encode("utf-8")).hexdigest()
+        or len(candidates[0].baseline["identity_records"]) != expected_count
+        or candidates[0].baseline["apple_uid"] != history.baseline["apple_uid"]
+        or candidates[0].baseline["mapping_generation"]
+        != history.baseline["mapping_generation"]
+    ):
+        raise IdentityManagementError(
+            "interrupted child deletion does not belong to this purge"
+        )
+    recovered = run_delete_recovery(configuration)
+    if (
+        not isinstance(recovered, dict)
+        or recovered.get("delete_recovery_succeeded") is not True
+    ):
+        raise IdentityManagementError("purge child deletion did not recover")
+
+
+def _start_delete_batch(
+    configuration: dict[str, object],
+) -> tuple[
+    Path,
+    t2_identity_delete_batch_journal.IdentityDeleteBatchHistory | None,
+]:
+    operation_id = str(uuid.uuid4())
+    with _native_management_lease(
+        configuration, operation="delete-one", operation_id=operation_id
+    ) as (authority, _store, host, local, _lease, live):
+        projection = t2_fprint_projection.project(
+            t2_identity_inventory.summarize(local, live)
+        )
+        if not projection.complete:
+            raise IdentityManagementError(
+                "batch deletion requires a complete fingerprint inventory"
+            )
+        if not projection.finger_names:
+            return MUTATION_ROOT / f"{operation_id}.jsonl", None
+        authority_history = t2_enrollment_journal.read(
+            authority.enrollment_journal
+        )
+        baseline = t2_baseline.build_linux_native_existing_baseline(
+            host=host,
+            live=live,
+            caller_linux_uid=authority.selected.linux_uid,
+            target_linux_uid=authority.selected.linux_uid,
+            linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+            mapping_generation=authority.mapping_set.generation,
+            account_uuid=authority.selected.account_uuid,
+            bag_uuid=authority.selected.bag_uuid,
+            authority_reference="linux-native-e4:" + authority_history.operation_id,
+            authority_sha256=authority_history.head_hash,
+            password_fallback_verified=False,
+        )
+    path = MUTATION_ROOT / f"{operation_id}.jsonl"
+    t2_mutation_journal.create(
+        path, "delete-batch", baseline, operation_id=operation_id
+    )
+    history = t2_identity_delete_batch_journal.read(path)
+    history = t2_identity_delete_batch_journal.append_checked(
+        path,
+        history,
+        "DELETE_BATCH_STARTED",
+        {
+            "finger_names": list(projection.finger_names),
+            "identity_count": projection.reconciled_identity_count,
+            "identifiers_redacted": True,
+        },
+    )
+    return path, history
+
+
+def run_delete_batch(
+    configuration: dict[str, object], *, resume: bool = False
+) -> dict[str, object]:
+    """Delete the mapped user's complete initial inventory in a durable order."""
+
+    if configuration.get("authority_mode") != "linux-native":
+        raise IdentityManagementError("batch deletion requires Linux-native authority")
+    require_mapping_capability(configuration, "identity-management")
+    active = _delete_batch_histories()
+    if active:
+        if not resume:
+            raise IdentityManagementError(
+                "an interrupted purge exists; resume it explicitly"
+            )
+        path, history = active[0]
+        if t2_mutation_registry.blocks_new_mutation(
+            MUTATION_ROOT, excluding_kind="delete-batch"
+        ):
+            _recover_delete_batch_child(configuration, history)
+        current = _delete_batch_projection(configuration).finger_names
+        remaining = history.finger_names[len(history.completed) :]
+        if history.pending is not None:
+            if current == remaining[1:]:
+                history = t2_identity_delete_batch_journal.append_checked(
+                    path,
+                    history,
+                    "DELETE_BATCH_ITEM_RECONCILED",
+                    {
+                        "finger_name": history.pending,
+                        "ordinal": len(history.completed),
+                        "remaining_count": len(remaining) - 1,
+                    },
+                )
+            elif current != remaining:
+                raise IdentityManagementError(
+                    "live inventory does not match the interrupted purge"
+                )
+        elif current != remaining:
+            raise IdentityManagementError(
+                "live inventory does not match the interrupted purge"
+            )
+    else:
+        if resume:
+            raise IdentityManagementError("there is no interrupted purge to resume")
+        if t2_mutation_registry.blocks_new_mutation(MUTATION_ROOT):
+            raise IdentityManagementError(
+                "an earlier biometric mutation needs recovery"
+            )
+        path, history = _start_delete_batch(configuration)
+        if history is None:
+            return {
+                "schema_version": 1,
+                "purge_succeeded": True,
+                "deleted_count": 0,
+                "identity_count": 0,
+                "identifiers_redacted": True,
+            }
+
+    while len(history.completed) < len(history.finger_names):
+        if history.pending is None:
+            target = history.finger_names[len(history.completed)]
+            history = t2_identity_delete_batch_journal.append_checked(
+                path,
+                history,
+                "DELETE_BATCH_ITEM_INTENT",
+                {"finger_name": target, "ordinal": len(history.completed)},
+            )
+        target = history.pending
+        result = run_delete(
+            configuration,
+            finger_name=target,
+            batch_operation_id=history.operation_id,
+        )
+        expected_remaining = len(history.finger_names) - len(history.completed) - 1
+        if (
+            not isinstance(result, dict)
+            or result.get("delete_succeeded") is not True
+            or result.get("finger_name") != target
+            or result.get("identity_count") != expected_remaining
+        ):
+            raise IdentityManagementError(
+                "one purge deletion did not reconcile"
+            )
+        history = t2_identity_delete_batch_journal.append_checked(
+            path,
+            history,
+            "DELETE_BATCH_ITEM_RECONCILED",
+            {
+                "finger_name": target,
+                "ordinal": len(history.completed),
+                "remaining_count": expected_remaining,
+            },
+        )
+
+    if _delete_batch_projection(configuration).finger_names:
+        raise IdentityManagementError("purge final inventory is not empty")
+    history = t2_identity_delete_batch_journal.append_checked(
+        path,
+        history,
+        "DELETE_BATCH_RECONCILED",
+        {
+            "deleted_count": len(history.finger_names),
+            "identity_count": 0,
+            "identifiers_redacted": True,
+        },
+    )
+    return {
+        "schema_version": 1,
+        "purge_succeeded": history.phase
+        is t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.RECONCILED,
+        "deleted_count": len(history.completed),
+        "identity_count": 0,
         "identifiers_redacted": True,
     }
 

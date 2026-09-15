@@ -34,10 +34,11 @@ BridgeXPC, and Catacomb formats.
 ```
 
 - [`src/t2touch.py`](../src/t2touch.py) dispatches enrollment to the direct
-  D-Bus TUI and uses stock fprintd clients for list and verify. Product deletion
-  authorizes its privileged helper through pkexec before taking the reader; the
-  helper enters the shared journaled deletion path. The lower-level D-Bus named
-  deletion method remains available to other clients.
+  D-Bus TUI, reads validated neutral inventory through `busctl`, and uses the
+  stock fprintd verification client. Product deletion authorizes its privileged
+  helper through pkexec before taking the reader; the helper enters the shared
+  journaled deletion path. The lower-level D-Bus named deletion method remains
+  available to other clients.
 - [`src/t2-fprintd.py`](../src/t2-fprintd.py) owns claims, the reconciled user
   inventory, and the public operation lifecycle. Enrollment and deletion use
   separate caller-bound transient workers.
@@ -115,8 +116,13 @@ satisfy authentication, regardless of its origin or the client's requested name.
 Named deletion supports the final fingerprint. It reconciles an empty,
 enrollable inventory, so the next enrollment uses Finger 1. Stable external
 removal of the sole fingerprint is also reconciled without restoring it or
-sending another deletion. Batch delete-all and private-state purge are not
-exposed.
+sending another deletion. Product delete-all records its initial neutral
+inventory in a typed outer mutation journal, then runs the existing reconciled
+single-delete transaction for each slot. An active batch blocks every unrelated
+mutation. Resume compares the complete current projection with the journal and
+can close a pending item only when that exact handle is absent. It never claims
+transactional rollback across already reconciled deletions. Private-state purge
+is not exposed; fingerprint purge retains account authority and recovery state.
 
 ## Persistence and recovery
 
@@ -144,6 +150,10 @@ previous match grants authority for a new operation. The facade may reuse a
 single caller’s list projection once for presentation and share an inventory
 read while it is running; native matching still performs fresh private
 reconciliation and post-match attestation.
+Native presentation reuse additionally checks protected Catacomb and
+mutation-journal metadata on each access, so out-of-process management does not
+leave the daemon displaying the pre-mutation inventory. Incomplete or unsafe
+local state disables reuse and returns to the normal live validation path.
 
 ## Privilege and authentication
 

@@ -102,6 +102,9 @@ class PamAssetTests(unittest.TestCase):
     def test_sudo_prompt_warns_against_early_password_input(self):
         prompt = (ROOT / "src/t2-pam-fingerprint-prompt.c").read_text()
 
+        self.assertIn("Preparing the fingerprint sensor", prompt)
+        self.assertIn("hear the ready cue", prompt)
+        self.assertNotIn("Touch the fingerprint sensor now", prompt)
         self.assertIn("Do not type your password until", prompt)
 
     def test_every_successful_unlock_path_publishes_readiness(self):

@@ -11,7 +11,7 @@ from pathlib import Path
 import symtable
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tests.test_native_match import BRIDGE_PROBE, NATIVE_MATCH
 
@@ -21,6 +21,86 @@ class AuthorityBoundaryReached(Exception):
 
 
 class NativeMatchCLIContractTests(unittest.TestCase):
+    def test_resident_discovery_fetches_a_fresh_peer_each_request(self):
+        peer = {"Services": {"com.apple.eos.BiometricKit": {"Port": 50001}}}
+        with patch.object(
+            NATIVE_MATCH.t2_rsd,
+            "discover_peer",
+            new=AsyncMock(return_value=("scoped", peer)),
+        ) as discover:
+            self.assertEqual(NATIVE_MATCH._discover_port("host", "interface"), 50001)
+            self.assertEqual(NATIVE_MATCH._discover_port("host", "interface"), 50001)
+        self.assertEqual(discover.await_count, 2)
+
+    def test_resident_request_accepts_only_fresh_match_inputs(self):
+        request = {
+            "schema_version": 1,
+            "request_id": 7,
+            "observation_seconds": 0.0,
+            "match_finger_name": None,
+            "resolve_any_finger_name": True,
+        }
+        parsed = NATIVE_MATCH._worker_arguments(request)
+        self.assertEqual(parsed.request_id, 7)
+        self.assertTrue(parsed.stop_on_first_verdict)
+        self.assertTrue(parsed.resolve_any_finger_name)
+        self.assertIsNone(parsed.private_match_events_output)
+
+        for field, value in (
+            ("request_id", 0),
+            ("observation_seconds", True),
+            ("observation_seconds", float("nan")),
+            ("match_finger_name", "right-index-finger"),
+            ("resolve_any_finger_name", 1),
+        ):
+            candidate = dict(request)
+            candidate[field] = value
+            with self.subTest(field=field), self.assertRaises(
+                NATIVE_MATCH.NativeMatchError
+            ):
+                NATIVE_MATCH._worker_arguments(candidate)
+
+    def test_consumed_worker_runs_the_preloaded_bridge_in_process(self):
+        captured = []
+        original_argv = list(NATIVE_MATCH.sys.argv)
+
+        def command(_configuration, *, credential_fd, **_kwargs):
+            return ["python", "bridge", "--credential-fd", str(credential_fd)]
+
+        def bridge_main():
+            descriptor = int(
+                NATIVE_MATCH.sys.argv[
+                    NATIVE_MATCH.sys.argv.index("--credential-fd") + 1
+                ]
+            )
+            self.assertEqual(NATIVE_MATCH.os.read(descriptor, 17), b"x" * 16)
+            NATIVE_MATCH.os.close(descriptor)
+            print('{"probe":"ok"}')
+
+        with (
+            patch.object(NATIVE_MATCH, "_probe_command", side_effect=command),
+            patch.object(
+                NATIVE_MATCH.subprocess,
+                "Popen",
+                side_effect=AssertionError("preloaded bridge must not spawn"),
+            ),
+        ):
+            self.assertEqual(
+                NATIVE_MATCH._run_probe(
+                    {},
+                    port=50001,
+                    credential_set=b"x" * 16,
+                    seconds=0,
+                    private_events=None,
+                    cancellation=NATIVE_MATCH.Event(),
+                    result_sink=captured.append,
+                    bridge_main=bridge_main,
+                ),
+                0,
+            )
+        self.assertEqual(captured, [b'{"probe":"ok"}\n'])
+        self.assertEqual(NATIVE_MATCH.sys.argv, original_argv)
+
     def test_probe_runtime_names_and_local_calls_are_defined(self):
         """Catch the observed late NameError and unsupported event keyword."""
         source = Path(BRIDGE_PROBE.__file__).read_text()

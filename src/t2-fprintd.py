@@ -20,6 +20,7 @@ import pwd
 import signal as process_signal
 import stat
 import sys
+import time
 
 LOCAL_SOURCE = Path(__file__).resolve().parent
 if str(LOCAL_SOURCE) not in sys.path:
@@ -31,6 +32,7 @@ from dbus_next import introspection as dbus_introspection
 from dbus_next.service import ServiceInterface, dbus_property, method, signal
 
 import t2_fprint_projection
+import t2_fprint_result
 import t2_fprint_identity
 import t2_fprint_runtime
 import t2_fprint_enrollment_runtime
@@ -40,6 +42,7 @@ import t2_fprint_worker
 import t2_fprint_delete_worker_client
 import t2_dbus_identity
 import t2_fprint_claim
+import t2_performance
 import t2_user_authority
 from t2_dbus_sender import (
     DBusSenderError,
@@ -60,6 +63,7 @@ AUTO_SYNC_ADAPTIVE_VALUE = os.environ.get(
 ALLOWED_PAM_USERS = (LINUX_USER,)
 UNSTARTED_CLAIM_SECONDS = 5.0
 COMPLETED_CLAIM_SECONDS = 0.5
+NATIVE_CANCEL_SECONDS = 5.0
 DESKTOP_FEEDBACK_UNITS = frozenset(
     {
         "t2-touchid-alert.service",
@@ -99,6 +103,12 @@ def verdict_from_result(
     result: object, target_finger: str | None = None
 ) -> str:
     """Translate privacy-safe probe JSON into a fail-closed fprintd verdict."""
+    if type(result) is dict and set(result) == {
+        "schema_version", "selector", "verdict", "finger_name"
+    }:
+        return t2_fprint_result.validate_worker_terminal_result(
+            result, target_finger, False
+        )[0]
     if not isinstance(result, dict):
         raise RuntimeError("malformed T2 probe result")
     if target_finger is not None:
@@ -168,6 +178,13 @@ def verdict_from_result(
 
 def resolved_any_finger_from_result(result: object) -> str | None:
     """Return the canonical identity selected by an attested `any` match."""
+    if type(result) is dict and set(result) == {
+        "schema_version", "selector", "verdict", "finger_name"
+    }:
+        verdict, finger_name = t2_fprint_result.validate_worker_terminal_result(
+            result, None, True
+        )
+        return finger_name if verdict == "verify-match" else None
     if not isinstance(result, dict):
         raise RuntimeError("malformed T2 probe result")
     gate = result.get("resolved_any_match_gate")
@@ -287,8 +304,27 @@ class T2Backend:
             raise RuntimeError("bio-lockout state directory must be absolute")
         self.catacomb_root = Path("/var/lib/t2-touchid/catacomb")
         self.process: asyncio.subprocess.Process | None = None
+        self.process_owner = None
+        self.native_worker: asyncio.subprocess.Process | None = None
+        self.native_worker_stderr_task: asyncio.Task | None = None
+        self.native_worker_feedback: Callable[[dict], None] | None = None
+        self.native_worker_cue_sent = False
+        self.native_worker_request_id = 0
+        self.native_worker_expected_boundary: int | None = None
+        self.native_worker_boundary_event: asyncio.Event | None = None
+        self.native_worker_start_lock = asyncio.Lock()
+        self.native_worker_warm_task: asyncio.Task | None = None
+        self.native_worker_sleep_task: asyncio.Task | None = None
+        self.runtime_warm_task: asyncio.Task | None = None
+        # Startup is fail-closed until authenticated login1 monitoring has
+        # reconciled the current PreparingForSleep state.
+        self.system_sleeping = True
         self.operation_lock = asyncio.Lock()
         self.inventory_task: asyncio.Task | None = None
+        self.inventory_projection: t2_fprint_runtime.RuntimeProjection | None = None
+        self.inventory_authority_token: tuple[object, ...] | None = None
+        self.inventory_state_token: tuple[object, ...] | None = None
+        self.inventory_generation = 0
         if type(auto_sync_adaptive) is not bool:
             raise RuntimeError("adaptive Catacomb sync activation is invalid")
         self.auto_sync_adaptive = auto_sync_adaptive
@@ -397,8 +433,102 @@ class T2Backend:
         except t2_user_authority.UserAuthorityError as error:
             raise RuntimeError("runtime authority is unavailable") from error
 
-    async def runtime_projection(self) -> t2_fprint_runtime.RuntimeProjection:
+    @staticmethod
+    def _authority_token(authority) -> tuple[object, ...]:
+        """Bind cached presentation to the protected authority generation."""
+
+        selected = authority.selected
+        return (
+            authority.origin,
+            authority.mapping_set.generation,
+            selected.linux_account_generation,
+            selected.keybag_sha256,
+            selected.apple_uid,
+            selected.account_uuid,
+            selected.bag_uuid,
+        )
+
+    def invalidate_inventory(self, _reason: str = "explicit") -> None:
+        """Invalidate presentation metadata without cancelling an owned read."""
+
+        self.inventory_generation = getattr(self, "inventory_generation", 0) + 1
+        self.inventory_projection = None
+        self.inventory_authority_token = None
+        self.inventory_state_token = None
+
+    def _inventory_state_token(self, authority) -> tuple[object, ...] | None:
+        """Notice out-of-process mutations without reading biometric payloads.
+
+        Committed Catacombs are atomically replaced; mutation journals are
+        appended even when a transaction fails before persistence. Neither
+        change necessarily advances the account's authority generation.
+        Unavailable or unsafe state disables reuse and leaves validation to
+        the normal live collector. Compatibility state has no local token.
+        """
+        if authority.origin != NATIVE_AUTHORITY:
+            return None
+        tokens = []
+        try:
+            for root in (self.catacomb_root, self.catacomb_root.parent / "mutations"):
+                info = root.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+                    return None
+                tokens.append((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns))
+                entries = []
+                for path in sorted(root.iterdir()):
+                    info = path.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+                        return None
+                    entries.append((
+                        path.name, info.st_dev, info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns,
+                    ))
+                tokens.append(tuple(entries))
+        except OSError:
+            return None
+        return tuple(tokens)
+
+    async def runtime_projection(
+        self, *, fresh: bool = False
+    ) -> t2_fprint_runtime.RuntimeProjection:
+        if getattr(self, "system_sleeping", False):
+            raise RuntimeError("system sleep transition is active")
         authority = self.runtime_authority()
+        authority_token = self._authority_token(authority)
+        state_token = self._inventory_state_token(authority)
+        now = time.monotonic()
+        if (
+            not fresh
+            and self.inventory_projection is not None
+            and self.inventory_authority_token == authority_token
+            and state_token is not None
+            and self.inventory_state_token == state_token
+        ):
+            t2_performance.emit("inventory", "presentation_cache", now)
+            return self.inventory_projection
+        generation = self.inventory_generation
+        started = time.monotonic()
+        try:
+            projection = await self._collect_runtime_projection(authority)
+        except BaseException:
+            t2_performance.emit("inventory", "hardware_collection", started, "error")
+            raise
+        t2_performance.emit("inventory", "hardware_collection", started)
+        if getattr(self, "system_sleeping", False):
+            raise RuntimeError("system sleep transition is active")
+        if (
+            generation == self.inventory_generation
+            and state_token is not None
+            and state_token == self._inventory_state_token(authority)
+        ):
+            self.inventory_projection = projection
+            self.inventory_authority_token = authority_token
+            self.inventory_state_token = state_token
+        return projection
+
+    async def _collect_runtime_projection(
+        self, authority
+    ) -> t2_fprint_runtime.RuntimeProjection:
         if authority.origin == COMPATIBILITY_AUTHORITY:
             port = await self.discover()
             await self._run_probe(port, prepare_only=True)
@@ -430,11 +560,13 @@ class T2Backend:
         except t2_fprint_runtime.FprintRuntimeError as error:
             raise RuntimeError("fprint projection failed validation") from error
 
-    async def enrollment_projection(self) -> t2_fprint_runtime.RuntimeProjection:
+    async def enrollment_projection(
+        self, *, fresh: bool = False
+    ) -> t2_fprint_runtime.RuntimeProjection:
         """Project E4 state or the one valid pre-E4 native bootstrap state."""
 
         try:
-            return await self.runtime_projection()
+            return await self.runtime_projection(fresh=fresh)
         except RuntimeError as projection_error:
             if os.environ.get("T2_TOUCHID_AUTHORITY_MODE") != "linux-native":
                 raise
@@ -458,6 +590,8 @@ class T2Backend:
     async def list_fingers(self) -> tuple[str, ...]:
         # The lock UI and PAM can ask together. Share only a currently running
         # read, never a completed inventory or an authentication result.
+        if getattr(self, "system_sleeping", False):
+            raise RuntimeError("system sleep transition is active")
         if self.inventory_task is None or self.inventory_task.done():
             self.inventory_task = asyncio.create_task(self._collect_fingers())
             self.inventory_task.add_done_callback(
@@ -467,6 +601,8 @@ class T2Backend:
 
     async def _collect_fingers(self) -> tuple[str, ...]:
         async with self.operation_lock:
+            if getattr(self, "system_sleeping", False):
+                raise RuntimeError("system sleep transition is active")
             return (await self.enrollment_projection()).listed_fingers
 
     async def discover(self) -> int:
@@ -591,6 +727,9 @@ class T2Backend:
             # copying the entire window for every short feedback line.
             if len(captured) > 2 * diagnostic_limit:
                 del captured[:-diagnostic_limit]
+            if line.startswith(b"T2_PERF_EVENT "):
+                t2_performance.relay(line.rstrip(b"\r\n"))
+                continue
             if not line.startswith(prefix):
                 continue
             try:
@@ -610,53 +749,446 @@ class T2Backend:
                     except Exception:
                         pass  # Audio must not stop draining the worker pipe.
 
+    async def _pump_native_worker_stderr(self, process) -> None:
+        try:
+            await self._pump_native_worker_stderr_stream(process)
+        finally:
+            boundary = getattr(self, "native_worker_boundary_event", None)
+            if boundary is not None:
+                boundary.set()
+
+    async def _pump_native_worker_stderr_stream(self, process) -> None:
+        stream = process.stderr
+        if stream is None:
+            return
+        buffered = bytearray()
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                if buffered:
+                    self._handle_native_worker_stderr_line(bytes(buffered))
+                return
+            buffered.extend(chunk)
+            while b"\n" in buffered:
+                line, _separator, remainder = buffered.partition(b"\n")
+                buffered = bytearray(remainder)
+                self._handle_native_worker_stderr_line(line)
+            if len(buffered) > 65536:
+                # Protocol records are intentionally small. Continue draining
+                # an untrusted oversized diagnostic without retaining it.
+                buffered.clear()
+
+    def _handle_native_worker_stderr_line(self, line: bytes) -> None:
+        prefix = b"T2_MATCH_EVENT "
+        if line.startswith(b"T2_WORKER_BOUNDARY "):
+            try:
+                request_id = int(line.removeprefix(b"T2_WORKER_BOUNDARY "))
+            except ValueError:
+                return
+            if request_id == getattr(self, "native_worker_expected_boundary", None):
+                boundary = getattr(self, "native_worker_boundary_event", None)
+                if boundary is not None:
+                    boundary.set()
+            return
+        if line.startswith(b"T2_PERF_EVENT "):
+            t2_performance.relay(line)
+            return
+        if not line.startswith(prefix):
+            return
+        try:
+            event = json.loads(line[len(prefix) :])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(event, dict):
+            return
+        feedback = self.native_worker_feedback
+        if feedback is not None:
+            try:
+                feedback(event)
+            except Exception:
+                pass
+        if (
+            event.get("event_kind") == "match_armed"
+            and not self.native_worker_cue_sent
+        ):
+            self.native_worker_cue_sent = True
+            try:
+                self.schedule_feedback("ready")
+            except Exception:
+                pass
+
+    async def _ensure_native_worker(self):
+        lock = getattr(self, "native_worker_start_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.native_worker_start_lock = lock
+        async with lock:
+            return await self._ensure_native_worker_locked()
+
+    async def _ensure_native_worker_locked(self):
+        if getattr(self, "system_sleeping", False):
+            raise RuntimeError("system sleep transition is active")
+        process = self.native_worker
+        stderr_task = self.native_worker_stderr_task
+        if (
+            process is not None
+            and process.returncode is None
+            and stderr_task is not None
+            and not stderr_task.done()
+        ):
+            return process
+        if process is not None:
+            await self._discard_native_worker(process)
+        command = [
+            sys.executable,
+            str(self.project_dir / "src/t2-native-match.py"),
+            "--resident-worker",
+        ]
+        environment = os.environ.copy()
+        environment["SUDO_UID"] = str(self.linux_uid)
+        started = time.monotonic()
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            start_new_session=True,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+        self.native_worker = process
+        self.native_worker_stderr_task = asyncio.create_task(
+            self._pump_native_worker_stderr(process)
+        )
+        if process.stdout is None:
+            await self._discard_native_worker(process)
+            raise RuntimeError("native T2 match worker output is unavailable")
+        try:
+            ready_line = await asyncio.wait_for(process.stdout.readline(), timeout=10)
+            ready = json.loads(ready_line)
+            if ready != {"schema_version": 1, "ready": True}:
+                raise RuntimeError("native T2 match worker did not become ready")
+        except BaseException:
+            cleanup = asyncio.create_task(self._discard_native_worker(process))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
+        t2_performance.emit("native_match", "worker_start", started)
+        return process
+
+    def _schedule_native_worker_warm(self) -> None:
+        if getattr(self, "system_sleeping", False):
+            return
+        task = getattr(self, "native_worker_warm_task", None)
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(self._ensure_native_worker())
+        self.native_worker_warm_task = task
+
+        def completed(done: asyncio.Task) -> None:
+            if self.native_worker_warm_task is done:
+                self.native_worker_warm_task = None
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                print(
+                    "Touch ID native worker warmup failed: "
+                    f"{public_verification_failure(error)}",
+                    flush=True,
+                )
+
+        task.add_done_callback(completed)
+
+    async def warm_runtime(self) -> None:
+        """Move presentation and import cold starts before D-Bus exposure."""
+
+        if getattr(self, "system_sleeping", False):
+            return
+        try:
+            authority = self.runtime_authority()
+        except Exception as error:
+            print(
+                "Touch ID runtime warmup skipped: "
+                f"{public_verification_failure(error)}",
+                flush=True,
+            )
+            return
+        async def warm_projection():
+            async with self.operation_lock:
+                return await self.runtime_projection()
+
+        operations = [warm_projection()]
+        if authority.origin == NATIVE_AUTHORITY:
+            operations.append(self._ensure_native_worker())
+        results = await asyncio.gather(*operations, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                print(
+                    "Touch ID runtime warmup failed: "
+                    f"{public_verification_failure(result)}",
+                    flush=True,
+                )
+
+    def _schedule_runtime_warm(self) -> asyncio.Task | None:
+        if getattr(self, "system_sleeping", False):
+            return None
+        task = getattr(self, "runtime_warm_task", None)
+        if task is not None and not task.done():
+            return task
+        task = asyncio.create_task(self.warm_runtime())
+        self.runtime_warm_task = task
+
+        def completed(done: asyncio.Task) -> None:
+            if self.runtime_warm_task is done:
+                self.runtime_warm_task = None
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                print(
+                    "Touch ID runtime warmup failed: "
+                    f"{public_verification_failure(error)}",
+                    flush=True,
+                )
+
+        task.add_done_callback(completed)
+        return task
+
+    async def _quiesce_hardware_for_sleep(self) -> None:
+        """Cancel and drain every owned hardware path before suspend."""
+
+        current = asyncio.current_task()
+        active: list[asyncio.Task] = []
+        for task in (
+            getattr(self, "runtime_warm_task", None),
+            getattr(self, "native_worker_warm_task", None),
+            getattr(self, "inventory_task", None),
+            getattr(self, "process_owner", None),
+        ):
+            if (
+                isinstance(task, asyncio.Task)
+                and task is not current
+                and not task.done()
+                and task not in active
+            ):
+                active.append(task)
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
+
+        lock = getattr(self, "native_worker_start_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.native_worker_start_lock = lock
+        async with lock:
+            process = getattr(self, "native_worker", None)
+            if process is not None:
+                await self._discard_native_worker(process)
+        # A collector can own the operation lock before publishing itself as
+        # process_owner. This barrier covers that interleaving and cannot admit
+        # new work while system_sleeping remains true.
+        operation_lock = getattr(self, "operation_lock", None)
+        if operation_lock is not None:
+            async with operation_lock:
+                pass
+
+    def system_sleep_changed(self, sleeping: bool) -> None:
+        """Quiesce imported state for suspend and prepare it again on resume."""
+
+        if type(sleeping) is not bool:
+            raise RuntimeError("system sleep state is invalid")
+        self.system_sleeping = sleeping
+        self.invalidate_inventory("system_sleep")
+        if sleeping:
+            task = getattr(self, "native_worker_sleep_task", None)
+            if task is None or task.done():
+                task = asyncio.create_task(self._quiesce_hardware_for_sleep())
+                self.native_worker_sleep_task = task
+
+                def quiesced(done: asyncio.Task) -> None:
+                    if self.native_worker_sleep_task is done:
+                        self.native_worker_sleep_task = None
+                    if not done.cancelled():
+                        done.exception()
+
+                task.add_done_callback(quiesced)
+            return
+        self._schedule_runtime_warm()
+
+    async def _discard_native_worker(self, process) -> None:
+        if self.native_worker is not process:
+            return
+        self.native_worker = None
+        task = self.native_worker_stderr_task
+        self.native_worker_stderr_task = None
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.returncode is None:
+            try:
+                pid = process.pid
+                if type(pid) is not int or pid <= 1 or os.getpgid(pid) != pid:
+                    raise ProcessLookupError
+                os.killpg(pid, process_signal.SIGKILL)
+            except (OSError, TypeError, ValueError):
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _finish_native_worker_discard(self, process) -> None:
+        """Finish recovery after task cancellation, including repeated cancel."""
+
+        cleanup = asyncio.create_task(self._discard_native_worker(process))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
     async def _run_native_match(
         self,
         target_finger: str | None = None,
         resolve_any_finger: bool = False,
         live_feedback: Callable[[dict], None] | None = None,
     ) -> dict:
-        command = [
-            sys.executable,
-            str(self.project_dir / "src/t2-native-match.py"),
-            "--observation-seconds",
-            str(self.match_seconds),
-            "--stop-on-first-verdict",
-        ]
-        if target_finger is not None:
-            command.extend(["--match-finger-name", target_finger])
-        if resolve_any_finger:
-            command.append("--resolve-any-finger-name")
-        environment = os.environ.copy()
-        environment["SUDO_UID"] = str(self.linux_uid)
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            start_new_session=True,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=environment,
-        )
-        stdout, stderr = await self._collect_process(
-            process, live_feedback, probe=True
-        )
-        if not stdout or process.returncode != 0:
-            detail = stderr.decode(errors="replace").strip()
-            raise RuntimeError(detail or "native T2 match owner failed")
-        try:
-            result = json.loads(stdout)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise RuntimeError("native T2 match owner returned malformed JSON") from error
-        if not isinstance(result, dict):
-            raise RuntimeError("native T2 match owner returned malformed JSON")
-        if any(
-            result.get(field) is not expected
-            for field, expected in (
-                ("configured_identity_records_reconciled", True),
-                ("bridge_os_transaction_released_after_match", True),
-                ("termination_requested", False),
+        if target_finger is not None and resolve_any_finger:
+            raise RuntimeError("native match identity selectors conflict")
+        process = await self._ensure_native_worker()
+        if process.stdin is None or process.stdout is None:
+            await self._discard_native_worker(process)
+            raise RuntimeError("native T2 match worker pipes are unavailable")
+        request = {
+            "schema_version": 1,
+            "request_id": (
+                getattr(self, "native_worker_request_id", 0) % (2**63 - 1)
             )
+            + 1,
+            "observation_seconds": self.match_seconds,
+            "match_finger_name": target_finger,
+            "resolve_any_finger_name": resolve_any_finger,
+        }
+        owner = asyncio.current_task()
+        self.native_worker_request_id = request["request_id"]
+        self.native_worker_expected_boundary = request["request_id"]
+        boundary_event = asyncio.Event()
+        self.native_worker_boundary_event = boundary_event
+        self.process = process
+        self.process_owner = owner
+        self.native_worker_feedback = live_feedback
+        self.native_worker_cue_sent = False
+        response_task = asyncio.create_task(process.stdout.readline())
+        boundary_task = asyncio.create_task(boundary_event.wait())
+        completion = asyncio.gather(response_task, boundary_task)
+        async def exchange():
+            process.stdin.write(
+                json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+            )
+            await process.stdin.drain()
+            return await completion
+
+        exchange_task = asyncio.create_task(exchange())
+        cancelled = False
+        try:
+            try:
+                response_line, _boundary = await asyncio.shield(exchange_task)
+            except asyncio.CancelledError:
+                cancelled = True
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                deadline = (
+                    asyncio.get_running_loop().time() + NATIVE_CANCEL_SECONDS
+                )
+                while not exchange_task.done() and asyncio.get_running_loop().time() < deadline:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(exchange_task),
+                            timeout=max(
+                                0.001,
+                                deadline - asyncio.get_running_loop().time(),
+                            ),
+                        )
+                    except asyncio.CancelledError:
+                        continue
+                    except asyncio.TimeoutError:
+                        break
+                if not exchange_task.done():
+                    await self._finish_native_worker_discard(process)
+                    raise asyncio.CancelledError
+                try:
+                    response_line, _boundary = exchange_task.result()
+                except Exception:
+                    await self._finish_native_worker_discard(process)
+                    raise asyncio.CancelledError
+            except Exception:
+                await self._discard_native_worker(process)
+                raise
+            if not response_line:
+                await self._discard_native_worker(process)
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise RuntimeError("native T2 match worker exited")
+            try:
+                response = json.loads(response_line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                await self._discard_native_worker(process)
+                raise RuntimeError(
+                    "native T2 match owner returned malformed JSON"
+                ) from error
+            if cancelled:
+                raise asyncio.CancelledError
+        finally:
+            if not exchange_task.done():
+                exchange_task.cancel()
+                await asyncio.gather(exchange_task, return_exceptions=True)
+            if not completion.done():
+                completion.cancel()
+                await asyncio.gather(completion, return_exceptions=True)
+            self.native_worker_feedback = None
+            self.native_worker_expected_boundary = None
+            if self.native_worker_boundary_event is boundary_event:
+                self.native_worker_boundary_event = None
+            if self.process is process and self.process_owner is owner:
+                self.process = None
+                self.process_owner = None
+            if self.native_worker is process:
+                await self._discard_native_worker(process)
+            self._schedule_native_worker_warm()
+        if (
+            type(response) is not dict
+            or set(response) not in (
+                {"schema_version", "request_id", "ok", "result"},
+                {"schema_version", "request_id", "ok", "error"},
+            )
+            or response.get("schema_version") != 1
+            or response.get("request_id") != request["request_id"]
+            or type(response.get("ok")) is not bool
         ):
-            raise RuntimeError("native T2 match authority did not reconcile")
+            await self._discard_native_worker(process)
+            raise RuntimeError("native T2 match owner returned malformed JSON")
+        if response["ok"] is not True:
+            raise RuntimeError("native T2 match owner failed")
+        result = response["result"]
+        try:
+            t2_fprint_result.validate_worker_terminal_result(
+                result, target_finger, resolve_any_finger
+            )
+        except RuntimeError:
+            await self._discard_native_worker(process)
+            raise
         return result
 
     async def verify(
@@ -669,9 +1201,15 @@ class T2Backend:
             raise RuntimeError("named and resolved-any matching conflict")
         authority = self.runtime_authority()
         if authority.origin == NATIVE_AUTHORITY:
-            result = await self._run_native_match(
-                target_finger, resolve_any_finger, live_feedback
-            )
+            try:
+                result = await self._run_native_match(
+                    target_finger, resolve_any_finger, live_feedback
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.invalidate_inventory("native_match_failure")
+                raise
         elif authority.origin == COMPATIBILITY_AUTHORITY:
             port = await self.discover()
             # Never replay authentication after an ambiguous transport failure.
@@ -846,6 +1384,11 @@ class T2Backend:
             process.terminate()
         except ProcessLookupError:
             pass
+        if process is getattr(self, "native_worker", None):
+            # SIGTERM is a per-request cooperative cancel. The owning task
+            # drains the terminal response, consumes this worker, and starts a
+            # fresh imported replacement.
+            return
         try:
             await asyncio.wait_for(process.wait(), timeout=10)
         except asyncio.TimeoutError:
@@ -1187,9 +1730,9 @@ class FprintDevice(ServiceInterface):
             )
             self.verify_task = operation
             self.verify_selection_sent = False
-            # VerifyStart only schedules the backend. Native activation and
-            # projection still run before Mesa accepts a touch, so publishing
-            # finger-needed here hands the operator a false-ready prompt.
+            # VerifyStart only schedules the backend. Native activation still
+            # runs before Mesa accepts a touch, so publishing finger-needed
+            # here hands the operator a false-ready prompt.
             # The match_armed event is the first authoritative boundary.
             self._set_finger_state(False, False)
             started = True
@@ -1373,6 +1916,7 @@ class FprintDevice(ServiceInterface):
     async def EnrollStart(self, finger_name: "s"):
         self.listed_presentation = None
         self._require_claim_owner()
+        self.backend.invalidate_inventory("enrollment_start")
         client = self.enrollment_client
         if client is None:
             raise DBusError(
@@ -1400,7 +1944,7 @@ class FprintDevice(ServiceInterface):
             # the lowest vacant stable slot after it has reconciled the exact
             # current identity inventory. Retained slots are never renumbered.
             async with self.backend.operation_lock:
-                view = await self.backend.enrollment_projection()
+                view = await self.backend.enrollment_projection(fresh=True)
             self._require_claim_owner()
             if (
                 self.verify_task is not None
@@ -1465,6 +2009,7 @@ class FprintDevice(ServiceInterface):
         if update.status is not None:
             self.EnrollStatus(update.status, update.done)
         if update.done:
+            self.backend.invalidate_inventory("enrollment_complete")
             client = self.enrollment_client
             task = getattr(client, "task", None) if client is not None else None
             if task is None:
@@ -1551,6 +2096,7 @@ class FprintDevice(ServiceInterface):
     async def DeleteEnrolledFinger(self, finger_name: "s"):
         self.listed_presentation = None
         self._require_claim_owner()
+        self.backend.invalidate_inventory("deletion_start")
         client = self.deletion_client
         if client is None:
             raise DBusError(
@@ -1586,7 +2132,7 @@ class FprintDevice(ServiceInterface):
         self.delete_task = current_task
         try:
             async with self.backend.operation_lock:
-                view = await self.backend.runtime_projection()
+                view = await self.backend.runtime_projection(fresh=True)
             self._require_claim_owner()
             if self.delete_task is not current_task:
                 raise RuntimeError("deletion task binding changed")
@@ -1646,6 +2192,7 @@ class FprintDevice(ServiceInterface):
                 "single-finger deletion did not reconcile",
             ) from error
         finally:
+            self.backend.invalidate_inventory("deletion_complete")
             if self.delete_task is current_task:
                 self.delete_task = None
             self._arm_unstarted_claim_expiry()
@@ -1809,6 +2356,121 @@ async def main_async(args: argparse.Namespace) -> None:
         enrollment_client=enrollment_client_for_arguments(args),
         deletion_client=deletion_client_for_arguments(args),
     )
+    login1_owner: str | None = None
+    login1_owner_generation = 0
+    login1_signal_generation = 0
+    pending_sleep_signal: tuple[str, bool] | None = None
+    login1_reconcile_lock = asyncio.Lock()
+    login1_reconcile_tasks: set[asyncio.Task] = set()
+    login1_awake = asyncio.Event()
+
+    def apply_sleep_state(sleeping: bool) -> None:
+        nonlocal login1_signal_generation
+        login1_signal_generation += 1
+        backend.system_sleep_changed(sleeping)
+        if sleeping:
+            login1_awake.clear()
+        else:
+            login1_awake.set()
+
+    async def reconcile_login1() -> None:
+        """Bind current sleep state to one stable, authenticated owner."""
+
+        nonlocal login1_owner, pending_sleep_signal
+        async with login1_reconcile_lock:
+            while True:
+                generation = login1_owner_generation
+                owner_reply = await bus.call(
+                    Message(
+                        destination="org.freedesktop.DBus",
+                        path="/org/freedesktop/DBus",
+                        interface="org.freedesktop.DBus",
+                        member="GetNameOwner",
+                        signature="s",
+                        body=["org.freedesktop.login1"],
+                    )
+                )
+                if generation != login1_owner_generation:
+                    continue
+                if (
+                    not isinstance(owner_reply, Message)
+                    or owner_reply.message_type != MessageType.METHOD_RETURN
+                    or owner_reply.signature != "s"
+                    or len(owner_reply.body) != 1
+                    or not isinstance(owner_reply.body[0], str)
+                    or not owner_reply.body[0].startswith(":")
+                ):
+                    raise RuntimeError("system sleep authority is unavailable")
+                login1_owner = owner_reply.body[0]
+                had_pending_signal = False
+                if (
+                    pending_sleep_signal is not None
+                    and pending_sleep_signal[0] == login1_owner
+                ):
+                    _sender, sleeping = pending_sleep_signal
+                    pending_sleep_signal = None
+                    apply_sleep_state(sleeping)
+                    had_pending_signal = True
+                signal_generation = login1_signal_generation
+                owner = login1_owner
+                property_reply = await bus.call(
+                    Message(
+                        destination=owner,
+                        path="/org/freedesktop/login1",
+                        interface="org.freedesktop.DBus.Properties",
+                        member="Get",
+                        signature="ss",
+                        body=[
+                            "org.freedesktop.login1.Manager",
+                            "PreparingForSleep",
+                        ],
+                    )
+                )
+                if (
+                    generation != login1_owner_generation
+                    or login1_owner != owner
+                ):
+                    continue
+                variant = (
+                    property_reply.body[0]
+                    if isinstance(property_reply, Message)
+                    and property_reply.message_type == MessageType.METHOD_RETURN
+                    and property_reply.signature == "v"
+                    and len(property_reply.body) == 1
+                    else None
+                )
+                if (
+                    getattr(variant, "signature", None) != "b"
+                    or type(getattr(variant, "value", None)) is not bool
+                ):
+                    raise RuntimeError("system sleep state is unavailable")
+                # A signal observed during owner discovery is newer evidence
+                # than the initialization query and must survive that race.
+                if (
+                    not had_pending_signal
+                    and signal_generation == login1_signal_generation
+                ):
+                    apply_sleep_state(variant.value)
+                return
+
+    def schedule_login1_reconciliation() -> None:
+        task = asyncio.create_task(reconcile_login1())
+        login1_reconcile_tasks.add(task)
+
+        def completed(done: asyncio.Task) -> None:
+            login1_reconcile_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                print(
+                    "Touch ID sleep-state reconciliation failed: "
+                    f"{public_verification_failure(error)}",
+                    flush=True,
+                )
+
+        task.add_done_callback(completed)
 
     # fprintd's historical ABI contains hyphenated property names, although
     # D-Bus member-name validators (including dbus-next's) reject hyphens.
@@ -1817,6 +2479,7 @@ async def main_async(args: argparse.Namespace) -> None:
         return legacy_property_reply(message, device)
 
     def sender_departure_handler(message: Message):
+        nonlocal login1_owner, login1_owner_generation, pending_sleep_signal
         if (
             message.message_type == MessageType.SIGNAL
             and message.sender == "org.freedesktop.DBus"
@@ -1824,10 +2487,44 @@ async def main_async(args: argparse.Namespace) -> None:
             and message.interface == "org.freedesktop.DBus"
             and message.member == "NameOwnerChanged"
             and len(message.body) == 3
-            and message.body[0] == message.body[1]
-            and not message.body[2]
         ):
-            asyncio.create_task(device.sender_departed(message.body[0]))
+            name, old_owner, new_owner = message.body
+            if name == "org.freedesktop.login1":
+                login1_owner_generation += 1
+                login1_owner = (
+                    new_owner
+                    if isinstance(new_owner, str) and new_owner.startswith(":")
+                    else None
+                )
+                if (
+                    pending_sleep_signal is not None
+                    and pending_sleep_signal[0] != login1_owner
+                ):
+                    pending_sleep_signal = None
+                apply_sleep_state(True)
+                if login1_owner is not None:
+                    schedule_login1_reconciliation()
+            if name == old_owner and not new_owner:
+                asyncio.create_task(device.sender_departed(name))
+        return False
+
+    def system_sleep_handler(message: Message):
+        nonlocal pending_sleep_signal
+        if (
+            message.message_type == MessageType.SIGNAL
+            and isinstance(message.sender, str)
+            and message.sender.startswith(":")
+            and message.path == "/org/freedesktop/login1"
+            and message.interface == "org.freedesktop.login1.Manager"
+            and message.member == "PrepareForSleep"
+            and message.signature == "b"
+            and len(message.body) == 1
+            and type(message.body[0]) is bool
+        ):
+            if login1_owner is None:
+                pending_sleep_signal = (message.sender, message.body[0])
+            elif message.sender == login1_owner:
+                apply_sleep_state(message.body[0])
         return False
 
     def legacy_introspection_handler(message: Message):
@@ -1836,27 +2533,49 @@ async def main_async(args: argparse.Namespace) -> None:
     bus.add_message_handler(legacy_introspection_handler)
     bus.add_message_handler(legacy_property_handler)
     bus.add_message_handler(sender_departure_handler)
+    bus.add_message_handler(system_sleep_handler)
     # A low-level dbus-next service does not install proxy-client match rules.
     # A local handler alone cannot receive other connections' departures.
-    subscribed = await bus.call(
-        Message(
-            destination="org.freedesktop.DBus",
-            path="/org/freedesktop/DBus",
-            interface="org.freedesktop.DBus",
-            member="AddMatch",
-            signature="s",
-            body=["type='signal',sender='org.freedesktop.DBus',"
-                  "path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',"
-                  "member='NameOwnerChanged'"],
-        )
+    match_rules = (
+        "type='signal',sender='org.freedesktop.DBus',"
+        "path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',"
+        "member='NameOwnerChanged'",
+        "type='signal',sender='org.freedesktop.login1',"
+        "path='/org/freedesktop/login1',"
+        "interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
     )
-    if (
-        not isinstance(subscribed, Message)
-        or subscribed.message_type != MessageType.METHOD_RETURN
-        or subscribed.signature != ""
-        or subscribed.body != []
-    ):
-        raise RuntimeError("D-Bus caller departure monitoring is unavailable")
+    for rule in match_rules:
+        subscribed = await bus.call(
+            Message(
+                destination="org.freedesktop.DBus",
+                path="/org/freedesktop/DBus",
+                interface="org.freedesktop.DBus",
+                member="AddMatch",
+                signature="s",
+                body=[rule],
+            )
+        )
+        if (
+            not isinstance(subscribed, Message)
+            or subscribed.message_type != MessageType.METHOD_RETURN
+            or subscribed.signature != ""
+            or subscribed.body != []
+        ):
+            raise RuntimeError("D-Bus lifecycle monitoring is unavailable")
+    await reconcile_login1()
+    while True:
+        while backend.system_sleeping:
+            await login1_awake.wait()
+        warm = backend._schedule_runtime_warm()
+        if warm is not None:
+            try:
+                await warm
+            except asyncio.CancelledError:
+                if backend.system_sleeping:
+                    continue
+                raise
+        if not backend.system_sleeping:
+            break
     bus.export(MANAGER_PATH, FprintManager())
     bus.export(DEVICE_PATH, device)
     await bus.request_name(BUS_NAME)

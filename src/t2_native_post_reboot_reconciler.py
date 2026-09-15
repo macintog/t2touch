@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ import t2_post_reboot_reconciler
 import t2_post_reboot_diagnostic
 import t2_enrollment_journal
 import t2_identity_delete_journal
+import t2_identity_delete_batch_journal
 import t2_mutation_journal
 import t2_mutation_registry
 import t2_user_authority
@@ -122,6 +124,7 @@ def _pending_native_candidate() -> object | None:
         registry = t2_mutation_registry.scan(MUTATION_ROOT)
         candidates = []
         interrupted_deletes = []
+        active_delete_batches = []
         later_mutation = False
         for path in sorted(MUTATION_ROOT.iterdir(), key=lambda item: item.name):
             records = t2_mutation_journal.read(path)
@@ -147,6 +150,13 @@ def _pending_native_candidate() -> object | None:
                             "delete-recovery", "identity-management", path, deletion
                         )
                     )
+            if kind == "delete-batch":
+                batch = t2_identity_delete_batch_journal.validate_history(records)
+                if batch.phase in {
+                    t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.STARTED,
+                    t2_identity_delete_batch_journal.IdentityDeleteBatchPhase.INTENT,
+                }:
+                    active_delete_batches.append((path, batch))
             if kind != "enroll":
                 later_mutation = True
                 continue
@@ -166,13 +176,52 @@ def _pending_native_candidate() -> object | None:
             ):
                 later_mutation = True
         if interrupted_deletes:
-            if len(interrupted_deletes) != 1 or sum(
-                entry.blocks_new_mutation for entry in registry
-            ) != 1:
+            blockers = [entry for entry in registry if entry.blocks_new_mutation]
+            deletion = interrupted_deletes[0].history
+            batch_bound = (
+                len(active_delete_batches) == 1
+                and active_delete_batches[0][1].pending is not None
+                and deletion.target_name_sha256
+                == hashlib.sha256(
+                    active_delete_batches[0][1].pending.encode("utf-8")
+                ).hexdigest()
+                and deletion.baseline["apple_uid"]
+                == active_delete_batches[0][1].baseline["apple_uid"]
+                and deletion.baseline["mapping_generation"]
+                == active_delete_batches[0][1].baseline["mapping_generation"]
+                and len(deletion.baseline["identity_records"])
+                == len(active_delete_batches[0][1].finger_names)
+                - len(active_delete_batches[0][1].completed)
+            )
+            valid_blockers = (
+                len(blockers) == 1
+                and blockers[0].kind == "delete-one"
+                and not active_delete_batches
+            ) or (
+                len(blockers) == 2
+                and {entry.kind for entry in blockers}
+                == {"delete-one", "delete-batch"}
+                and batch_bound
+            )
+            if len(interrupted_deletes) != 1 or not valid_blockers:
                 raise NativePostRebootReconcilerError(
                     "interrupted deletion is not the sole pending mutation"
                 )
             return interrupted_deletes[0]
+        if active_delete_batches:
+            blockers = [entry for entry in registry if entry.blocks_new_mutation]
+            if (
+                len(active_delete_batches) != 1
+                or len(blockers) != 1
+                or blockers[0].kind != "delete-batch"
+            ):
+                raise NativePostRebootReconcilerError(
+                    "pending batch deletion is ambiguous"
+                )
+            path, batch = active_delete_batches[0]
+            return t2_post_reboot_reconciler.PendingMutation(
+                "delete-batch", "identity-management", path, batch
+            )
         if not candidates:
             return None
         if len(candidates) != 1:
@@ -407,6 +456,10 @@ def run(
     ):
         raise NativePostRebootReconcilerError(
             "native post-reboot caller binding is invalid"
+        )
+    if kind == "delete-batch":
+        return NativePostRebootReconcilerResult(
+            "delete-batch-awaits-resume", False
         )
     if kind == "enroll":
         document = enrollment_verifier(trusted_linux_uid)

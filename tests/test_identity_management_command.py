@@ -590,7 +590,7 @@ class IdentityManagementCommandTests(unittest.TestCase):
     def test_management_mutations_never_manufacture_password_attestation(self):
         source = (SOURCE / "t2-touchid-manage.py").read_text(encoding="utf-8")
         self.assertNotIn("password_fallback_verified=True", source)
-        self.assertEqual(source.count("password_fallback_verified=False"), 5)
+        self.assertEqual(source.count("password_fallback_verified=False"), 6)
 
     def test_adaptive_sync_reuses_active_sensor_readiness(self):
         source = (SOURCE / "t2-touchid-manage.py").read_text(encoding="utf-8")

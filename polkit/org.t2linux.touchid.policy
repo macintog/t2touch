@@ -58,4 +58,16 @@
     <!-- Authenticate before the helper takes the reader or mutation lock. -->
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/t2-touchid-delete</annotate>
   </action>
+
+  <action id="org.t2linux.touchid.purge">
+    <description>Delete all of your T2 Touch ID fingerprints</description>
+    <message>Authentication is required to delete all T2 Touch ID fingerprints</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+    <!-- Authenticate before the helper takes the reader or mutation lock. -->
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/t2-touchid-purge</annotate>
+  </action>
 </policyconfig>

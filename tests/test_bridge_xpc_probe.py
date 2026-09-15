@@ -9,7 +9,7 @@ from pathlib import Path
 import struct
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 import uuid
 
 
@@ -39,6 +39,57 @@ def match_result_event(identity_record: bytes, *, version: int = 2) -> bytes:
 
 
 class ReplyTests(unittest.TestCase):
+    def test_touch_to_verdict_tracks_each_validated_capture(self):
+        timing = {}
+        with patch.object(MODULE.t2_performance, "emit") as emit:
+            MODULE.observe_touch_to_verdict(
+                {"event_kind": "status", "status_semantics": "finger-present"},
+                timing,
+                observed_at=10.0,
+            )
+            MODULE.observe_touch_to_verdict(
+                {
+                    "event_kind": "match_result",
+                    "result_valid": True,
+                    "no_match_image_quality": True,
+                },
+                timing,
+                observed_at=10.1,
+            )
+            MODULE.observe_touch_to_verdict(
+                {"event_kind": "status", "status_semantics": "finger-present"},
+                timing,
+                observed_at=20.0,
+            )
+            MODULE.observe_touch_to_verdict(
+                {"event_kind": "match_result", "result_valid": False},
+                timing,
+                observed_at=20.2,
+            )
+
+        self.assertEqual(
+            emit.call_args_list,
+            [
+                call("bridge_match", "touch_to_verdict", 10.0, "ok"),
+                call("bridge_match", "touch_to_verdict", 20.0, "invalid"),
+            ],
+        )
+        self.assertEqual(timing, {})
+
+    def test_touch_to_verdict_ignores_unpaired_or_unvalidated_events(self):
+        timing = {}
+        with patch.object(MODULE.t2_performance, "emit") as emit:
+            MODULE.observe_touch_to_verdict(
+                {"event_kind": "match_result", "result_valid": True}, timing
+            )
+            MODULE.observe_touch_to_verdict(
+                {"event_kind": "status", "untrusted_status_code": 63},
+                timing,
+                observed_at=10.0,
+            )
+        emit.assert_not_called()
+        self.assertEqual(timing, {})
+
     def test_live_addition_verdict_retains_required_identity_boolean(self):
         event = {
             "event_kind": "match_result",

@@ -6,8 +6,8 @@
 #include <unistd.h>
 
 static const char message[] =
-    "Touch the fingerprint sensor now. Do not type your password until the "
-    "password prompt appears.\n";
+    "Preparing the fingerprint sensor. Touch it when you hear the ready cue. "
+    "Do not type your password until the password prompt appears.\n";
 
 int main(void)
 {

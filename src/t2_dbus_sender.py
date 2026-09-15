@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextvars
 import re
 
+from dbus_next import DBusError
 from dbus_next.aio import MessageBus
 
 
@@ -40,9 +41,28 @@ class SenderAwareMessageBus(MessageBus):
         delegated = super()._make_method_handler(interface, method)
 
         def handler(message, send_reply):
+            class TypedErrorReply:
+                def __call__(self, reply):
+                    return send_reply(reply)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    if isinstance(exc_value, DBusError):
+                        # dbus-next 0.2.3 sends the typed error, but its reply
+                        # context fails to suppress it in async callbacks.
+                        # Expected protocol replies must not look like crashes.
+                        send_reply.send_error(exc_value)
+                        return True
+                    return send_reply.__exit__(exc_type, exc_value, traceback)
+
+                def send_error(self, error):
+                    return send_reply.send_error(error)
+
             token = _CURRENT_SENDER.set(message.sender)
             try:
-                return delegated(message, send_reply)
+                return delegated(message, TypedErrorReply())
             finally:
                 _CURRENT_SENDER.reset(token)
 

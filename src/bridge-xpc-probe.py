@@ -63,6 +63,7 @@ import t2_enrollment_journal
 import t2_fprint_match_gate
 import t2_fprint_projection
 import t2_native_mutation_authority
+import t2_performance
 import t2_user_authority
 
 
@@ -128,6 +129,32 @@ def match_observation_should_stop(summary: dict, args: argparse.Namespace) -> bo
                 )
             )
         )
+    )
+
+
+def observe_touch_to_verdict(
+    summary: dict,
+    timing: dict[str, float],
+    *,
+    observed_at: float | None = None,
+) -> None:
+    """Measure one capture from validated finger presence to its verdict."""
+    if summary.get("status_semantics") == "finger-present":
+        timing.setdefault(
+            "finger_present",
+            time.monotonic() if observed_at is None else observed_at,
+        )
+        return
+    if summary.get("event_kind") != "match_result":
+        return
+    started = timing.pop("finger_present", None)
+    if started is None:
+        return
+    t2_performance.emit(
+        "bridge_match",
+        "touch_to_verdict",
+        started,
+        "ok" if summary.get("result_valid") is True else "invalid",
     )
 
 
@@ -1357,6 +1384,7 @@ def read_biolockout_payload(archive_path: str) -> bytes:
 
 
 def main() -> None:
+    invocation_started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("T2_TOUCHID_HOST"))
     parser.add_argument(
@@ -1777,6 +1805,7 @@ def main() -> None:
     managed_expected_identities: tuple[bytes, ...] = ()
     compatibility_loaded_empty_restore = False
     if args.native_authority_linux_uid is not None:
+        authority_validation_started = time.monotonic()
         if os.geteuid() != 0 or args.native_authority_linux_uid <= 0:
             parser.error("native authority matching requires a non-root target and root owner")
         if (
@@ -1842,6 +1871,12 @@ def main() -> None:
         _native_payloads, native_biolockout = read_native_catacomb_payloads(
             args.load_native_catacomb_root, args.macos_user_id
         )
+        if args.match_seconds is not None:
+            t2_performance.emit(
+                "bridge_match",
+                "authority_validation",
+                authority_validation_started,
+            )
     elif args.compatibility_authority_linux_uid is not None:
         if os.geteuid() != 0 or args.compatibility_authority_linux_uid <= 0:
             parser.error(
@@ -1942,6 +1977,11 @@ def main() -> None:
                 "credential_set_length": len(authorized_credential_set),
                 "context_identifier_redacted": True,
             }
+        bridge_preparation_started = time.monotonic()
+        if args.match_seconds is not None:
+            t2_performance.emit(
+                "bridge_match", "invocation_setup", invocation_started
+            )
         sock.settimeout(args.timeout)
         sock.connect((args.host, args.port, 0, scope_id))
         frame_type, body = receive_frame(sock)
@@ -3012,6 +3052,9 @@ def main() -> None:
                 raise ValueError("sensor rejected the system-awake notification")
             operations.append("system awake")
         if args.match_seconds is not None:
+            t2_performance.emit(
+                "bridge_match", "preparation", bridge_preparation_started
+            )
             if not args.initialize:
                 raise ValueError("--match-seconds requires --initialize")
             if args.biometric_protocol and result.get(
@@ -3179,6 +3222,7 @@ def main() -> None:
                 notify(sock, [12, True])
                 os_transaction_retained = True
                 result["bridge_os_transaction_retained_for_match"] = True
+            match_accept_started = time.monotonic()
             try:
                 match_reply, events = biometric_command(sock, 4, data=match_data)
             except Exception:
@@ -3193,6 +3237,9 @@ def main() -> None:
                         ] = False
                         os_transaction_retained = False
                 raise
+            t2_performance.emit(
+                "bridge_match", "start_acceptance", match_accept_started
+            )
             result["match_start_reply"] = summarize_command_reply(match_reply)
             match_started = (
                 isinstance(match_reply, list)
@@ -3204,6 +3251,7 @@ def main() -> None:
                 terminal_operation_status = None
                 persistence_failure = None
                 post_match_biolockout_generations = []
+                touch_timing: dict[str, float] = {}
 
                 def persist_match_result(event_summary: dict) -> None:
                     if (
@@ -3248,6 +3296,7 @@ def main() -> None:
                         args.live_match_feedback_format,
                     )
                 for initial_event in events:
+                    observed_at = time.monotonic()
                     initial_summary = summarize_event(
                         initial_event,
                         enrolled_identity_records,
@@ -3256,6 +3305,9 @@ def main() -> None:
                         required_identity_record=native_required_match_identity,
                         all_match_gate=all_match_gate,
                         slot_match_gate=slot_match_gate,
+                    )
+                    observe_touch_to_verdict(
+                        initial_summary, touch_timing, observed_at=observed_at
                     )
                     if args.live_match_feedback:
                         emit_live_match_feedback(
@@ -3308,6 +3360,7 @@ def main() -> None:
                     if envelope[1] is False:
                         events.append(envelope[3])
                         send_message(sock, [1, True, envelope[2], [0]])
+                        observed_at = time.monotonic()
                         event_summary = summarize_event(
                             envelope[3],
                             enrolled_identity_records,
@@ -3316,6 +3369,9 @@ def main() -> None:
                             required_identity_record=native_required_match_identity,
                             all_match_gate=all_match_gate,
                             slot_match_gate=slot_match_gate,
+                        )
+                        observe_touch_to_verdict(
+                            event_summary, touch_timing, observed_at=observed_at
                         )
                         if args.live_match_feedback:
                             emit_live_match_feedback(
@@ -3361,6 +3417,7 @@ def main() -> None:
                         and cancel_reply[0] == 0
                     )
                     if result["match_cleanup_valid"]:
+                        drain_started = time.monotonic()
                         try:
                             drained = drain_post_cancel_service_events(sock, events)
                         except Exception as error:
@@ -3371,6 +3428,9 @@ def main() -> None:
                                     f"{error}"
                                 )
                         else:
+                            t2_performance.emit(
+                                "bridge_match", "callback_drain", drain_started
+                            )
                             result["post_cancel_events_drained"] = drained
                             result["post_cancel_callback_quiescent"] = True
                 if not result["match_cleanup_valid"]:

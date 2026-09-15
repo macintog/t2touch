@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import t2_identity_rename_journal as rename_journal
 import t2_identity_delete_journal as delete_journal
+import t2_identity_delete_batch_journal as batch_journal
 import t2_external_delete_reconcile as external_reconcile
 import t2_mutation_journal as mutation
 import t2_mutation_registry as registry
@@ -114,7 +115,7 @@ class MutationRegistryTests(unittest.TestCase):
             self.assertEqual(pending.phase, "delete-intent")
             self.assertTrue(pending.blocks_new_mutation)
 
-    def test_unrouted_batch_kind_blocks(self):
+    def test_typed_batch_blocks_only_after_it_starts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             root.chmod(0o700)
@@ -126,7 +127,21 @@ class MutationRegistryTests(unittest.TestCase):
                 operation_id="00000000-0000-0000-0000-000000000074",
             )
             entry = registry.scan(root)[0]
-            self.assertEqual(entry.phase, "unrouted")
+            self.assertEqual(entry.phase, "baseline-reconciled")
+            self.assertFalse(entry.blocks_new_mutation)
+            history = batch_journal.read(path)
+            batch_journal.append_checked(
+                path,
+                history,
+                "DELETE_BATCH_STARTED",
+                {
+                    "finger_names": ["finger-1"],
+                    "identity_count": 1,
+                    "identifiers_redacted": True,
+                },
+            )
+            entry = registry.scan(root)[0]
+            self.assertEqual(entry.phase, "batch-started")
             self.assertTrue(entry.blocks_new_mutation)
 
     def test_routes_external_delete_reconciliation_until_terminal(self):

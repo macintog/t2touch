@@ -28,7 +28,10 @@ The repository implements the verification path:
 
 1. A successful list exposes the complete reconciled neutral `finger-N`
    inventory. Simultaneous list requests may share only a currently running
-   collection; completed results are not a cross-request cache.
+   collection. Native presentation metadata may remain cached while protected
+   account authority, committed Catacomb metadata, and mutation-journal metadata
+   are unchanged. Separate administrative mutations invalidate reuse on the next
+   access; compatibility authority always collects fresh state.
 2. The same caller may pass its single-use list projection to its next
    `VerifyStart`. Without that projection, verification collects one. Release,
    enrollment, and deletion invalidate this presentation state.
@@ -416,11 +419,16 @@ operation, handles service-owner loss, and takes touch/lift cues from live
 `t2-enroll-progress`; it does not infer progress from a fixed capture count.
 Standard fprintd clients independently exercise the same service boundary.
 
-Do not implement bulk deletion as a loop over the single-delete API. A crash
-would create a partially deleted set with unclear client semantics. Keep
-`DeleteEnrolledFingers` and `DeleteEnrolledFingers2` fail-closed until there is
-an explicit batch journal and deterministic recovery. Support for deleting the
-final named identity does not establish an atomic batch-delete contract.
+Do not implement bulk deletion as an unjournaled loop over the single-delete
+API. The product `t2touch purge` command owns an explicit outer batch journal,
+records each next handle before calling the reconciled single-delete path, and
+requires a complete matching projection when it resumes. It reports partial
+completion rather than claiming atomic rollback.
+
+`DeleteEnrolledFingers` and `DeleteEnrolledFingers2` remain fail-closed at the
+fprintd boundary. Enabling them still requires binding the claimed D-Bus user
+and caller lifetime to the product batch broker; the presence of an internal
+batch journal alone does not establish that client authorization contract.
 
 ### Product deletion authorization ordering
 
@@ -433,6 +441,15 @@ native configuration, and accepts only one neutral finger handle. It then uses
 `run_delete` with the existing administrative authority, mapping capability,
 exact-inventory, global-lock, mutation-journal and reconciliation checks.
 Terminal cancellation after authorization cannot interrupt that transaction.
+
+`t2touch purge` uses the separate root-owned `t2-touchid-purge` helper and
+`org.t2linux.touchid.purge` action. The CLI asks for destructive confirmation
+before pkexec; the helper then holds one global operation lock and sleep
+inhibitor across the batch. Each child deletion has its ordinary private
+mutation journal, while the outer `delete-batch` journal records ordered neutral
+handles, completed count, and any pending handle. A new invocation must use
+`--resume`; it obtains fresh authorization and refuses an inventory delta that
+is not the exact pending deletion.
 
 This ordering avoids recursively asking the reader to authenticate deletion
 while its D-Bus claim and global operation lock are already held. Existing

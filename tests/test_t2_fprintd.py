@@ -5,6 +5,7 @@
 import asyncio
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
 import stat
@@ -59,6 +60,7 @@ class FakeBackend:
         self.verdict = verdict
         self.cancel_count = 0
         self.adaptive_sync_requests = 0
+        self.inventory_invalidations = []
         self.operation_lock = asyncio.Lock()
         self.projection = MODULE.t2_fprint_runtime.RuntimeProjection(
             ("finger-1",),
@@ -80,11 +82,14 @@ class FakeBackend:
     async def list_fingers(self):
         return ("finger-1",)
 
-    async def runtime_projection(self):
+    async def runtime_projection(self, **_kwargs):
         return self.projection
 
-    async def enrollment_projection(self):
+    async def enrollment_projection(self, **_kwargs):
         return self.projection
+
+    def invalidate_inventory(self, reason):
+        self.inventory_invalidations.append(reason)
 
     async def cancel(self, *, owner=None):
         self.cancel_count += 1
@@ -566,7 +571,7 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
 
         class BlockingBackend(FakeBackend):
-            async def runtime_projection(self):
+            async def runtime_projection(self, **_kwargs):
                 entered.set()
                 await asyncio.Event().wait()
 
@@ -1097,7 +1102,7 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
 
         class BlockingBackend(FakeBackend):
-            async def enrollment_projection(self):
+            async def enrollment_projection(self, **_kwargs):
                 entered.set()
                 await asyncio.Event().wait()
 
@@ -1120,7 +1125,7 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
 
         class BlockingBackend(FakeBackend):
-            async def enrollment_projection(self):
+            async def enrollment_projection(self, **_kwargs):
                 entered.set()
                 await release.wait()
                 return self.projection
@@ -1322,7 +1327,7 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
 
         class BlockingBackend(FakeBackend):
-            async def runtime_projection(self):
+            async def runtime_projection(self, **_kwargs):
                 entered.set()
                 await asyncio.Event().wait()
 
@@ -1606,6 +1611,174 @@ class VerdictTests(unittest.TestCase):
 
 
 class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sleep_transition_blocks_inventory_and_worker_warmup(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.system_sleeping = True
+        backend.inventory_task = None
+        backend.runtime_authority = mock.Mock()
+        backend._ensure_native_worker_locked = AsyncMock()
+
+        with self.assertRaisesRegex(RuntimeError, "sleep transition"):
+            await backend.runtime_projection()
+        with self.assertRaisesRegex(RuntimeError, "sleep transition"):
+            await backend.list_fingers()
+        with self.assertRaisesRegex(RuntimeError, "sleep transition"):
+            await MODULE.T2Backend._ensure_native_worker_locked(backend)
+        backend.runtime_authority.assert_not_called()
+
+    async def test_sleep_quiesces_worker_and_resume_schedules_warmup(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.system_sleeping = False
+        backend.inventory_generation = 0
+        backend.inventory_projection = object()
+        backend.inventory_authority_token = object()
+        backend.native_worker_warm_task = None
+        backend.native_worker_sleep_task = None
+        backend.runtime_warm_task = None
+        backend._quiesce_hardware_for_sleep = AsyncMock()
+        backend.warm_runtime = AsyncMock()
+
+        backend.system_sleep_changed(True)
+        sleep_task = backend.native_worker_sleep_task
+        self.assertTrue(backend.system_sleeping)
+        self.assertIsNone(backend.inventory_projection)
+        await sleep_task
+        backend._quiesce_hardware_for_sleep.assert_awaited_once_with()
+
+        backend.system_sleep_changed(False)
+        await asyncio.sleep(0)
+        self.assertFalse(backend.system_sleeping)
+        backend.warm_runtime.assert_awaited_once_with()
+
+    async def test_sleep_quiescence_drains_inflight_inventory_cleanup(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.system_sleeping = False
+        backend.inventory_generation = 0
+        backend.inventory_projection = None
+        backend.inventory_authority_token = None
+        backend.inventory_task = None
+        backend.runtime_warm_task = None
+        backend.native_worker_warm_task = None
+        backend.native_worker_sleep_task = None
+        backend.native_worker = None
+        backend.native_worker_start_lock = asyncio.Lock()
+        backend.operation_lock = asyncio.Lock()
+        backend.process_owner = None
+        entered = asyncio.Event()
+        cleaning = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        phase_after_collection = mock.Mock()
+
+        async def collect():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleaning.set()
+                await release_cleanup.wait()
+                raise
+            phase_after_collection()
+
+        async def collect_fingers():
+            async with backend.operation_lock:
+                await collect()
+
+        backend._collect_fingers = collect_fingers
+        waiter = asyncio.create_task(backend.list_fingers())
+        await asyncio.wait_for(entered.wait(), 1)
+
+        backend.system_sleep_changed(True)
+        sleep_task = backend.native_worker_sleep_task
+        await asyncio.wait_for(cleaning.wait(), 1)
+        self.assertFalse(sleep_task.done())
+        release_cleanup.set()
+        await asyncio.wait_for(sleep_task, 1)
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+        phase_after_collection.assert_not_called()
+
+    async def test_inventory_projection_stays_warm_until_generation_changes(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.inventory_state_token = None
+        backend._inventory_state_token = mock.Mock(return_value=("state-a",))
+        backend.inventory_projection = None
+        backend.inventory_authority_token = None
+        backend.inventory_generation = 0
+        selected = mock.Mock(
+            linux_account_generation="account-a",
+            keybag_sha256="keybag-a",
+            apple_uid=501,
+            account_uuid="account-uuid-a",
+            bag_uuid="bag-uuid-a",
+        )
+        authority = mock.Mock(
+            origin=MODULE.NATIVE_AUTHORITY,
+            mapping_set=mock.Mock(generation="mapping-a"),
+            selected=selected,
+        )
+        backend.runtime_authority = mock.Mock(return_value=authority)
+        first = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        second = MODULE.t2_fprint_runtime.RuntimeProjection((), 0, True)
+        backend._collect_runtime_projection = AsyncMock(
+            side_effect=(first, second)
+        )
+
+        fake_time = mock.Mock()
+        fake_time.monotonic.side_effect = (1.0, 1.0, 10**12)
+        with (
+            mock.patch.object(MODULE, "time", fake_time),
+            mock.patch.object(MODULE.t2_performance, "emit"),
+        ):
+            self.assertIs(await backend.runtime_projection(), first)
+            self.assertIs(await backend.runtime_projection(), first)
+        backend._collect_runtime_projection.assert_awaited_once_with(authority)
+
+        authority.mapping_set.generation = "mapping-b"
+        self.assertIs(await backend.runtime_projection(), second)
+        self.assertEqual(backend._collect_runtime_projection.await_count, 2)
+
+    async def test_explicit_inventory_invalidation_refreshes_stale_views(self):
+        authority = mock.Mock(
+            origin=MODULE.NATIVE_AUTHORITY,
+            mapping_set=mock.Mock(generation="mapping-a"),
+            selected=mock.Mock(
+                linux_account_generation="account-a",
+                keybag_sha256="keybag-a",
+                apple_uid=501,
+                account_uuid="account-uuid-a",
+                bag_uuid="bag-uuid-a",
+            ),
+        )
+        empty = MODULE.t2_fprint_runtime.RuntimeProjection((), 0, True)
+        positive = MODULE.t2_fprint_runtime.RuntimeProjection(
+            ("finger-1",), 1, True
+        )
+        for stale, refreshed in ((empty, positive), (positive, empty)):
+            with self.subTest(stale=stale.listed_fingers):
+                backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+                backend.inventory_projection = stale
+                backend.inventory_generation = 1
+                backend.inventory_authority_token = (
+                    MODULE.NATIVE_AUTHORITY,
+                    "mapping-a",
+                    "account-a",
+                    "keybag-a",
+                    501,
+                    "account-uuid-a",
+                    "bag-uuid-a",
+                )
+                backend.runtime_authority = mock.Mock(return_value=authority)
+                backend._collect_runtime_projection = AsyncMock(
+                    return_value=refreshed
+                )
+
+                backend._inventory_state_token = mock.Mock(return_value=("state-a",))
+                backend.invalidate_inventory("test_mutation")
+                self.assertIs(await backend.runtime_projection(), refreshed)
+                backend._collect_runtime_projection.assert_awaited_once_with(
+                    authority
+                )
+
     async def test_backend_cancel_terminates_unbounded_native_owner(self):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
         process = mock.Mock(returncode=None)
@@ -1624,26 +1797,78 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         backend.project_dir = Path("/opt/t2-touchid")
         backend.match_seconds = 15
         backend.process = None
-        stdout = asyncio.StreamReader()
-        stdout.feed_data(
-            b'{"configured_identity_records_reconciled":true,'
-            b'"bridge_os_transaction_released_after_match":true,'
-            b'"termination_requested":false}'
-        )
-        stdout.feed_eof()
-        stderr = asyncio.StreamReader()
-        stderr.feed_eof()
-        process = mock.Mock(returncode=0, stdout=stdout, stderr=stderr)
-        process.wait = AsyncMock(return_value=0)
+        backend.process_owner = None
+        backend.native_worker = None
+        backend.native_worker_stderr_task = None
+        backend.native_worker_feedback = None
+        backend.native_worker_cue_sent = False
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+                asyncio.get_running_loop().call_soon(
+                    backend.native_worker_boundary_event.set
+                )
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        processes = []
+        inputs = []
+
+        async def spawn_worker(*_args, **_kwargs):
+            request_id = len(processes) + 1
+            stdout = asyncio.StreamReader()
+            stdout.feed_data(
+                b'{"schema_version":1,"ready":true}\n'
+                + json.dumps(
+                    {
+                        "schema_version": 1,
+                        "request_id": request_id,
+                        "ok": True,
+                        "result": {
+                            "schema_version": 1,
+                            "selector": "target",
+                            "verdict": "verify-match",
+                            "finger_name": "finger-2",
+                        },
+                    },
+                    separators=(",", ":"),
+                ).encode()
+                + b"\n"
+            )
+            stdin = FakeStdin()
+            process = mock.Mock(
+                returncode=None,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=asyncio.StreamReader(),
+            )
+            process.wait = AsyncMock(return_value=0)
+            processes.append(process)
+            inputs.append(stdin)
+            return process
+
         with mock.patch.object(
             MODULE.asyncio,
             "create_subprocess_exec",
-            AsyncMock(return_value=process),
+            AsyncMock(side_effect=spawn_worker),
         ) as spawn:
-            await backend._run_native_match("finger-2")
-        arguments = spawn.await_args.args
-        self.assertIn("--stop-on-first-verdict", arguments)
-        self.assertIn("--match-finger-name", arguments)
+            with mock.patch.object(backend, "_schedule_native_worker_warm"):
+                await backend._run_native_match("finger-2")
+                await backend._run_native_match("finger-2")
+        self.assertEqual(spawn.await_count, 2)
+        arguments = spawn.await_args_list[0].args
+        self.assertIn("--resident-worker", arguments)
+        request = json.loads(inputs[0].writes[0])
+        self.assertEqual(request["match_finger_name"], "finger-2")
+        self.assertFalse(request["resolve_any_finger_name"])
+        self.assertEqual([len(stream.writes) for stream in inputs], [1, 1])
 
     async def test_compatibility_projection_prepares_live_catacomb_first(self):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
@@ -1663,7 +1888,9 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=process),
         ):
             with self.assertRaisesRegex(RuntimeError, "projection failed"):
-                await backend.runtime_projection()
+                await backend._collect_runtime_projection(
+                    backend.runtime_authority()
+                )
         backend._run_probe.assert_awaited_once_with(50001, prepare_only=True)
 
     async def test_compatibility_probe_restores_canonical_managed_catacomb(self):
