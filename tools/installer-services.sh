@@ -13,13 +13,15 @@ start_touchid_stage() {
   fi
   echo >&2
   echo "Touch ID setup stopped at $stage ($unit)." >&2
-  echo "Existing fingerprint, keybag, mapping, and mutation state was preserved." >&2
+  echo "Earlier stages may have completed; no automatic rollback or account rebinding was attempted." >&2
   systemctl --no-pager --full status "$unit" >&2 || true
   echo >&2
   echo "Inspect the complete privacy-safe stack report with:" >&2
   echo "  sudo t2-touchid-doctor" >&2
   if [[ $unit == t2-native-first-run.service ]]; then
     echo "Inspect the redacted account binding with:" >&2
+    # install.sh resolves target_uid before starting the service chain.
+    # shellcheck disable=SC2154
     echo "  sudo t2-touchid-user-map status --linux-uid $target_uid" >&2
     echo "Account rebinding is intentionally never automatic." >&2
   fi
