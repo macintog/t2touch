@@ -396,6 +396,51 @@ class IPCSessionTests(unittest.TestCase):
         with self.assertRaises(OSError):
             fcntl.fcntl(descriptor, fcntl.F_GETFD)
 
+    def test_authorization_session_rejects_removed_account_alias(self):
+        for bind_legacy in (False, True):
+            with self.subTest(bind_legacy=bind_legacy):
+                current = linux_account.AccountEvidence(
+                    os.getuid(),
+                    "c" * 64,
+                    compatible_generations=frozenset({"a" * 64}),
+                )
+                with ipc.AuthorizationSession.from_socket(
+                    self.left,
+                    backend=FakeBackend(),
+                    account_collector=lambda _uid: current,
+                ) as session:
+                    if bind_legacy:
+                        session.bind_account_generation("a" * 64)
+                    session.revalidate()
+                    current = linux_account.AccountEvidence(os.getuid(), "c" * 64)
+                    with self.assertRaisesRegex(
+                        ipc.IPCSessionError, "Linux account changed"
+                    ):
+                        session.revalidate()
+
+    def test_precollected_account_alias_must_still_be_valid(self):
+        backend = FakeBackend()
+        peer = ipc.PinnedPeer.from_socket(self.left)
+        expected_session = ipc.collect_session(peer, backend)
+        expected_account = linux_account.AccountEvidence(
+            os.getuid(),
+            "c" * 64,
+            compatible_generations=frozenset({"a" * 64}),
+        )
+        descriptor = peer.pidfd
+        with self.assertRaisesRegex(ipc.IPCSessionError, "differs from the claim"):
+            ipc.AuthorizationSession.from_peer(
+                peer,
+                expected_session=expected_session,
+                expected_account=expected_account,
+                backend=backend,
+                account_collector=lambda uid: linux_account.AccountEvidence(
+                    uid, "c" * 64
+                ),
+            )
+        with self.assertRaises(OSError):
+            fcntl.fcntl(descriptor, fcntl.F_GETFD)
+
     def test_join_rejects_session_change_during_policy_interaction(self):
         backend = FakeBackend()
 

@@ -80,7 +80,6 @@ class AccountEvidence:
     compatible_generations: frozenset[str] = field(
         default_factory=frozenset,
         repr=False,
-        compare=False,
     )
 
     def matches_generation(self, generation: str) -> bool:

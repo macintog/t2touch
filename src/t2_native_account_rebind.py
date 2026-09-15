@@ -400,7 +400,7 @@ def _write_exclusive(path: Path, data: bytes) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if not complete:
+        if descriptor >= 0 and not complete:
             try:
                 path.unlink()
             except OSError:

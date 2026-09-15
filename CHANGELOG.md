@@ -18,6 +18,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Preserve an existing native account migration binding when another publication
+  attempt fails, and reject authorization sessions when a compatible account
+  binding changes or is removed.
+- Remove the native authority rebind command during uninstall.
 - Preserve existing Linux account bindings across Btrfs kernel filesystem-ID
   changes by deriving the prior stable value from persistent filesystem and
   subvolume identity while accepting mappings written with the Linux 7.2
