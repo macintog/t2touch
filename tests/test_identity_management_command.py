@@ -26,7 +26,7 @@ class IdentityManagementCommandTests(unittest.TestCase):
         configuration = {"authority_mode": "linux-native", "apple_uid": 501}
         store = mock.Mock()
         store.read_committed_components.return_value = {}
-        lease = object()
+        lease = mock.Mock()
         local = object()
         cold = object()
         restored = object()

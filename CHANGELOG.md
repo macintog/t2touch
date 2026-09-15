@@ -14,6 +14,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Preserve existing Linux account bindings across Btrfs kernel filesystem-ID
+  changes by deriving the prior stable value from persistent filesystem and
+  subvolume identity; account replacement checks remain enforced.
+- Restore the committed master and user on the same pristine cold connection
+  even when the master does not yet advertise the user. Reject partially
+  restored master-only state as a fresh cold start.
+
 - Publish committed BioLockout state after terminal-identity enrollment
   recovery, and make the desktop Python runtime accessible under a restrictive
   installer umask.

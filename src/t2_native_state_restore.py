@@ -47,7 +47,7 @@ def is_cold_unloaded_inventory(live: object, apple_user_id: int) -> bool:
         or type(states[0].get("state")) is not int
         or type(states[0].get("user_id")) is not int
         or states[0].get("needs_save") is not False
-        or states[0].get("state") not in (1, 3)
+        or states[0].get("state") != 1
     ):
         return False
     return (
@@ -283,12 +283,9 @@ def restore_for_enrollment(
                 )
                 if after_master[master_component].state != 0x03:
                     raise NativeStateRestoreError("master Catacomb did not load")
-                if user_component not in after_master:
-                    raise NativeStateRestoreError(
-                        "restored master Catacomb does not advertise the selected user"
-                    )
                 if (
-                    after_master[user_component].state != 0x01
+                    user_component in after_master
+                    and after_master[user_component].state != 0x01
                 ):
                     raise NativeStateRestoreError(
                         "selected user Catacomb is not loadable"

@@ -7,10 +7,12 @@ numeric UID to the exact local passwd record, the protected shadow record, the
 root-owned passwd database epoch, and the home-directory filesystem object.
 Deleting and recreating an account, changing its password/account record, or
 replacing the passwd database changes the resulting generation. Home binding
-uses statx birth time and inode plus the filesystem ID returned by ``fstatvfs``
-so immediate inode reuse cannot impersonate the old directory.  Linux statx
-mount IDs are intentionally excluded because they are allocated at mount time
-and can change across an otherwise identical reboot.
+uses statx birth time and inode plus a stable filesystem ID so immediate inode
+reuse cannot impersonate the old directory. Btrfs identity is derived from its
+on-disk filesystem UUID and subvolume ID because ``fstatvfs`` values can change
+across kernel upgrades. Linux statx mount IDs are intentionally excluded
+because they are allocated at mount time and can change across an otherwise
+identical reboot.
 
 The shadow record is hashed while held in a wipeable buffer.  It is never
 returned, logged, or included in redacted output.
@@ -19,6 +21,7 @@ returned, logged, or included in redacted output.
 from __future__ import annotations
 
 import ctypes
+import fcntl
 import hashlib
 import os
 import pwd
@@ -44,6 +47,10 @@ AT_EMPTY_PATH = 0x1000
 STATX_BASIC_STATS = 0x000007FF
 STATX_BTIME = 0x00000800
 STATX_BUFFER_SIZE = 256
+BTRFS_FS_INFO_SIZE = 1024
+BTRFS_SUBVOL_INFO_SIZE = 504
+BTRFS_IOC_FS_INFO = 0x8400941F
+BTRFS_IOC_GET_SUBVOL_INFO = 0x81F8943C
 
 
 class LinuxAccountError(RuntimeError):
@@ -108,6 +115,57 @@ class _HomeIdentity:
     inode: int
     birth_time_sec: int
     birth_time_nsec: int
+
+
+def _btrfs_filesystem_id(descriptor: int) -> int | None:
+    """Return the pre-7.2 Btrfs statfs identity from persistent inputs."""
+
+    filesystem = bytearray(BTRFS_FS_INFO_SIZE)
+    try:
+        try:
+            fcntl.ioctl(descriptor, BTRFS_IOC_FS_INFO, filesystem, True)
+        except OSError:
+            return None
+        subvolume = bytearray(BTRFS_SUBVOL_INFO_SIZE)
+        try:
+            fcntl.ioctl(
+                descriptor,
+                BTRFS_IOC_GET_SUBVOL_INFO,
+                subvolume,
+                True,
+            )
+        except OSError as error:
+            raise LinuxAccountError(
+                "stable Btrfs home identity is unavailable"
+            ) from error
+        fsid = bytes(filesystem[16:32])
+        tree_id = struct.unpack_from("=Q", subvolume)[0]
+        if fsid == bytes(16) or tree_id == 0:
+            raise LinuxAccountError("stable Btrfs home identity is incomplete")
+        first, second, third, fourth = struct.unpack(">IIII", fsid)
+        low = first ^ third ^ (tree_id >> 32)
+        high = second ^ fourth ^ (tree_id & UINT32_MAX)
+        filesystem_id = (high << 32) | low
+        if filesystem_id == 0:
+            raise LinuxAccountError("stable Btrfs home identity is incomplete")
+        return filesystem_id
+    finally:
+        filesystem[:] = b"\0" * len(filesystem)
+
+
+def _stable_filesystem_id(descriptor: int) -> int:
+    btrfs_id = _btrfs_filesystem_id(descriptor)
+    if btrfs_id is not None:
+        return btrfs_id
+    try:
+        filesystem_id = os.fstatvfs(descriptor).f_fsid
+    except (AttributeError, OSError) as error:
+        raise LinuxAccountError(
+            "stable home filesystem identity is unavailable"
+        ) from error
+    if type(filesystem_id) is not int or filesystem_id == 0:
+        raise LinuxAccountError("stable home filesystem identity is unavailable")
+    return filesystem_id
 
 
 def _checked_uid(uid: object) -> int:
@@ -346,12 +404,7 @@ def _statx_home_identity(
     device_major = struct.unpack_from("=I", raw, 136)[0]
     device_minor = struct.unpack_from("=I", raw, 140)[0]
     required = STATX_BASIC_STATS | STATX_BTIME
-    try:
-        filesystem_id = os.fstatvfs(descriptor).f_fsid
-    except (AttributeError, OSError) as error:
-        raise LinuxAccountError(
-            "stable home filesystem identity is unavailable"
-        ) from error
+    filesystem_id = _stable_filesystem_id(descriptor)
     if (
         mask & required != required
         or statx_uid != info.st_uid
@@ -359,8 +412,6 @@ def _statx_home_identity(
         or inode != info.st_ino
         or device_major != os.major(info.st_dev)
         or device_minor != os.minor(info.st_dev)
-        or type(filesystem_id) is not int
-        or filesystem_id == 0
         or birth_sec <= 0
         or not 0 <= birth_nsec < 1_000_000_000
     ):

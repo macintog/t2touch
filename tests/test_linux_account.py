@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import stat
+import struct
 import sys
 import tempfile
 import unittest
@@ -95,6 +96,58 @@ class LocalAccountTests(unittest.TestCase):
         self.assertNotIn(self.name, rendered)
         self.assertNotIn("$6$salt$protected", rendered)
         self.assertNotIn(str(self.uid), rendered)
+
+    def test_schema_two_generation_matches_persisted_format(self):
+        passwd = account._PasswdSnapshot(
+            account._FileMetadata(11, 22, 33, 44, 55),
+            bytes.fromhex("01" * 32),
+            bytes.fromhex("02" * 32),
+            b"testuser",
+            1000,
+            b"Test User",
+            b"/home/testuser",
+            b"/bin/bash",
+        )
+        home = account._HomeIdentity(66, 77, 88, 99)
+
+        self.assertEqual(
+            account._generation(1000, passwd, bytes.fromhex("03" * 32), home),
+            "76412394c68feb42cf19291d6c267258b9a8beab4b473ec20ac2f3ae00ef4ab9",
+        )
+
+    def test_btrfs_identity_uses_persistent_uuid_and_subvolume(self):
+        filesystem_uuid = bytes.fromhex(
+            "00112233445566778899aabbccddeeff"
+        )
+
+        def ioctl(_descriptor, command, output, _mutate):
+            if command == account.BTRFS_IOC_FS_INFO:
+                output[16:32] = filesystem_uuid
+            elif command == account.BTRFS_IOC_GET_SUBVOL_INFO:
+                struct.pack_into("=Q", output, 0, 257)
+            else:
+                raise AssertionError(command)
+
+        with mock.patch.object(account.fcntl, "ioctl", side_effect=ioctl):
+            self.assertEqual(
+                account._btrfs_filesystem_id(3),
+                9838264609785022600,
+            )
+
+    def test_non_btrfs_identity_uses_statvfs(self):
+        with (
+            mock.patch.object(
+                account.fcntl,
+                "ioctl",
+                side_effect=OSError("not Btrfs"),
+            ),
+            mock.patch.object(
+                account.os,
+                "fstatvfs",
+                return_value=SimpleNamespace(f_fsid=1234),
+            ),
+        ):
+            self.assertEqual(account._stable_filesystem_id(3), 1234)
 
     def test_target_password_change_changes_generation(self):
         before = self.collect().generation
