@@ -27,7 +27,9 @@ SERVICES = (
     "t2-sep-transport.service",
     "t2-keybag-load.service",
     "t2-credential-unlock.service",
+    "t2-native-first-run.service",
     "t2-biometric-ready.service",
+    "t2-touchid-post-reboot.service",
     "fprintd.service",
 )
 
@@ -91,7 +93,7 @@ def configuration_is_complete(config: dict[str, str]) -> bool:
     return host.is_link_local and Path(config["T2_TOUCHID_PROJECT_DIR"]).is_absolute()
 
 
-def service_check(service: str) -> Check:
+def service_check(service: str, *, inactive_success_ok: bool = False) -> Check:
     result = run(
         "systemctl",
         "show",
@@ -107,6 +109,11 @@ def service_check(service: str) -> Check:
         return Check("fail", service, "unit is not loaded")
     if active == "active" and unit_result in ("success", ""):
         return Check("pass", service, f"{active}/{sub}")
+    if inactive_success_ok and active == "inactive" and unit_result in (
+        "success",
+        "",
+    ):
+        return Check("pass", service, "inactive/no pending reconciliation")
     return Check(
         "fail",
         service,
@@ -330,6 +337,13 @@ def collect() -> list[Check]:
             checks.append(
                 Check("pass", service, "not used by Linux-native activation")
             )
+        elif not native_mode and service in (
+            "t2-native-first-run.service",
+            "t2-touchid-post-reboot.service",
+        ):
+            checks.append(
+                Check("pass", service, "not used by compatibility activation")
+            )
         elif not native_mode and not credential_configured and service in (
             "t2-credential-unlock.service",
             "t2-biometric-ready.service",
@@ -338,7 +352,14 @@ def collect() -> list[Check]:
                 Check("pass", service, "not required in manual keybag-unlock mode")
             )
         else:
-            checks.append(service_check(service))
+            checks.append(
+                service_check(
+                    service,
+                    inactive_success_ok=(
+                        service == "t2-touchid-post-reboot.service"
+                    ),
+                )
+            )
     checks.append(dkms_check())
     checks.append(module_build_check())
 

@@ -21,6 +21,8 @@ case "${1:-}" in
 esac
 # shellcheck source=tools/installer-kernel.sh
 source "$source_dir/tools/installer-kernel.sh"
+# shellcheck source=tools/installer-services.sh
+source "$source_dir/tools/installer-services.sh"
 
 # Build and compare against the running module before changing installed
 # files, configuration, DKMS stamps, or service state. A disk source stamp
@@ -94,6 +96,7 @@ ensure_config_default() {
   local key=$1 value=$2
   grep -q "^${key}=" /etc/t2-touchid.conf || printf '%s=%s\n' "$key" "$value" >>/etc/t2-touchid.conf
 }
+
 ensure_config_default T2_TOUCHID_MACOS_USER_ID 501
 ensure_config_default T2_TOUCHID_SPECIAL_BAG -501
 # The old singleton anatomy label was fabricated presentation metadata.  The
@@ -533,7 +536,7 @@ if [[ $authority_mode == linux-native ]]; then
     t2-biometric-port-refresh.service t2-sep-transport.service \
     t2-native-first-run.service t2-biometric-ready.service \
     t2-touchid-post-reboot.service fprintd.service 2>/dev/null || true
-  systemctl start fprintd.service
+  start_linux_native_touchid_chain || exit $?
   systemctl is-active --quiet fprintd.service || {
     echo "Touch ID setup did not become ready; run sudo t2-touchid-doctor." >&2
     exit 2

@@ -207,13 +207,14 @@ def _load_provisioned_authority(
     keybag_path = Path(selected.keybag_path)
     keybag_info = _private(keybag_path, directory=False)
     digest = hashlib.sha256(keybag_path.read_bytes()).hexdigest()
-    if (
-        digest != selected.keybag_sha256
-        or selected.apple_uid != apple_uid
-        or selected.linux_account_generation != account.generation
-    ):
+    if digest != selected.keybag_sha256 or selected.apple_uid != apple_uid:
         raise NativeEnrollmentError(
             "protected Linux-native mapping authority does not reconcile"
+        )
+    if selected.linux_account_generation != account.generation:
+        raise NativeEnrollmentError(
+            "selected Linux account generation changed; explicit disabled "
+            "rebinding and live reconciliation are required"
         )
 
     provisioning = t2_aks_provisioning.read(PROVISIONING_JOURNAL)

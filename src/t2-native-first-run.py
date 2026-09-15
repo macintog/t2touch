@@ -97,6 +97,13 @@ def _native_enrollment_module():
     return module
 
 
+def _validate_provisioned_authority(native, linux_uid: int, apple_uid: int) -> None:
+    try:
+        native._load_provisioned_authority(linux_uid, apple_uid)
+    except native.NativeEnrollmentError as error:
+        raise NativeFirstRunError(str(error)) from error
+
+
 def _credential_path() -> Path:
     directory = os.environ.get("CREDENTIALS_DIRECTORY")
     if not directory or not Path(directory).is_absolute():
@@ -359,8 +366,8 @@ def run(*, runner: Callable[..., object] = subprocess.run) -> tuple[str, bool]:
     configuration = native._configuration(
         trusted_linux_uid=trusted_linux_uid
     )
-    native._load_provisioned_authority(
-        trusted_linux_uid, configuration["apple_uid"]
+    _validate_provisioned_authority(
+        native, trusted_linux_uid, configuration["apple_uid"]
     )
     return "mapping-ready", state_changed or activation_changed
 
