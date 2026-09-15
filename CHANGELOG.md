@@ -6,6 +6,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Recover the current SEP-owned BioLockout record when switching Linux volumes
+  leaves the local saved record behind, allowing fingerprint enrollment to
+  proceed after the stale record is rejected.
+- Preserve compatible Linux account generations when enrollment and deletion
+  pass to their workers, preventing unchanged Btrfs accounts from being rejected
+  as `account-changed`.
+- Reject malformed BioLockout load outputs, including empty values of the wrong
+  type, before treating state restoration as successful.
+
+### Changed
+
+- Include bounded, privacy-safe authorization failure reasons in enrollment
+  worker diagnostics.
+- Update protocol research with shared findings on fingerprint lifecycle and
+  identity authorization, including evidence limits and unresolved behavior.
+
 ## 0.0.3 - 2026-09-15
 
 ### Added
@@ -20,10 +38,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Recover a newer SEP-owned BioLockout generation when another Linux volume
-  advances the secure state beyond the local append-only head.
-- Preserve compatible Linux account generations across the private enrollment
-  and deletion worker protocols so Btrfs accounts retain their caller binding.
 - Preserve an existing native account migration binding when another publication
   attempt fails, and reject authorization sessions when a compatible account
   binding changes or is removed.
