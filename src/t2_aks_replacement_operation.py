@@ -26,6 +26,7 @@ class AKSReplacementOperationError(RuntimeError):
 
 
 class ReplacementTransport(Protocol):
+    create_version: int
     connection_generation: str
 
     def observe_primary(self, session: int) -> PrimaryObservation: ...
@@ -621,18 +622,12 @@ def create_export_commit(
             history.activation_material_digest
         ) as activation_material:
             create_request = bytearray(
-                create_codec.AKSIdentityCreateV5Request(
+                create_codec.minimal_create_request(
+                    version=transport.create_version,
                     session=history.session,
-                    internal_flags=0x4100,
-                    effective_bag_handle=-1,
-                    item1=bytes(activation_material),
-                    item2=b"",
+                    material=bytes(activation_material),
                     account_uuid=uuid.UUID(history.new_account_uuid).bytes,
-                    item3=b"",
-                    original_flags=6,
-                    scalar2=0,
-                    optional_data=b"",
-                ).encode()
+                )
             )
             transport.arm(
                 phase=PHASE_CREATE,
@@ -662,8 +657,8 @@ def create_export_commit(
             if type(status) is not int or status != 0:
                 raise AKSReplacementOperationError("create returned nonzero status")
             live_handle, kek_length = (
-                create_codec.AKSIdentityCreateV5Response.inspect_mutable(
-                    create_response
+                create_codec.inspect_create_response(
+                    create_response, transport.create_version
                 )
             )
             history = journal.append_checked(

@@ -6,6 +6,12 @@ module=t2_sep_transport
 provisioning_parameter=/sys/module/$module/parameters/enable_identity_provisioning
 replacement_parameter=/sys/module/$module/parameters/enable_identity_replacement
 config=/etc/t2-touchid.conf
+prepare_native_recovery=0
+case "${1:-}" in
+  '') [[ $# -eq 0 ]] || exit 2 ;;
+  --prepare-native-recovery) [[ $# -eq 1 ]] || exit 2; prepare_native_recovery=1 ;;
+  *) exit 2 ;;
+esac
 
 mapfile -t authority_modes < <(
   sed -n 's/^T2_TOUCHID_AUTHORITY_MODE=//p' "$config"
@@ -19,7 +25,14 @@ fi
 
 needs_native_provisioning=0
 needs_native_replacement=0
-if [[ ${authority_modes[0]} == linux-native ]]; then
+if [[ ${authority_modes[0]} == linux-native && $prepare_native_recovery == 1 ]]; then
+  # Recovery restores the transport while userspace journals remain frozen.
+  # These capabilities do not dispatch mutations: each operation still needs
+  # its normal kernel-owned absence, ACM, session and replacement checks.
+  # No first-run owner is started by the recovery installer.
+  needs_native_provisioning=1
+  needs_native_replacement=1
+elif [[ ${authority_modes[0]} == linux-native ]]; then
   native_gate_output=$(
     /opt/t2-touchid/.venv/bin/python \
       /opt/t2-touchid/src/t2-native-transport-gates.py

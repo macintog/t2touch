@@ -14,7 +14,8 @@ command -v omarchy >/dev/null || {
 case "${1:-}" in
   '') [[ $# -eq 0 ]] || exit 2 ;;
   --prepare-transport-update) [[ $# -eq 1 ]] || exit 2 ;;
-  *) echo "Usage: ./install-omarchy.sh [--prepare-transport-update]" >&2; exit 2 ;;
+  --prepare-native-recovery) [[ $# -eq 1 ]] || exit 2 ;;
+  *) echo "Usage: ./install-omarchy.sh [--prepare-transport-update|--prepare-native-recovery]" >&2; exit 2 ;;
 esac
 
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
@@ -36,6 +37,7 @@ fi
 
 omarchy pkg add base-devel dkms fprintd python "$headers_package"
 sudo "$source_dir/install.sh" "$@"
+[[ ${1:-} != --prepare-native-recovery ]] || exit 0
 
 # UWSM reads this on the next graphical login. Resolve devices on that machine
 # at that login; DRM card numbers and PCI addresses are not portable.

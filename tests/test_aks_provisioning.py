@@ -17,6 +17,7 @@ import t2_user_mapping_store
 
 
 class FakeTransport:
+    create_version = 5
     def __init__(self, generation, bag_uuid):
         self.connection_generation = generation
         self.bag_uuid = bag_uuid
@@ -25,7 +26,13 @@ class FakeTransport:
 
     def create(self, request):
         self.buffers.append(request)
-        response = bytearray(struct.pack("<IiI", 5, 42, 0))
+        expected = operation.codec.minimal_create_request(
+            version=self.create_version, session=7, material=bytes(request[24:40]),
+            account_uuid=bytes(request[48:64]),
+        )
+        if request != expected:
+            raise AssertionError("unexpected creation request")
+        response = bytearray(struct.pack("<IiI", self.create_version, 42, 0))
         self.buffers.append(response)
         return 0, response
 
@@ -45,6 +52,10 @@ class FakeTransport:
 
 
 class AKSProvisioningTests(unittest.TestCase):
+    def test_v4_operation_reaches_mapping_with_wiped_buffers(self):
+        with patch.object(FakeTransport, "create_version", 4):
+            self.test_operation_owns_create_export_buffers_and_fresh_owner_gate()
+
     def test_create_export_store_mapping_and_reboot_chain(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 
 DEVICE = Path("/dev/t2-aks")
+CREATE_VERSION_PARAMETER = Path(
+    "/sys/module/t2_sep_transport/parameters/identity_create_version"
+)
 EXCHANGE_FORMAT = "=Bb2xIIIQQ"
 INFO_FORMAT = "=16sIIII"
 EXCHANGE_SIZE = struct.calcsize(EXCHANGE_FORMAT)
@@ -140,6 +143,17 @@ def _parse_info(raw: bytes | bytearray) -> _AKSInfo:
 
 class AKSProvisioningTransport:
     """Hold the exclusive AKS descriptor from create through UUID verification."""
+
+    @property
+    def create_version(self) -> int:
+        """The read-only loaded-module policy; old modules support only v5."""
+        try:
+            raw = CREATE_VERSION_PARAMETER.read_text(encoding="ascii")
+        except FileNotFoundError:
+            return 5
+        if raw not in {"4\n", "5\n"}:
+            raise AKSProvisioningTransportError("invalid kernel identity-create version")
+        return int(raw)
 
     def __init__(self, path: Path = DEVICE) -> None:
         self.fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)

@@ -14,10 +14,12 @@ fi
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 
 prepare_update=0
+prepare_native_recovery=0
 case "${1:-}" in
   '') [[ $# -eq 0 ]] || exit 2 ;;
   --prepare-transport-update) [[ $# -eq 1 ]] || exit 2; prepare_update=1 ;;
-  *) echo "Usage: sudo ./install.sh [--prepare-transport-update]" >&2; exit 2 ;;
+  --prepare-native-recovery) [[ $# -eq 1 ]] || exit 2; prepare_native_recovery=1 ;;
+  *) echo "Usage: sudo ./install.sh [--prepare-transport-update|--prepare-native-recovery]" >&2; exit 2 ;;
 esac
 # shellcheck source=tools/installer-kernel.sh
 source "$source_dir/tools/installer-kernel.sh"
@@ -153,6 +155,13 @@ if [[ $authority_mode != linux-native && $authority_mode != macos-control-oracle
   echo "T2_TOUCHID_AUTHORITY_MODE must be linux-native or macos-control-oracle." >&2
   exit 2
 fi
+if (( prepare_native_recovery )); then
+  if [[ $authority_mode != linux-native ]]; then
+    echo "Native recovery requires Linux-native authority mode." >&2
+    exit 2
+  fi
+  hold_native_recovery || exit $?
+fi
 if [[ $authority_mode == linux-native ]]; then
   native_mapping=/var/lib/t2-touchid/users.json
   native_journal=/var/lib/t2-touchid/native-provisioning.jsonl
@@ -183,8 +192,11 @@ if [[ $authority_mode == linux-native ]]; then
       exit 2
     fi
   elif [[ ! -e $native_mapping || ! -e $native_journal ]]; then
-    echo "Linux-native first-run state is incomplete and requires reconciliation." >&2
-    exit 2
+    if (( ! prepare_native_recovery )); then
+      echo "Linux-native first-run state is incomplete and requires reconciliation." >&2
+      echo "Use --prepare-native-recovery to install diagnostic services without starting first-run." >&2
+      exit 2
+    fi
   fi
 fi
 auto_sync_adaptive=$(sed -n 's/^T2_TOUCHID_AUTO_SYNC_ADAPTIVE=//p' /etc/t2-touchid.conf | tail -n 1)
@@ -323,6 +335,10 @@ if [[ $installed_hash != "$requirements_hash" ]] || \
 else
   echo "Python dependencies are already installed."
 fi
+# The enrollment UI runs as the desktop user. A restrictive caller umask
+# must not make its public Python runtime inaccessible; private credentials
+# and biometric state live outside this software-only directory.
+chmod -R go+rX "$target_dir/.venv"
 
 install -o root -g root -m 0755 "$source_dir/src/t2-aks-tool" /usr/local/sbin/t2-aks-tool
 install -o root -g root -m 0755 \
@@ -536,6 +552,14 @@ if [[ $authority_mode == linux-native ]]; then
     t2-biometric-port-refresh.service t2-sep-transport.service \
     t2-native-first-run.service t2-biometric-ready.service \
     t2-touchid-post-reboot.service fprintd.service 2>/dev/null || true
+  if (( prepare_native_recovery )); then
+    systemctl start t2-biometric-port-refresh.service
+    /usr/local/sbin/t2-sep-transport-load --prepare-native-recovery
+    echo "Native recovery services installed. Automatic biometric services remain paused across reboot."
+    echo "After reconciling private state, rerun the normal installer to resume setup."
+    exit 0
+  fi
+  resume_native_recovery || exit $?
   start_linux_native_touchid_chain || exit $?
   systemctl is-active --quiet fprintd.service || {
     echo "Touch ID setup did not become ready; run sudo t2-touchid-doctor." >&2

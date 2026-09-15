@@ -7,6 +7,10 @@ This is an early proof of concept. Keep password authentication enabled and
 available. Hardware validation currently covers one `MacBookPro16,1`; other T2
 models need testing.
 
+MacBookPro16,2 with bridgeOS 23P2048 additionally requires explicit creation
+version 4 selection. See the [setup and hardware validation report](docs/MACBOOKPRO16_2.md)
+before installing on that firmware.
+
 ## Try it on Omarchy
 
 Run as your normal Omarchy desktop user:
