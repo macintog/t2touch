@@ -151,7 +151,7 @@ class NativeAccountRebindTests(unittest.TestCase):
                 authority_loader=self.loader,
             )
 
-    def test_acknowledgement_and_existing_binding_are_required(self):
+    def test_migration_acknowledgement_is_required(self):
         with self.assertRaisesRegex(
             rebind.NativeAccountRebindError, "acknowledgement"
         ):
@@ -162,6 +162,44 @@ class NativeAccountRebindTests(unittest.TestCase):
                 account_collector=self.account,
                 authority_loader=self.loader,
             )
+
+    def test_exclusive_write_preserves_existing_manifest(self):
+        self.publish()
+        path = self.user_root / rebind.MANIFEST_NAME
+        original = path.read_bytes()
+        inode = path.stat().st_ino
+        with self.assertRaisesRegex(
+            rebind.NativeAccountRebindError, "could not be published"
+        ):
+            rebind._write_exclusive(path, b"replacement")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual(
+            rebind.resolve(
+                self.uid,
+                self.current,
+                state_root=self.state,
+                authority_loader=self.loader,
+            ),
+            self.previous,
+        )
+
+    def test_exclusive_write_preserves_existing_symlink(self):
+        path = self.user_root / rebind.MANIFEST_NAME
+        path.symlink_to(self.keybag)
+        with self.assertRaises(rebind.NativeAccountRebindError):
+            rebind._write_exclusive(path, b"replacement")
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(self.keybag.read_bytes(), b"keybag")
+
+    def test_failed_write_removes_its_own_incomplete_manifest(self):
+        path = self.user_root / rebind.MANIFEST_NAME
+        with mock.patch.object(rebind.os, "fsync", side_effect=OSError("I/O error")):
+            with self.assertRaises(rebind.NativeAccountRebindError):
+                rebind._write_exclusive(path, b"incomplete")
+        self.assertFalse(path.exists())
+
+    def test_current_binding_is_rejected(self):
         with self.assertRaisesRegex(
             rebind.NativeAccountRebindError, "already current"
         ):
