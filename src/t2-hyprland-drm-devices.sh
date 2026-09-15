@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
+# shellcheck shell=bash
 # Exclude boot-framebuffer DRM devices when native DRM drivers are available.
 # Prefer a GPU with a connected internal panel; retain other native GPUs.
 # Preserve an explicit operator selection.

@@ -126,12 +126,29 @@ class EnrollmentWorkerClient:
                 finger_name, caller, evidence, on_update, cancel_event
             )
         )
+        cancellation = None
         try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            cancel_event.set()
-            await self._send_cancel_if_ready()
-            return await operation
+            while True:
+                try:
+                    return await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    if operation.cancelled():
+                        raise
+                    cancel_event.set()
+                    if cancellation is None:
+                        cancellation = asyncio.create_task(self._send_cancel_if_ready())
+        finally:
+            if cancellation is not None:
+                # Repeated cancellation must not detach the cancel sender or
+                # cancel the reconciliation operation it is supervising.
+                while not cancellation.done():
+                    try:
+                        await asyncio.shield(cancellation)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                await asyncio.gather(cancellation, return_exceptions=True)
 
     async def _run(
         self,
@@ -206,10 +223,14 @@ class EnrollmentWorkerClient:
         try:
             return await asyncio.shield(task)
         finally:
-            self.task = None
-            self.cancel_event = None
-            self._request_sent = False
-            self._cancel_sent = False
+            # Cancelling a Stop waiter does not cancel its shielded worker.
+            # Retain ownership until terminal cleanup, and never clear a
+            # replacement installed by a different completed Stop waiter.
+            if task.done() and self.task is task:
+                self.task = None
+                self.cancel_event = None
+                self._request_sent = False
+                self._cancel_sent = False
 
     async def release(self) -> None:
         if self.task is not None:

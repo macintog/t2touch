@@ -25,6 +25,7 @@ MODULE.current_dbus_sender = lambda: ":1.100"
 
 def resolved_match_result(finger_name="finger-1"):
     return {
+        "match_cleanup_valid": True,
         "resolved_any_match_gate": {
             "identity_count": 2,
             "complete_named_inventory": True,
@@ -43,6 +44,7 @@ def resolved_match_result(finger_name="finger-1"):
         "match_events": [
             {
                 "event_kind": "match_result",
+                "result_valid": True,
                 "matched": True,
                 "matches_enrolled_identity": True,
                 "matched_finger_name_present": True,
@@ -84,7 +86,7 @@ class FakeBackend:
     async def enrollment_projection(self):
         return self.projection
 
-    async def cancel(self):
+    async def cancel(self, *, owner=None):
         self.cancel_count += 1
 
     def schedule_feedback(self, _verdict):
@@ -579,38 +581,35 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(device.claim_expiry_task)
         await MODULE.FprintDevice.Release.__wrapped__(device)
 
+    async def test_claim_revoked_during_capture_cannot_publish_match(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        backend = FakeBackend()
+
+        async def capture(*_args, **_kwargs):
+            entered.set()
+            await release.wait()
+            return "verify-match", resolved_match_result()
+
+        backend.verify_fprint = capture
+        device = make_device(backend)
+        device.VerifyFingerMatched = mock.Mock()
+        device.VerifyStatus = mock.Mock()
+        await claim(device)
+        await verify_start(device, "any")
+        await entered.wait()
+        device.claimed_evidence.invalid = True
+        release.set()
+        await device.verify_task
+        device.VerifyFingerMatched.assert_not_called()
+        device.VerifyStatus.assert_called_once_with("verify-unknown-error", True)
+        self.assertEqual(backend.adaptive_sync_requests, 0)
+        device.claimed_evidence.invalid = False
+        await MODULE.FprintDevice.Release.__wrapped__(device)
+
     async def test_any_match_prompts_before_capture_and_reports_exact_match(self):
         backend = FakeBackend()
         backend.verify_fprint = AsyncMock(
-            return_value=(
-                "verify-match",
-                {
-                    "resolved_any_match_gate": {
-                        "identity_count": 2,
-                        "complete_named_inventory": True,
-                        "all_identities_selected": True,
-                        "same_connection_inventory_stable": True,
-                        "local_live_reconciled": True,
-                        "identifiers_redacted": True,
-                    },
-                    "resolved_any_match_post_attestation": {
-                        "identity_state_unchanged": True,
-                        "local_components_unchanged": True,
-                        "per_user_inventory_unchanged": True,
-                        "global_inventory_unchanged": True,
-                        "identifiers_redacted": True,
-                    },
-                    "match_events": [
-                        {
-                            "event_kind": "match_result",
-                            "matched": True,
-                            "matches_enrolled_identity": True,
-                            "matched_finger_name_present": True,
-                            "matched_finger_name": "finger-1",
-                        }
-                    ],
-                },
-            )
+            return_value=("verify-match", resolved_match_result())
         )
         result = backend.verify_fprint.return_value
         async def armed_match(_finger, feedback, **kwargs):
@@ -1495,6 +1494,7 @@ class VerdictTests(unittest.TestCase):
 
     def test_resolved_any_returns_only_attested_canonical_name(self):
         result = {
+            "match_cleanup_valid": True,
             "resolved_any_match_gate": {
                 "identity_count": 2,
                 "complete_named_inventory": True,
@@ -1513,6 +1513,7 @@ class VerdictTests(unittest.TestCase):
             "match_events": [
                 {
                     "event_kind": "match_result",
+                    "result_valid": True,
                     "matched": True,
                     "matches_enrolled_identity": True,
                     "matched_finger_name_present": True,
@@ -1526,7 +1527,12 @@ class VerdictTests(unittest.TestCase):
         negative = {
             **result,
             "match_events": [
-                {"event_kind": "match_result", "matched": False}
+                {
+                    "event_kind": "match_result",
+                    "result_valid": True,
+                    "matched": False,
+                    "no_match": True,
+                }
             ],
         }
         self.assertIsNone(MODULE.resolved_any_finger_from_result(negative))
@@ -1550,11 +1556,13 @@ class VerdictTests(unittest.TestCase):
         for candidate in (
             {"resolved_any_match_gate": None, "match_events": []},
             {
+                "match_cleanup_valid": True,
                 "resolved_any_match_gate": gate,
                 "resolved_any_match_post_attestation": post,
                 "match_events": [
                     {
                         "event_kind": "match_result",
+                        "result_valid": True,
                         "matched": True,
                         "matches_enrolled_identity": True,
                         "matched_finger_name_present": True,
@@ -1768,6 +1776,7 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "start",
             "--no-block",
             "t2-touchid-adaptive-sync.service",
+            start_new_session=True,
             stdout=MODULE.asyncio.subprocess.DEVNULL,
             stderr=MODULE.asyncio.subprocess.PIPE,
         )

@@ -55,12 +55,15 @@ class DeletionWorkerClient:
             operation = asyncio.create_task(
                 self._run(finger_name, caller, evidence)
             )
-            try:
-                return await asyncio.shield(operation)
-            except asyncio.CancelledError:
-                # A handed-off deletion may already have reached SEP. Keep the
-                # private channel alive until the worker reports reconciliation.
-                return await operation
+            while True:
+                try:
+                    return await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    if operation.cancelled():
+                        raise
+                    # Every wait stays shielded, including a second Stop or
+                    # disconnect while SEP reconciliation is still pending.
+                    continue
 
     async def _run(
         self,
