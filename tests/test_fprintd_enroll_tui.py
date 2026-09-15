@@ -95,6 +95,34 @@ class FprintdEnrollmentTUITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("No fingerprint was saved", screen)
         self.assertNotIn("75%", screen)
 
+    def test_taller_windows_preserve_fingerprint_geometry_and_prompt_space(self):
+        ui = MODULE.EnrollmentUI("finger-1", "mapped")
+        ui.color = False
+        ui.unicode = False
+        ui.finger_needed = True
+        ui.progress_percent = 38
+        reference_art = None
+        for columns, rows in ((76, 28), (76, 40), (120, 41), (160, 80)):
+            with (
+                self.subTest(columns=columns, rows=rows),
+                mock.patch.object(MODULE.shutil, "get_terminal_size",
+                                  return_value=MODULE.os.terminal_size((columns, rows))),
+                mock.patch.object(MODULE.sys.stdout, "write") as write,
+                mock.patch.object(MODULE.sys.stdout, "flush"),
+                mock.patch.object(MODULE.sys.stdout, "isatty", return_value=False),
+            ):
+                ui.render()
+            screen = "".join(call.args[0] for call in write.call_args_list)
+            lines = screen.splitlines()
+            art = [line.strip().removesuffix("\x1b[K").strip()
+                   for line in lines if "#" in line]
+            if reference_art is None:
+                reference_art = art
+            self.assertEqual(art, reference_art)
+            self.assertLessEqual(len(lines), rows)
+            self.assertIn("38%", screen)
+            self.assertIn(ui._reference_view()[0], screen)
+
     async def test_terminal_result_remains_present_until_window_closes(self):
         ui = CompletedUI()
         stop = asyncio.Event()
