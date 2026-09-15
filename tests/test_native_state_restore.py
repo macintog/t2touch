@@ -71,7 +71,7 @@ class NativeStateRestoreTests(unittest.TestCase):
         self.assertTrue(restore.is_cold_unloaded_inventory(cold, USER))
         master_loaded = copy.deepcopy(cold)
         master_loaded["catacomb"]["user_states"][0]["state"] = 3
-        self.assertTrue(restore.is_cold_unloaded_inventory(master_loaded, USER))
+        self.assertFalse(restore.is_cold_unloaded_inventory(master_loaded, USER))
         changes = (
             ("double_collection_equal", False),
             ("apple_uid", USER + 1),
@@ -84,7 +84,7 @@ class NativeStateRestoreTests(unittest.TestCase):
                 changed = copy.deepcopy(cold)
                 changed[field] = value
                 self.assertFalse(restore.is_cold_unloaded_inventory(changed, USER))
-        for state in (0, 7, 9, True):
+        for state in (0, 3, 7, 9, True):
             with self.subTest(master_state=state):
                 changed = copy.deepcopy(cold)
                 changed["catacomb"]["user_states"][0]["state"] = state
@@ -144,11 +144,18 @@ class NativeStateRestoreTests(unittest.TestCase):
         )
         self.assertFalse(lease.invalidated)
 
-    def test_missing_user_after_master_load_stops_before_user_dispatch(self):
-        lease = FakeLease(state_reads=(master_state(1), master_state(3)))
+    def test_missing_user_after_master_load_dispatches_saved_user(self):
+        identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes
+        lease = FakeLease(
+            state_reads=(master_state(1), master_state(3), states(3, 3)),
+            identity_reads=(b"", identity),
+        )
         catacomb = SimpleNamespace(read_committed_components=lambda: {
             "master.cat": b"master", "user_000001f5.cat": b"user",
         })
+        biolockout = SimpleNamespace(
+            current=lambda: SimpleNamespace(payload=b"HRLB-current")
+        )
         with (
             patch.object(restore.t2_catacomb_codec, "decode_master_catacomb",
                          return_value=SimpleNamespace(secure_data=b"LTFC-master")),
@@ -156,11 +163,15 @@ class NativeStateRestoreTests(unittest.TestCase):
                          return_value=SimpleNamespace(secure_data=b"LTFC-user", identities=(
                              SimpleNamespace(user_id=USER, uuid=str(uuid.UUID(int=1))),))),
         ):
-            with self.assertRaisesRegex(restore.NativeStateRestoreError, "does not advertise"):
-                restore.restore_for_enrollment(lease, apple_user_id=USER,
-                    catacomb_store=catacomb, biolockout_store=object())
-        self.assertEqual(lease.commands.count(0x40), 1)
-        self.assertTrue(lease.invalidated)
+            count = restore.restore_for_enrollment(
+                lease,
+                apple_user_id=USER,
+                catacomb_store=catacomb,
+                biolockout_store=biolockout,
+            )
+        self.assertEqual(count, 1)
+        self.assertEqual(lease.commands.count(0x40), 2)
+        self.assertFalse(lease.invalidated)
 
     def test_live_identity_allows_secure_dirty_user_for_following_enrollment(self):
         identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes
