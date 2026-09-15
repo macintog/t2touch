@@ -43,7 +43,12 @@ installation. Do not unload a SEP-pinned transport to switch versions.
 
 `./install-omarchy.sh --prepare-native-recovery` installs the software and
 loads the transport after network readiness without starting first-run,
-fprintd, or PAM/UI setup. It preserves the existing journals and private state.
+fprintd, or PAM/UI setup. It preserves the existing journals and private state. A persistent recovery hold
+blocks automatic first-run, biometric readiness/reconciliation, adaptive sync
+and fprintd activation, including after reboot and D-Bus activation requests.
+After reconciling private state, rerun the normal installer without the recovery
+flag to clear the hold and resume setup. A failed preparation leaves the hold
+in place; it does not authorize journal replay.
 It enables the normal narrowly gated provisioning/replacement capabilities
 so a recovery owner can inspect and reconcile state; it dispatches no identity
 mutation itself. This mode does not clear an ambiguous outcome or authorize
