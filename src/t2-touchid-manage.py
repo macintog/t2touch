@@ -1606,7 +1606,7 @@ def run_external_delete_reconciliation(
             ):
                 # Keep master and selected-user loading on the connection
                 # that proved the pristine state.  A pre-client 0x31 for an
-                # internally retained user creates a loaded-empty D206 state.
+                # internally retained user creates a loaded-empty, save-dirty state.
                 t2_native_state_restore.restore_for_enrollment(
                     lease,
                     apple_user_id=configuration["apple_uid"],

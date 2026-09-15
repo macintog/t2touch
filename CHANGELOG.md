@@ -9,8 +9,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Explicit AKS identity-create v4 support for MacBookPro16,2 with bridgeOS
-  23P2048, contributed by @tonibergholm in public PR #1. Version 5 remains the
-  default; see `docs/MACBOOKPRO16_2.md` for setup and hardware coverage.
+  23P2048, contributed by [@tonibergholm](https://github.com/tonibergholm) in
+  [PR #1](https://github.com/macintog/t2touch/pull/1). Version 5 remains the
+  default; see the [setup and hardware coverage](docs/MACBOOKPRO16_2.md).
 
 ### Fixed
 
@@ -20,13 +21,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Restore the committed master and user on the same pristine cold connection
   even when the master does not yet advertise the user. Reject partially
   restored master-only state as a fresh cold start.
-
 - Publish committed BioLockout state after terminal-identity enrollment
   recovery, and make the desktop Python runtime accessible under a restrictive
   installer umask.
 - Keep recovery-only installation paused across reboot and automatic service
   activation until normal installation explicitly resumes setup.
-
 - Require clean, valid, unambiguous terminal match evidence, and allow image
   quality retries before the final result. Revalidate the caller's claim after
   the touch wait before reporting authentication success.

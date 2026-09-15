@@ -4,8 +4,8 @@ Touch ID integration for Intel Macs with Apple’s T2 chip, using the standard
 Linux `fprintd` interface.
 
 This is an early proof of concept. Keep password authentication enabled and
-available. Hardware validation currently covers one `MacBookPro16,1`; other T2
-models need testing.
+available. Full end-to-end validation covers the `MacBookPro16,1` reference model;
+other model and firmware combinations have narrower coverage.
 
 MacBookPro16,2 with bridgeOS 23P2048 additionally requires explicit creation
 version 4 selection. See the [setup and hardware validation report](docs/MACBOOKPRO16_2.md)
@@ -212,8 +212,9 @@ Standard fprintd clients, `sudo`, graphical PolicyKit, the Omarchy lock path,
 and password fallback all completed successfully. A matching-transport
 userspace reinstall also completed without a reboot or hardware unbind.
 
-The public claim is intentionally narrower than broad hardware support: this
-remains a single-model proof of concept until other T2 Macs reproduce it.
+Full end-to-end coverage remains limited to the reference model. The
+[MacBookPro16,2 report](docs/MACBOOKPRO16_2.md) records additional
+firmware-specific results and their limits.
 [Graphical validation](docs/GRAPHICAL_AUTH_VALIDATION.md) records the actual
 lock and permission-dialog results, the approximately 48% reduction in measured
 reader preparation time, and the remaining retry and hardware limits.
