@@ -26,18 +26,25 @@ interface.
 
 The repository implements the verification path:
 
-1. Every list or verify transaction refreshes the redacted, stable,
-local/live-reconciled identity projection. 2. A complete projection exposes
-every unique durable neutral `finger-N` handle. 3. Both `any` and an existing
-numbered request authenticate against the complete enrolled set; the number is
-presentation and management metadata, never an anatomy claim or match
-restriction. 4. Verification repeats the private per-user and global SEP
-inventories on the same Bridge connection and reconciles the committed local
-Catacomb. 5. A successful match resolves to exactly one actual neutral handle.
-The service emits `VerifyFingerSelected("any")` before capture and that handle
-through `VerifyFingerMatched` after success; ambiguous events fail closed.
-6. The backend repeats both SEP identity views and rereads the local Catacomb
-after matching. A state change invalidates the verdict.
+1. A successful list exposes the complete reconciled neutral `finger-N`
+   inventory. Simultaneous list requests may share only a currently running
+   collection; completed results are not a cross-request cache.
+2. The same caller may pass its single-use list projection to its next
+   `VerifyStart`. Without that projection, verification collects one. Release,
+   enrollment, and deletion invalidate this presentation state.
+3. Both `any` and an existing numbered request authenticate against the complete
+   enrolled set. The number is management metadata, never anatomy or a match
+   restriction.
+4. Native verification still repeats the private per-user and global SEP
+   inventories on the same Bridge connection and reconciles the committed local
+   Catacomb. Reusing presentation metadata does not authorize a match.
+5. After `VerifyStart` returns, the actual `match_armed` event sets
+   `finger-needed` and emits `VerifyFingerSelected("any")`. A successful match
+   resolves to exactly one neutral handle, emitted through `VerifyFingerMatched`;
+   ambiguous events fail closed.
+6. The backend repeats both SEP identity views and rereads local Catacomb state
+   after matching. A state change invalidates the verdict. Optional sound work
+   cannot delay readiness or the terminal result.
 
 No Apple user ID, identity UUID, Catacomb bytes, or biometric payload crosses
 the public result boundary.
@@ -127,14 +134,18 @@ installed service constructs both clients.
 
 ## Mutation worker boundary
 
-Before any worker is exposed, `t2-native-first-run.service` composes the
-already-proven native owners into a fail-closed product lifecycle. A blank
-state creates and different-boot verifies the initial saved identity; the next
-stage publishes a schema-2 activation bundle and deliberately requires another
-boot; the final stage independently activates and enables that bundle. The
-normal transport loader derives its one-shot provisioning/replacement kernel
-gates from those exact persistent phases. Archived research manifests and
-research configuration toggles are not runtime inputs.
+Before exposing workers, `t2-native-first-run.service` composes native owners
+into a fail-closed lifecycle. Blank state creates and persists the selected
+identity, then verifies its saved activation bundle through a fresh exclusive
+userspace owner before enabling the account. Normal first enrollment likewise
+finishes fresh-owner proof and authority publication in the current session.
+Historical different-boot stages remain relevant to recovery and later startup;
+they do not impose a reboot on every new installation or enrollment.
+
+A missing applesmc boot-state publisher or a changed resident transport may
+still require a planned kernel restart. The installer does not force a reboot,
+unload live applesmc, or unbind the SEP-pinned transport to manufacture the
+required state. Archived research manifests are not runtime inputs.
 
 The long-lived fprint facade does not receive or retain the macOS password.
 Compatibility-authority enrollment needs ACM password binding, so its
@@ -209,9 +220,10 @@ special alias, and collects stable local/host/SEP state on a fresh Bridge
 generation. It then appends only that journal's typed
 terminal proof: `E4_POST_REBOOT_VERIFIED`, `RENAME_POST_REBOOT_VERIFIED`, or
 `DELETE_POST_REBOOT_VERIFIED`. It has no password credential and no enrollment,
-rename, delete, or persistence command path. Installed `EnrollStart` and named
-deletion run only through the workers and leave any unresolved E3 journal
-blocking until this verifier closes it on a later boot.
+rename, delete, or persistence command path. The compatibility workers leave unresolved E3 journals blocking until the
+applicable verifier closes them. The native installed path also supports
+same-session fresh-owner completion; service names containing “post-reboot” do
+not make a reboot a universal completion requirement.
 
 Linux-native E4 keeps its explicit enrollment and identity-management
 post-reboot verifiers because those paths must reactivate the E4 bundle through
@@ -273,9 +285,8 @@ The facade also emits the historical
 `org.freedesktop.DBus.Properties.PropertiesChanged` signal whenever
 `finger-present` or `finger-needed` changes. These Boolean notifications are
 best-effort UI feedback only: D-Bus delivery failure cannot cancel, retry, or
-reinterpret a journaled biometric operation. Verification marks `finger-needed`
-while its match task is active and clears it on every terminal, cancellation,
-and stop path. Enrollment derives both properties from its typed worker stream.
+reinterpret a journaled biometric operation. Verification marks `finger-needed` only when the reader reports `match_armed`,
+and clears it on every terminal, cancellation, and stop path. Enrollment derives both properties from its typed worker stream.
 Its raw compatibility layer advertises those same five historical properties
 through `Introspect`; a generic desktop client therefore sees the same property
 contract that `Get` and `GetAll` actually serve.
@@ -411,23 +422,6 @@ would create a partially deleted set with unclear client semantics. Keep
 an explicit batch journal and deterministic recovery. Support for deleting the
 final named identity does not establish an atomic batch-delete contract.
 
-## Authentication semantics
-
-Authentication is deliberately set-wide: a client-supplied numbered
-handle is presentation syntax and must exist, but any enrolled fingerprint can
-satisfy the verification transaction. The facade reports the actual matched
-neutral handle without treating the requested label as an anatomical or
-origin-specific restriction.
-
-## Support limits
-
-The installed native lifecycle is proven on the reference machine. Batch
-deletion remains disabled; named final-fingerprint deletion is supported.
-Broader hardware coverage, multi-user operation, deep sleep, and cross-macOS
-persistence remain unproven. The [README](../README.md#what-has-been-proven)
-describes the supported installation path and tested scope.
-
-
 ### Product deletion authorization ordering
 
 `t2touch delete finger-N` authorizes `/usr/local/sbin/t2-touchid-delete` through
@@ -446,3 +440,20 @@ low-level `DeleteEnrolledFinger` clients remain supported, but their interactive
 authorization can fall back to a password while holding the reader. The product
 command takes the corrected path. This change does not alter sudo PAM,
 Polkit's general PAM stack, desktop locking, or enrollment policy.
+
+
+## Authentication semantics
+
+Authentication is deliberately set-wide: a client-supplied numbered
+handle is presentation syntax and must exist, but any enrolled fingerprint can
+satisfy the verification transaction. The facade reports the actual matched
+neutral handle without treating the requested label as an anatomical or
+origin-specific restriction.
+
+## Support limits
+
+The installed native lifecycle is proven on the reference machine. Batch
+deletion remains disabled; named final-fingerprint deletion is supported.
+Broader hardware coverage, multi-user operation, deep sleep, and cross-macOS
+persistence remain unproven. The [README](../README.md#what-has-been-proven)
+describes the supported installation path and tested scope.

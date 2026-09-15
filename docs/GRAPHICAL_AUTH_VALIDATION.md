@@ -77,10 +77,22 @@ match selection, claims, cancellation, concurrent reads, slow notifications,
 DRM layouts, and UI patch compatibility/idempotence. Hands-on validation remains
 necessary for additional hardware and future Omarchy/Hyprland versions.
 
-After installation, a reboot on the tested MacBookPro16,1 returned to a normal
-Hyprland session with the dynamically selected native DRM device, only the
-internal panel active, and no safe-mode fallback. The fingerprint service was
-healthy, the lock UI still detected fingerprint support, and fingerprint unlock
-continued to work. The installed facade and DRM selector matched the validated
-source. This verifies the tested laptop across reboot; it does not broaden the
-hardware qualification claim above.
+The final permission-dialog test accepted fingerprint authentication for a
+harmless `pkexec /usr/bin/true`. The operator reported that it took a couple of
+tries. The lock test succeeded on the first touch after readiness. These results
+do not establish uniform single-touch latency across both interfaces.
+
+Hardware-free validation passed 142 tests: 83 facade tests, 41 native match,
+claim and runtime tests, 14 DRM layout cases, and four UI integration tests.
+Shell syntax and whitespace checks also passed. The DRM fixtures include
+integrated/discrete panel ownership, one native GPU, external-only outputs,
+headless native devices, fallback-only layouts, explicit overrides including
+empty values, and absent driver links under `sh -eu`.
+
+A subsequent real reboot returned to a normal Hyprland session with a dynamically
+selected native DRM device, only the internal panel active, and a healthy
+fingerprint service. This was a display/startup check, not another physical
+fingerprint trial. Final selector portability guards were added afterward;
+evaluating that final script on the live machine produced the same device
+selection as the rebooted session. The exact final script was not separately
+reboot-tested. Actual lock and Polkit touch results above precede this reboot.

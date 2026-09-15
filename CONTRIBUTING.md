@@ -17,7 +17,9 @@ without access to another person's private captures.
 
 Do not turn a read-only task into an authentication or mutation experiment in
 the same change. Hardware-affecting commands must retain their explicit
-acknowledgements and preflight checks.
+acknowledgements and preflight checks. This research restriction does not add
+acknowledgement flags to the installed `t2touch enroll` or `delete` commands;
+those use the product’s caller authorization and journaled workers.
 
 ## Development setup
 
@@ -56,6 +58,13 @@ entry is not a support claim.
 A hardware report should identify the kernel, T2 transport revision, expected
 result, observed result, and recovery behavior. Report positive and negative
 controls together and distinguish source checks from hardware observations.
+For graphical authentication, verify return to a responsive desktop as well as
+the authentication verdict, and keep a recovery path ready before locking.
+Recover the GUI promptly if it fails. For latency work, report measured phases
+and keep reader readiness separate from physical-touch and full-login timing.
+GPU fixtures must cover integrated, discrete, single-GPU, and disconnected
+layouts; fixture coverage does not qualify untested hardware. See the retained
+[validation report](docs/GRAPHICAL_AUTH_VALIDATION.md).
 
 Never commit or publish keybags, Catacombs, credentials, packet captures,
 Apple binaries, raw BridgeXPC replies, biometric payloads, device addresses,

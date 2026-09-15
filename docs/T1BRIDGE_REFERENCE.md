@@ -193,11 +193,12 @@ References:
 the [libfprint driver patch](https://github.com/standardagents/t1bridge/blob/7003b8d/packaging/arch/libfprint-t1bridge/0001-Add-T1Bridge-fingerprint-driver.patch),
 and the [fprintd duplicate-detection patch](https://github.com/standardagents/t1bridge/blob/7003b8d/packaging/arch/fprintd-t1bridge/0001-Honor-driver-native-duplicate-detection.patch).
 
-Native T2 E4 and direct positive/negative controls are complete. Prefer
-adapting this broker/driver boundary over expanding the current
-verification-only D-Bus facade ad hoc. Keep this project's stronger
-Linux account-generation binding, PolicyKit/session authorization, and
-E4-native authority checks.
+Native T2 E4 and direct positive/negative controls are complete. The installed
+T2 facade now implements verification, enrollment, and named deletion through
+separate authorized workers. T1Bridge remains a useful broker/driver reference;
+any future integration must preserve this project’s Linux account-generation
+binding, PolicyKit/session authorization, and native authority checks. See
+[the current fprintd contract](FPRINT_INTEGRATION.md).
 
 ### Device loss and dynamic endpoints
 

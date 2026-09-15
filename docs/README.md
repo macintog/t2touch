@@ -5,7 +5,9 @@ fingerprint management.
 
 | Document | Purpose |
 | --- | --- |
-| [Troubleshooting](TROUBLESHOOTING.md) | Installer stops, unavailable fingerprints, and suspend failures. |
+| [Troubleshooting](TROUBLESHOOTING.md) | Installer stops, deletion recovery, graphical prompts, and rollback. |
+| [Graphical validation](GRAPHICAL_AUTH_VALIDATION.md) | Readiness timing, actual lock/Polkit results, portable GPU selection, and test limits. |
+| [Security](../SECURITY.md) | Authentication authority, credential storage, fallback, and private reporting. |
 | [Architecture](ARCHITECTURE.md) | Runtime ownership, persistent state, and security boundaries. |
 | [fprintd integration](FPRINT_INTEGRATION.md) | D-Bus clients, caller authorization, enrollment, matching, and deletion. |
 | [Compatibility](COMPATIBILITY.md) | Hardware and protocol portability, tested scope, and evidence for new models. |

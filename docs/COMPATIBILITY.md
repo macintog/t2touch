@@ -48,6 +48,33 @@ This separation lets another contributor bring a different T2 board by
 supplying evidence for its tuple and testing the same codecs. It also gives T1
 a viable path without pretending its transport is T2 BCE.
 
+## Display and desktop compatibility
+
+GPU routing is independent of the SEP protocol tuple. T2 machines may expose
+an integrated GPU, a discrete GPU, or both, and either may own a connected
+panel. The installer must not impose the reference laptop's routing policy.
+
+The UWSM selector enumerates DRM devices and connectors at each login. It
+preserves an explicit `AQ_DRM_DEVICES` value, including empty. Only when both a
+fallback framebuffer and a connected native display exist does it select the
+native devices: connected internal panels first, other connected displays next,
+then remaining native GPUs. It retains those other native GPUs and changes no
+kernel GPU-routing or power controls. Without that condition, Hyprland keeps
+its default selection. No GPU vendor, PCI address, card number, or Mac model
+is hardcoded.
+
+Fourteen hardware-free fixtures cover these layouts, including missing driver
+links and shell strict mode. Actual display and reboot validation covers only
+the MacBookPro16,1 reference laptop. Fixtures are regression checks, not physical
+qualification of discrete-only, integrated-only, or other multi-GPU machines.
+
+The Omarchy UI helper checks all three QML files before writing any of them,
+backs up originals, and skips unfamiliar integration points. Package updates
+may replace the patch. A skipped UI patch does not disable the backend protocol
+or DRM selector, but readiness messages then depend on the installed desktop.
+See [graphical validation](GRAPHICAL_AUTH_VALIDATION.md) and
+[rollback](TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration).
+
 ## Evidence from the shared restore
 
 Apple's bridgeOS 10.6 `23P6068` IPSW is a multi-device container. Its

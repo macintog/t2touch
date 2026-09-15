@@ -55,6 +55,80 @@ The installed services own Bridge network preparation, discovery, authority
 activation, and reconciliation. Manual keybag-loading sequences from early
 research are not installation prerequisites.
 
+## Deletion failed and enrollment is now blocked
+
+A deletion error can mean SEP removed the fingerprint but local persistence did
+not finish. Install the corrected source before retrying enrollment. The startup
+reconciler can finish the exact interrupted deletion forward from observed
+absence without repeating the hardware command. Successful final-fingerprint
+deletion leaves an empty inventory that can enroll Finger 1 again.
+
+If recovery still fails, retain the journal and doctor's result. Do not erase
+`/var/lib/t2-touchid`, replace account authority, or repeatedly issue delete.
+Use the product command `t2touch delete finger-N`; it authorizes before taking
+the reader. Lower-level fprintd deletion clients can hold the reader while
+asking PolicyKit to authenticate, causing fingerprint authorization to fall
+back to a password.
+
+## A graphical dialog shows an icon, then asks for a password
+
+First identify the action: a permission dialog and the lock screen use different
+UI and PAM paths. Icon placement alone does not identify the failing component.
+A working `sudo` fingerprint test does not prove either graphical path works.
+
+With the compatible Omarchy integration installed and the shell restarted, the
+lock and permission dialogs show preparation followed by the actual placement
+message. Wait for that message, then briefly touch and lift. A touch during
+preparation may be missed. The final lock test accepted the first ready touch;
+the permission dialog still needed a couple of tries. Password fallback remains
+available. See the [measured results](GRAPHICAL_AUTH_VALIDATION.md).
+
+If no message appears, check the installer's UI integration notice: unfamiliar
+QML versions are skipped without modifying them. Package upgrades can replace
+those files. Rerun the installer to reapply a compatible patch, then log out and
+back in when convenient. Do not restart the shell during an active authorization
+or lock operation merely to test it.
+
+## The display goes black or the compositor crashes on unlock
+
+Recover a usable GUI before further fingerprint tests. Preserve an authenticated
+terminal or SSH recovery connection before changing display configuration.
+A match-success result does not establish that unlocking returned to the desktop.
+Collect the compositor crash report and current display configuration before
+adding another workaround; review them for private data before sharing.
+
+The included UWSM snippet excludes a fallback framebuffer only when a native DRM
+device has a connected display. It discovers devices at login and respects any
+explicit `AQ_DRM_DEVICES`, including an empty setting. Check for an old manual
+override before assuming the dynamic selector ran. Do not copy another machine's
+card number, PCI address, Intel/AMD policy, or panel name. The
+[compatibility contract](COMPATIBILITY.md#display-and-desktop-compatibility)
+explains integrated, discrete, and single-GPU behavior.
+
+## Undo the Omarchy desktop integration
+
+The current `uninstall.sh` restores managed PAM state but leaves the optional
+Omarchy QML changes and per-user UWSM snippet. To remove the latter, remove
+`20-t2touch-drm-devices.sh` from `uwsm/env-hyprland.d` under your
+`XDG_CONFIG_HOME` (normally `~/.config`). Its effect ends at the next graphical
+login. Capture the effective display configuration first and keep recovery
+access available; removing it also removes the fallback-framebuffer workaround.
+
+For QML, the installer prints its backup directory under
+`/var/lib/t2-touchid/omarchy-ui-backups/`. Each directory contains originals and
+`receipt.json`, with destination paths and the hashes of the installed files.
+Before restoring a file, verify that its current hash equals the corresponding
+installed hash. If it differs, a package or another edit has changed it: do not
+blindly overwrite it with an older backup. Review the current package version
+and changes instead.
+
+Restore only matched files to their recorded destinations, preserving each
+file's current owner and mode. Backups themselves are private mode 0600, so do
+not copy their permissions onto QML files. If several compatible patches were
+applied in sequence, undo them in reverse order, checking the receipt at each
+step; a later backup may already contain an earlier patch. Log out and back in
+after restoration. Keep the backups until the desktop is verified usable.
+
 ## Touch ID stops working after suspend
 
 Deep sleep can leave the T2 network transport unusable even when services

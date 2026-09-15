@@ -34,7 +34,10 @@ BridgeXPC, and Catacomb formats.
 ```
 
 - [`src/t2touch.py`](../src/t2touch.py) dispatches enrollment to the direct
-  D-Bus TUI and uses stock fprintd clients for list, verify, and named deletion.
+  D-Bus TUI and uses stock fprintd clients for list and verify. Product deletion
+  authorizes its privileged helper through pkexec before taking the reader; the
+  helper enters the shared journaled deletion path. The lower-level D-Bus named
+  deletion method remains available to other clients.
 - [`src/t2-fprintd.py`](../src/t2-fprintd.py) owns claims, the reconciled user
   inventory, and the public operation lifecycle. Enrollment and deletion use
   separate caller-bound transient workers.
@@ -78,7 +81,10 @@ The [systemd units](../systemd/system/) enforce these dependencies.
 `t2-touchid-post-reboot.service` reconciles eligible journals before
 `fprintd.service` starts. A failed prerequisite prevents service exposure.
 The installer starts this chain and installs PAM only after native fprintd
-readiness succeeds.
+readiness succeeds. The Omarchy wrapper then installs a per-user UWSM DRM
+selector and guarded readiness-message changes to compatible lock and Polkit
+QML. Those desktop changes take effect at the next shell start/login. See
+[graphical validation](GRAPHICAL_AUTH_VALIDATION.md) for behavior and limits.
 
 Fresh installations select `linux-native` authority. Compatibility mode retains
 an existing Apple authority and adds the imported keybag and encrypted-credential
@@ -134,7 +140,10 @@ Incomplete state blocks further mutation or authentication as appropriate.
 
 A cached biometric endpoint is a routing hint only. Every connection validates
 its RemoteXPC handshake and advertised service. Neither a cache entry nor a
-previous match grants authority for a new operation.
+previous match grants authority for a new operation. The facade may reuse a
+single caller’s list projection once for presentation and share an inventory
+read while it is running; native matching still performs fresh private
+reconciliation and post-match attestation.
 
 ## Privilege and authentication
 
@@ -159,12 +168,16 @@ current session. SEP retains registered DMA addresses, so a transport change
 requires a planned kernel restart. [`uninstall.sh`](../uninstall.sh) restores
 managed PAM state, removes the installed software and future transport startup,
 and leaves a pinned live transport resident until the next kernel start.
-It preserves private account and biometric state for reinstall.
+It preserves private account and biometric state for reinstall. The current
+uninstaller does not remove the per-user UWSM snippet or restore patched
+Omarchy QML; use the separate
+[desktop rollback procedure](TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration).
 
 The installer selects s2idle through systemd sleep policy. Deep-sleep recovery,
 cross-macOS persistence of Linux-only fingerprints, multiple Linux users, and
 additional hardware models are outside the demonstrated product scope.
-Validation covers MacBookPro16,1. Clean-volume first activation of the packaged
-applesmc prerequisite is not established by a reinstall on an already-capable
-kernel. See [Troubleshooting](TROUBLESHOOTING.md) and
+Validation covers MacBookPro16,1, including the operator’s successful install
+on the fresh Omarchy test system after installer repairs. That sequence and
+subsequent userspace reinstalls do not establish an untouched, final-release
+clone-to-enrollment replay on another machine. See [Troubleshooting](TROUBLESHOOTING.md) and
 [Compatibility](COMPATIBILITY.md).

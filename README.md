@@ -48,7 +48,7 @@ check that mistakes “no fingers enrolled” for an enrolled fingerprint.
 
 This small QML integration preserves originals under
 `/var/lib/t2-touchid/omarchy-ui-backups/`. It checks all integration points before
-writing either file and skips unfamiliar UI versions without changing them.
+writing any of the three files and skips unfamiliar UI versions without changing them.
 Omarchy package updates may replace it; rerunning the installer reapplies it
 when compatible. The UI change takes effect at the next shell start/login.
 
@@ -172,7 +172,10 @@ The uninstaller stops the userspace integration in the current session and
 does not require a reboot. A transport already pinned by SEP remains safely
 resident but is disabled for future kernel starts. The uninstaller
 intentionally preserves the private authority and fingerprint state so
-reinstall remains possible.
+reinstall remains possible. The current uninstaller leaves the Omarchy QML
+changes and user UWSM snippet in place; follow the
+[desktop rollback steps](docs/TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration)
+to remove those as well.
 
 ## What has been proven
 
@@ -187,6 +190,9 @@ userspace reinstall also completed without a reboot or hardware unbind.
 
 The public claim is intentionally narrower than broad hardware support: this
 remains a single-model proof of concept until other T2 Macs reproduce it.
+[Graphical validation](docs/GRAPHICAL_AUTH_VALIDATION.md) records the actual
+lock and permission-dialog results, the approximately 48% reduction in measured
+reader preparation time, and the remaining retry and hardware limits.
 
 Architecture, protocol provenance, and security boundaries are documented in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The small reusable protocol

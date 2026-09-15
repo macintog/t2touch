@@ -28,11 +28,14 @@ but archived working identities cannot seed the new installed demonstration.
 Fresh creation, first enrollment, standard service use, automatic reactivation
 after reboot, additional enrollment/deletion, and PAM must work through the
 installed native path. The source integration now connects a blank-only
-multi-boot first-run owner that composes the proven legacy create with schema-2
-activation-bundle creation, the exact pre-E4 enrollment bootstrap, native
-post-reboot activation dispatcher, ACM-capable deletion worker, and E4-native
-PAM gate. Final focused offline validation and installed greenfield hardware
-proof remain the current required work.
+first-run owner with schema-2 activation-bundle creation, the pre-E4 enrollment
+bootstrap, startup reconciliation, authorized deletion workers, and native PAM.
+First run and enrollment now complete through fresh userspace owners in the
+current session when the running kernel is capable. The installed lifecycle,
+actual graphical tests, and reboot check succeeded on the reference system; see
+[current architecture](../docs/ARCHITECTURE.md) and
+[graphical validation](../docs/GRAPHICAL_AUTH_VALIDATION.md). The experiment
+records below retain their original, narrower claims and boot sequencing.
 
 The complete research authority and biometric chain is observed on the
 reference machine. D172 created and atomically published the Linux-owned
@@ -135,8 +138,10 @@ scope. Their security roles must be replaced explicitly:
    not an imported macOS archive.
 5. Use the existing UID-bound ACM enrollment authorization and Catacomb
    persistence machinery only after the keybag/account tuple reconciles.
-6. Publish fprintd/PAM readiness only after a different-boot load, unlock,
-   identity inventory, and positive/negative match controls all agree.
+6. Publish readiness only after the required fresh-owner activation and
+   inventory proofs agree. Qualify positive/negative matches and restart
+   persistence separately; a different boot is not required for every installed
+   enrollment.
 
 ## Recovered protocol foundation
 
