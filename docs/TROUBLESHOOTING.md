@@ -19,6 +19,52 @@ time, then rerun `./install-omarchy.sh` as your desktop account.
 A module installed on disk does not establish that the currently running
 kernel has the capability. The installer checks the live driver.
 
+## applesmc reports `response-received:3` after reboot
+
+The publisher is loaded and has received a firmware response. EFMS result 3
+means `BootPolicyReboot`; it is not a missing driver or the ready result 1.
+The installer stops without replaying the transaction, rebuilding the module,
+or starting product setup. A Linux restart or ordinary poweroff may leave the
+T2 boot session running. On the reference laptop after an OS reinstall, both
+left result 3 unchanged; the operator's physical SMC reset cleared it to 1.
+BridgeOS logs before the reset showed a previous/current boot-volume mismatch.
+
+Shut down cleanly and follow [Apple's T2 SMC reset instructions](https://support.apple.com/en-us/102605)
+for your machine. Laptop and desktop procedures differ. Boot Linux again and
+rerun `./install-omarchy.sh`. Do not substitute a reference-machine UUID, edit
+EFI-owned identity keys, or bypass the policy check. If result 3 remains after
+the reset, retain the boot ID, kernel applesmc messages, and result for diagnosis.
+
+Earlier installers collapsed this reply into “missing, ambiguous, failed, or
+unsupported,” concealing the actual cause. Current diagnostics print the result.
+Other failed or unknown replies remain blocking, and result 1 still requires the
+independent service readiness checks before PAM is installed. See the
+[boot-policy reference](research/boot-and-storage.md#publishing-boot-state).
+
+## fprintd dependency failure during native first run
+
+Inspect `journalctl -b -u t2-native-first-run.service` and the kernel journal;
+fprintd's dependency message alone does not identify the failed prerequisite.
+A fixed driver bug counted initial provisioning as an already-attempted
+replacement, blocking the later activation-bundle create during the same boot.
+The fix counts only an armed replacement create and preserves its no-replay guard.
+
+When updating an installation that has the old transport loaded, use:
+
+```bash
+git pull --ff-only
+./install-omarchy.sh --prepare-transport-update
+# Restart when the preparation command requests it.
+./install-omarchy.sh
+```
+
+Keep `/var/lib/t2-touchid` and its journals intact. An interrupted
+`absence-reconciled` operation is resumed from saved activation material with
+fresh absence checks; deleting its journal would discard that recovery evidence.
+This repair was regression-tested against the actual C admission code and built
+against the reference kernel. The operator owns the subsequent live installer
+verification; passing source tests is not a completed installation.
+
 ## Installation reports a different running transport
 
 The installer compares the resident transport with the build before changing

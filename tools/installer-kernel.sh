@@ -123,6 +123,14 @@ check_applesmc_prerequisite() {
       # independently by the service chain before PAM is installed.
       ensure_applesmc_on_disk || return 2
       ;;
+    response-received:3)
+      # EFMS BootPolicyReboot is a completed firmware reply, not a missing
+      # publisher and not permission to start SEP applications in this boot.
+      echo "The applesmc publisher loaded; T2 boot policy requests a system reboot (response-received:3)." >&2
+      echo "An ordinary Linux reboot or poweroff may leave the T2 boot session unchanged." >&2
+      echo "See docs/TROUBLESHOOTING.md for T2 reset recovery rather than repeatedly rebooting." >&2
+      return 3
+      ;;
     absent|disabled)
       ensure_applesmc_on_disk || return 2
       enable_applesmc_next_boot || return 2
@@ -130,7 +138,7 @@ check_applesmc_prerequisite() {
       return 3
       ;;
     *)
-      echo "The applesmc boot-state result is missing, ambiguous, failed, or unsupported; installation stopped." >&2
+      printf 'The applesmc boot-state result is %q; installation stopped before product setup.\n' "$result" >&2
       echo "Preserve diagnostics; do not retry the boot-policy transaction in this session." >&2
       return 2
       ;;

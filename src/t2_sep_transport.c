@@ -1495,7 +1495,9 @@ static long t2_aks_ioctl(struct file *file, unsigned int command,
 		sep->aks_replacement_delete_attempted = true;
 		t2_aks_reset_inventory_locked(sep);
 	}
-	if (exchange.operation == 0x01 && enable_identity_replacement)
+	/* Initial provisioning must not consume the later replacement attempt. */
+	if (exchange.operation == 0x01 && enable_identity_replacement &&
+	    sep->aks_replacement_phase == T2_AKS_REPLACEMENT_PHASE_CREATE)
 		sep->aks_replacement_create_attempted = true;
 	if (exchange.operation != T2_SEP_AKS_GET_PRIMARY_IDENTITY &&
 	    exchange.operation != 0x21 && exchange.operation != 0x01 &&

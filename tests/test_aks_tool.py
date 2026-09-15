@@ -11,6 +11,70 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AKSToolTests(unittest.TestCase):
+    def test_initial_create_does_not_consume_replacement_attempt(self) -> None:
+        kernel = (ROOT / "src/t2_sep_transport.c").read_text()
+        dispatch = kernel.split("\tif (exchange.operation == 0x01 &&", 1)[1].split(
+            "\tif (exchange.operation != T2_SEP_AKS_GET_PRIMARY_IDENTITY", 1
+        )[0]
+        arm = kernel.split("\tif (arm.phase == T2_AKS_REPLACEMENT_PHASE_CREATE &&", 1)[1].split(
+            "\n\tsep->aks_replacement_phase = arm.phase;", 1
+        )[0]
+        harness = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <errno.h>
+enum { T2_AKS_REPLACEMENT_PHASE_NONE = 0,
+       T2_AKS_REPLACEMENT_PHASE_CREATE = 2 };
+struct owner {
+    int aks_replacement_phase;
+    bool aks_replacement_create_attempted;
+    unsigned aks_stable_absence_count;
+    uint64_t aks_absence_session;
+};
+static void dispatch(struct owner *sep, unsigned operation) {
+    bool enable_identity_replacement = true;
+    struct { unsigned operation; } exchange = { operation };
+''' + "\tif (exchange.operation == 0x01 &&" + dispatch + r'''
+}
+static int arm_create(struct owner *sep, uint64_t session) {
+    struct { unsigned phase; uint64_t session; } arm = {
+        T2_AKS_REPLACEMENT_PHASE_CREATE, session };
+    int ret = 0;
+''' + "\tif (arm.phase == T2_AKS_REPLACEMENT_PHASE_CREATE &&" + arm + r'''
+out_unlock:
+    return ret;
+}
+int main(void) {
+    struct owner owner = {0};
+    dispatch(&owner, 1); /* First-run legacy provisioning, then clean unload. */
+    owner.aks_stable_absence_count = 2;
+    owner.aks_absence_session = 7;
+    assert(arm_create(&owner, 7) == 0);
+    assert(arm_create(&owner, 8) == -EAGAIN);
+    owner.aks_stable_absence_count = 1;
+    assert(arm_create(&owner, 7) == -EAGAIN);
+    owner.aks_stable_absence_count = 2;
+    owner.aks_replacement_phase = T2_AKS_REPLACEMENT_PHASE_CREATE;
+    dispatch(&owner, 0x51);
+    assert(arm_create(&owner, 7) == 0);
+    dispatch(&owner, 1); /* An actual replacement consumes its one attempt. */
+    assert(arm_create(&owner, 7) == -EALREADY);
+    owner.aks_replacement_phase = T2_AKS_REPLACEMENT_PHASE_NONE;
+    assert(arm_create(&owner, 7) == -EALREADY); /* Closing does not permit replay. */
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "first-run.c"
+            executable = Path(directory) / "first-run"
+            source.write_text(harness)
+            subprocess.run(
+                ["cc", "-O2", "-Wall", "-Wextra", "-Werror",
+                 str(source), "-o", str(executable)], check=True,
+            )
+            subprocess.run([str(executable)], check=True)
+
     def test_recovery_open_passes_both_kernel_admission_layers(self) -> None:
         # Compile the actual dispatch and runtime preflight blocks. A mock of
         # userspace's exchange misses a kernel rejection before SEP dispatch.
