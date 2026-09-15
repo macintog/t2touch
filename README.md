@@ -36,7 +36,31 @@ Afterward, any enrolled finger can authenticate through:
 - the Omarchy lock screen
 - applications using the standard fprintd D-Bus API
 
-Your normal Linux password remains available as fallback.
+Your normal Linux password remains available as fallback. Sensor setup is not
+instant: wait for the placement prompt before touching. The service emits that
+prompt and the optional sound only once the reader is armed. On compatible
+Omarchy lock UI versions, the installer adds a preparation/placement message
+below the password field and wakes the panel once when the first prompt arrives.
+The graphical permission dialog also shows the preparation/placement message
+instead of hiding it behind a fingerprint icon.
+The password field remains available throughout. It also corrects the upstream
+check that mistakes “no fingers enrolled” for an enrolled fingerprint.
+
+This small QML integration preserves originals under
+`/var/lib/t2-touchid/omarchy-ui-backups/`. It checks all integration points before
+writing either file and skips unfamiliar UI versions without changing them.
+Omarchy package updates may replace it; rerunning the installer reapplies it
+when compatible. The UI change takes effect at the next shell start/login.
+
+The Omarchy installer also installs a small UWSM environment drop-in for the
+next graphical login. When both boot-framebuffer and native DRM devices exist,
+it excludes the boot framebuffer from Hyprland, preventing the observed crash
+when unlocking re-enabled a phantom display. It discovers device paths at each
+login, prefers a connected internal panel, retains other native GPUs, and
+preserves an explicit `AQ_DRM_DEVICES` selection. Native-only and
+framebuffer-only systems keep Hyprland's default selection. Remove
+`~/.config/uwsm/env-hyprland.d/20-t2touch-drm-devices.sh` to undo this part
+(or the corresponding path under `XDG_CONFIG_HOME`).
 
 ## Everyday commands
 
