@@ -346,6 +346,31 @@ int main(void)
 		create_response, sizeof(create_response), &handle));
 	create_response[15] = 0;
 
+	/* The v4 decoder ends at offset 76: never read the v5 tail. */
+	put_le32(create_request, 4);
+	assert(t2_aks_identity_create_request_allowed(create_request, 76, 4));
+	assert(!t2_aks_identity_create_request_allowed(create_request, 76, 5));
+	assert(!t2_aks_identity_create_request_allowed(create_request, 88, 4));
+	assert(!t2_aks_identity_create_request_allowed(create_request, 76, 3));
+	for (size_t n = 0; n < 76; n++)
+		assert(!t2_aks_identity_create_request_allowed(create_request, n, 4));
+	assert(t2_aks_identity_create_replacement_matches(
+		create_request, 76, 1, create_request + 48, create_request + 24, 4));
+	assert(!t2_aks_identity_create_replacement_matches(
+		create_request, 76, 2, create_request + 48, create_request + 24, 4));
+	put_le32(create_request + 40, 1);
+	assert(!t2_aks_identity_create_request_allowed(create_request, 76, 4));
+	put_le32(create_request + 40, 0);
+	put_le32(create_response, 4);
+	assert(t2_aks_identity_create_response_valid(
+		create_response, sizeof(create_response), &handle, 4));
+	assert(!t2_aks_identity_create_response_valid(
+		create_response, sizeof(create_response), &handle, 5));
+	create_response[15] = 1;
+	assert(!t2_aks_identity_create_response_valid(
+		create_response, sizeof(create_response), &handle, 4));
+	create_response[15] = 0;
+
 	put_le32(export_request, 1);
 	put_le64(export_request + 4, 1);
 	put_le32(export_request + 12, 42);

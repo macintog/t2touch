@@ -29,6 +29,7 @@ class PreflightAttestation:
 
 class ProvisioningTransport(Protocol):
     connection_generation: str
+    create_version: int
 
     def create(self, request: bytearray) -> tuple[int, bytearray]: ...
 
@@ -131,18 +132,12 @@ def run_to_mapping(
     saved_keybag = bytearray()
     try:
         create_request = bytearray(
-            codec.AKSIdentityCreateV5Request(
+            codec.minimal_create_request(
+                version=transport.create_version,
                 session=session,
-                internal_flags=0x4100,
-                effective_bag_handle=-1,
-                item1=bytes(acm_external_form),
-                item2=b"",
+                material=bytes(acm_external_form),
                 account_uuid=account_bytes,
-                item3=b"",
-                original_flags=6,
-                scalar2=0,
-                optional_data=b"",
-            ).encode()
+            )
         )
         create_digest = hashlib.sha256(create_request).hexdigest()
         provisioning.create(
@@ -163,7 +158,7 @@ def run_to_mapping(
             if type(status) is not int or status != 0:
                 raise AKSProvisioningOperationError("create returned a nonzero status")
             live_handle, kek_length = (
-                codec.AKSIdentityCreateV5Response.inspect_mutable(create_response)
+                codec.inspect_create_response(create_response, transport.create_version)
             )
             if live_handle <= 0:
                 raise AKSProvisioningOperationError("create returned an invalid handle")

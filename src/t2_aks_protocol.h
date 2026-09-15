@@ -493,15 +493,16 @@ t2_aks_identity_open_request_matches(
  * negotiated v2 headers, and one kernel-owned create/export phase.
  */
 static inline bool
-t2_aks_identity_create_v5_request_allowed(const t2_aks_wire_u8 *request,
-					   size_t length)
+t2_aks_identity_create_request_allowed(const t2_aks_wire_u8 *request,
+				      size_t length, t2_aks_wire_u32 version)
 {
 	size_t index;
 	bool account_nonzero = false;
 	bool context_nonzero = false;
 
-	if (!request || length != 88 ||
-	    t2_aks_wire_get_le32(request) != 5 ||
+	if ((version != 4 && version != 5) || !request ||
+	    length != (version == 4 ? 76 : 88) ||
+	    t2_aks_wire_get_le32(request) != version ||
 	    t2_aks_wire_get_le64(request + 4) == 0 ||
 	    t2_aks_wire_get_le32(request + 12) != 0x4100 ||
 	    t2_aks_wire_get_le32(request + 16) != (t2_aks_wire_u32)-1 ||
@@ -509,15 +510,40 @@ t2_aks_identity_create_v5_request_allowed(const t2_aks_wire_u8 *request,
 	    t2_aks_wire_get_le32(request + 40) != 0 ||
 	    t2_aks_wire_get_le32(request + 44) != 16 ||
 	    t2_aks_wire_get_le32(request + 64) != 0 ||
-	    t2_aks_wire_get_le64(request + 68) != 6 ||
-	    t2_aks_wire_get_le64(request + 76) != 0 ||
-	    t2_aks_wire_get_le32(request + 84) != 0)
+	    t2_aks_wire_get_le64(request + 68) != 6)
+		return false;
+	if (version == 5 &&
+	    (t2_aks_wire_get_le64(request + 76) != 0 ||
+	     t2_aks_wire_get_le32(request + 84) != 0))
 		return false;
 	for (index = 0; index < 16; index++) {
 		context_nonzero |= request[24 + index] != 0;
 		account_nonzero |= request[48 + index] != 0;
 	}
 	return context_nonzero && account_nonzero;
+}
+
+static inline bool
+t2_aks_identity_create_v5_request_allowed(const t2_aks_wire_u8 *request,
+					 size_t length)
+{
+	return t2_aks_identity_create_request_allowed(request, length, 5);
+}
+
+static inline bool
+t2_aks_identity_create_replacement_matches(
+	const t2_aks_wire_u8 *request, size_t length, t2_aks_wire_u64 session,
+	const t2_aks_wire_u8 account_uuid[T2_AKS_ACM_EXTERNAL_FORM_SIZE],
+	const t2_aks_wire_u8 activation_material[T2_AKS_ACM_EXTERNAL_FORM_SIZE],
+	t2_aks_wire_u32 version)
+{
+	return account_uuid && activation_material && session &&
+	       t2_aks_identity_create_request_allowed(request, length, version) &&
+	       t2_aks_wire_get_le64(request + 4) == session &&
+	       !memcmp(request + 24, activation_material,
+		       T2_AKS_ACM_EXTERNAL_FORM_SIZE) &&
+	       !memcmp(request + 48, account_uuid,
+		       T2_AKS_ACM_EXTERNAL_FORM_SIZE);
 }
 
 static inline bool
@@ -547,15 +573,17 @@ t2_aks_identity_copy_keybag_v1_request_allowed(const t2_aks_wire_u8 *request,
 }
 
 static inline bool
-t2_aks_identity_create_v5_response_valid(const t2_aks_wire_u8 *response,
+t2_aks_identity_create_response_valid(const t2_aks_wire_u8 *response,
 					  size_t length,
-					  t2_aks_wire_u32 *handle_out)
+					  t2_aks_wire_u32 *handle_out,
+					  t2_aks_wire_u32 version)
 {
 	t2_aks_wire_u32 handle, blob_length;
 	size_t padded_length, index;
 
-	if (!response || !handle_out || length < 12 ||
-	    t2_aks_wire_get_le32(response) != 5)
+	if ((version != 4 && version != 5) ||
+	    !response || !handle_out || length < 12 ||
+	    t2_aks_wire_get_le32(response) != version)
 		return false;
 	handle = t2_aks_wire_get_le32(response + 4);
 	blob_length = t2_aks_wire_get_le32(response + 8);
@@ -569,6 +597,14 @@ t2_aks_identity_create_v5_response_valid(const t2_aks_wire_u8 *response,
 	}
 	*handle_out = handle;
 	return true;
+}
+
+static inline bool
+t2_aks_identity_create_v5_response_valid(const t2_aks_wire_u8 *response,
+					 size_t length,
+					 t2_aks_wire_u32 *handle_out)
+{
+	return t2_aks_identity_create_response_valid(response, length, handle_out, 5);
 }
 
 static inline bool

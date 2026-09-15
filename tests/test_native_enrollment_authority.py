@@ -792,6 +792,7 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                 return_value=final_history,
             ),
             mock.patch.object(native_enroll, "_run") as capture,
+            mock.patch.object(native_enroll, "_synchronize_persisted_biolockout") as synchronize,
         ):
             result = native_enroll._run_observed_identity_recovery(
                 configuration={"host": "host", "interface": "if0"},
@@ -801,6 +802,9 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             )
 
         self.assertTrue(result["enrollment_succeeded"])
+        synchronize.assert_called_once()
+        self.assertTrue(synchronize.call_args.args[0].persistence_ready)
+        self.assertEqual(synchronize.call_args.args[1], 501)
         self.assertFalse(result["fingerprint_mutation_performed"])
         capture.assert_not_called()
         classify.assert_called_once()

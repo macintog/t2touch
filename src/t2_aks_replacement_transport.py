@@ -254,8 +254,8 @@ class AKSReplacementTransport(AKSProvisioningTransport):
             raise AKSProvisioningTransportError("identity creation is not armed")
         self._create_attempted = True
         status, response = super().create(request)
-        live_handle, _ = create_codec.AKSIdentityCreateV5Response.inspect_mutable(
-            response
+        live_handle, _ = create_codec.inspect_create_response(
+            response, self.create_version
         )
         self._created_handle = live_handle
         return status, response

@@ -184,6 +184,12 @@ MODULE_PARM_DESC(inventory_only,
 
 static bool enable_identity_provisioning;
 module_param(enable_identity_provisioning, bool, 0400);
+
+/* Operation-body version, distinct from negotiated AKS envelope version. */
+static unsigned int identity_create_version = 5;
+module_param(identity_create_version, uint, 0444);
+MODULE_PARM_DESC(identity_create_version,
+	"Identity-create body version (4 or 5), selected before loading for verified firmware");
 MODULE_PARM_DESC(enable_identity_provisioning,
 	"Permit one kernel-owned create/export identity transaction per boot (experimental; default: false)");
 
@@ -531,8 +537,8 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 	if (!t2_aks_operation_allowed(operation))
 		return -EACCES;
 	if (operation == 0x01 &&
-	    !t2_aks_identity_create_v5_request_allowed(request_body,
-						       request_body_length))
+	    !t2_aks_identity_create_request_allowed(request_body,
+				request_body_length, identity_create_version))
 		return -EACCES;
 	if (operation == 0x02 &&
 	    !t2_aks_identity_copy_keybag_v1_request_allowed(request_body,
@@ -1017,19 +1023,20 @@ static int t2_aks_provisioning_preflight_locked(
 			return -EALREADY;
 		if (sep->aks_header_version != T2_AKS_HEADER_VERSION_2)
 			return -EPROTONOSUPPORT;
-		if (!t2_aks_identity_create_v5_request_allowed(request,
-							 request_length))
+		if (!t2_aks_identity_create_request_allowed(request,
+				request_length, identity_create_version))
 			return -EACCES;
 		if (enable_identity_replacement &&
 		    sep->aks_replacement_phase != T2_AKS_REPLACEMENT_PHASE_NONE &&
 		    (sep->aks_replacement_phase !=
 			    T2_AKS_REPLACEMENT_PHASE_CREATE ||
 		     sep->aks_replacement_create_attempted ||
-		     !t2_aks_identity_create_v5_replacement_matches(
+		     !t2_aks_identity_create_replacement_matches(
 			     request, request_length,
 			     sep->aks_replacement_session,
 			     sep->aks_replacement_new_uuid,
-			     sep->aks_replacement_activation_material)))
+			     sep->aks_replacement_activation_material,
+			     identity_create_version)))
 			return -EACCES;
 		if (sep->aks_stable_absence_count < 2 ||
 		    sep->aks_absence_session !=
@@ -1108,8 +1115,9 @@ static int t2_aks_record_provisioning_reply_locked(
 	u32 handle;
 
 	if (operation == 0x01) {
-		if (!t2_aks_identity_create_v5_response_valid(
-			    response, response_length, &handle))
+		if (!t2_aks_identity_create_response_valid(
+			    response, response_length, &handle,
+			    identity_create_version))
 			return -EPROTO;
 		sep->aks_provisioning_session =
 			t2_aks_wire_get_le64(request + 4);
@@ -2166,6 +2174,9 @@ static int t2_sep_probe(struct pci_dev *pdev,
 	struct t2_sep_transport *sep;
 	u32 inbox, outbox;
 	int ret;
+
+	if (identity_create_version != 4 && identity_create_version != 5)
+		return -EINVAL;
 
 	if (pci_resource_len(pdev, T2_SEP_MAILBOX_BAR) < T2_SEP_BAR_MIN_SIZE)
 		return -ENODEV;
