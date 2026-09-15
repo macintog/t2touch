@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Hardware-free codec for the recovered AKS identity-create-v5 body.
+"""Hardware-free codecs for recovered AKS identity-create bodies.
 
 This module deliberately contains no transport, command-line entry point, or
 policy for choosing flags.  The enclosing AKS v2 header and endpoint-7
@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from typing import ClassVar
 
 
 MAX_BODY_BYTES = 0x4000 - 0x54
 ENDPOINT = 7
 OPERATION = 0x01
 VERSION = 5
+CREATE_V4_VERSION = 4
 EXPORT_OPERATION = 0x02
 EXPORT_VERSION = 1
 
@@ -79,6 +81,62 @@ def _mutable_blob_bounds(
     if any(data[end:padded_end]):
         raise AKSIdentityCreateCodecError(f"{field} has nonzero alignment padding")
     return start, end, padded_end
+
+
+@dataclass(frozen=True)
+class AKSIdentityCreateV4Request:
+    """23P2048 layout; selecting this codec does not attest runtime safety."""
+
+    session: int
+    internal_flags: int
+    effective_bag_handle: int
+    item1: bytes
+    item2: bytes
+    account_uuid: bytes
+    item3: bytes
+    original_flags: int
+
+    def encode(self) -> bytes:
+        session = _uint(self.session, 64, "session")
+        flags = _uint(self.internal_flags, 32, "internal flags")
+        handle = _int32(self.effective_bag_handle, "effective bag handle")
+        original_flags = _uint(self.original_flags, 64, "original flags")
+        item1 = _bytes(self.item1, "item1")
+        item2 = _bytes(self.item2, "item2")
+        account_uuid = _bytes(self.account_uuid, "account UUID")
+        item3 = _bytes(self.item3, "item3")
+        if len(account_uuid) != 16:
+            raise AKSIdentityCreateCodecError("account UUID is not 16 bytes")
+        encoded = b"".join((
+            struct.pack("<IQIi", CREATE_V4_VERSION, session, flags, handle),
+            _blob(item1), _blob(item2), _blob(account_uuid), _blob(item3),
+            struct.pack("<Q", original_flags),
+        ))
+        if len(encoded) > MAX_BODY_BYTES:
+            raise AKSIdentityCreateCodecError("encoded request exceeds the endpoint body limit")
+        return encoded
+
+    @classmethod
+    def decode(cls, data: bytes) -> "AKSIdentityCreateV4Request":
+        data = _bytes(data, "request body")
+        if len(data) < 24:
+            raise AKSIdentityCreateCodecError("request fixed fields are truncated")
+        version, session, flags, handle = struct.unpack_from("<IQIi", data)
+        if version != CREATE_V4_VERSION:
+            raise AKSIdentityCreateCodecError("unsupported identity-create version")
+        item1, offset = _read_blob(data, 20, "item1")
+        item2, offset = _read_blob(data, offset, "item2")
+        account_uuid, offset = _read_blob(data, offset, "account UUID")
+        item3, offset = _read_blob(data, offset, "item3")
+        if len(account_uuid) != 16:
+            raise AKSIdentityCreateCodecError("account UUID is not 16 bytes")
+        if len(data) - offset < 8:
+            raise AKSIdentityCreateCodecError("request scalar tail is truncated")
+        original_flags = struct.unpack_from("<Q", data, offset)[0]
+        if offset + 8 != len(data):
+            raise AKSIdentityCreateCodecError("request has trailing bytes")
+        return cls(session, flags, handle, item1, item2, account_uuid, item3,
+                   original_flags)
 
 
 @dataclass(frozen=True)
@@ -162,6 +220,7 @@ class AKSIdentityCreateV5Request:
 
 @dataclass(frozen=True)
 class AKSIdentityCreateV5Response:
+    wire_version: ClassVar[int] = VERSION
     live_handle: int
     kek_material: bytes
 
@@ -171,7 +230,7 @@ class AKSIdentityCreateV5Response:
         if len(data) < 12:
             raise AKSIdentityCreateCodecError("response is truncated")
         version, live_handle = struct.unpack_from("<Ii", data, 0)
-        if version != VERSION:
+        if version != cls.wire_version:
             raise AKSIdentityCreateCodecError("unsupported identity-create response version")
         kek_material, offset = _read_blob(data, 8, "KEK material")
         if offset != len(data):
@@ -184,12 +243,41 @@ class AKSIdentityCreateV5Response:
         if not isinstance(data, bytearray) or len(data) < 12:
             raise AKSIdentityCreateCodecError("response is truncated")
         version, live_handle = struct.unpack_from("<Ii", data, 0)
-        if version != VERSION:
+        if version != cls.wire_version:
             raise AKSIdentityCreateCodecError("unsupported identity-create response version")
         start, end, offset = _mutable_blob_bounds(data, 8, "KEK material")
         if offset != len(data):
             raise AKSIdentityCreateCodecError("response has trailing bytes")
         return live_handle, end - start
+
+
+@dataclass(frozen=True)
+class AKSIdentityCreateV4Response(AKSIdentityCreateV5Response):
+    wire_version: ClassVar[int] = CREATE_V4_VERSION
+
+
+def minimal_create_request(
+    *, version: int, session: int, material: bytes, account_uuid: bytes,
+) -> bytes:
+    """Encode the narrow native creation profile for an explicitly selected version."""
+    fields = dict(
+        session=session, internal_flags=0x4100, effective_bag_handle=-1,
+        item1=material, item2=b"", account_uuid=account_uuid, item3=b"",
+        original_flags=6,
+    )
+    if type(version) is int and version == 4:
+        return AKSIdentityCreateV4Request(**fields).encode()
+    if type(version) is int and version == 5:
+        return AKSIdentityCreateV5Request(**fields, scalar2=0).encode()
+    raise AKSIdentityCreateCodecError("unsupported identity-create version")
+
+
+def inspect_create_response(data: bytearray, version: int) -> tuple[int, int]:
+    if type(version) is int and version == 4:
+        return AKSIdentityCreateV4Response.inspect_mutable(data)
+    if type(version) is int and version == 5:
+        return AKSIdentityCreateV5Response.inspect_mutable(data)
+    raise AKSIdentityCreateCodecError("unsupported identity-create version")
 
 
 @dataclass(frozen=True)

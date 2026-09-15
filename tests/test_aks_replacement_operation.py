@@ -25,6 +25,7 @@ def identifier(number: int) -> str:
 
 
 class FakeTransport:
+    create_version = 5
     def __init__(self, observations: list[tuple[bool, str | None]]) -> None:
         self.connection_generation = identifier(11)
         self.observations = observations
@@ -64,7 +65,9 @@ class FakeTransport:
         self.created += 1
         if self.create_error is not None:
             raise self.create_error
-        return 0, bytearray(struct.pack("<IiI", 5, 42, 0))
+        if struct.unpack_from("<I", _request)[0] != self.create_version:
+            raise AssertionError("creation version differs from transport policy")
+        return 0, bytearray(struct.pack("<IiI", self.create_version, 42, 0))
 
     def export(self, _request: bytearray) -> tuple[int, bytearray]:
         self.exported += 1
@@ -95,6 +98,10 @@ class FakeTransport:
 
 
 class AKSReplacementOperationTests(unittest.TestCase):
+    def test_v4_transaction_publishes_bundle_and_unloads(self) -> None:
+        with mock.patch.object(FakeTransport, "create_version", 4):
+            self.test_direct_transaction_publishes_disabled_bundle_and_unloads()
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

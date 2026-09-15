@@ -2153,6 +2153,14 @@ def _run_observed_identity_recovery(
             raise NativeEnrollmentError(
                 "observed identity recovery did not reach reconciled persistence"
             )
+        # This path bypasses coordinate(), so publish the same committed
+        # rolling lockout state before exposing the recovered fingerprint.
+        _synchronize_persisted_biolockout(
+            t2_enrollment_coordinator.EnrollmentCoordinatorResult(
+                "identity-observed", True, True, True
+            ),
+            selected.apple_uid,
+        )
         return {
             "enrollment_succeeded": True,
             "observed_identity_recovered": True,
