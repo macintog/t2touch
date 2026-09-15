@@ -6,9 +6,11 @@ are separate persistent objects. Fingerprint state is a third, separate layer.
 
 ## Creation layers and encoding
 
-AppleKeyStore user-client selector `0x76` is a host API selector. Its implementation
-encodes a version-5 creation record inside host endpoint-7 operation `0x01`.
-Neither number is the internal `sks` endpoint `0x12`.
+AppleKeyStore user-client selector `0x76` is a host API selector. The recovered
+implementations encode a versioned creation record inside host endpoint-7
+operation `0x01`: version 5 on the J152f reference firmware and version 4 on
+MacBookPro16,2 / J214K with bridgeOS `23P2048`. Neither number is the internal
+`sks` endpoint `0x12`.
 
 The record below was recovered independently from the Intel host implementation
 and the matching J152f SEP decoder. All integers are little-endian. `blob` means
@@ -34,6 +36,22 @@ create response:
     i32 live_handle
     blob optional_kek_material
 
+create-v4 request (operation 0x01):
+    u32 version = 4
+    u64 session
+    u32 internal_flags
+    i32 effective_bag_handle
+    blob item1
+    blob item2
+    blob account_uuid
+    blob item3
+    u64 original_flags
+
+create-v4 response:
+    u32 version = 4
+    i32 live_handle
+    blob optional_kek_material
+
 export request (operation 0x02):
     u32 version = 1
     u64 session
@@ -45,11 +63,14 @@ export response:
     blob saved_keybag
 ```
 
-The account UUID is a nonzero 16-byte UUID. The minimal construction used on J152f has
-an 88-byte create body and a 20-byte export body. The creation response has no
-leading status word: mailbox status determines whether the response succeeded.
-Optional flags and fields have additional branches in the recovered decoder;
-the successful minimal construction does not establish all of their semantics.
+The account UUID is a nonzero 16-byte UUID. The minimal v5 construction used on
+J152f has an 88-byte create body; the observed v4 construction on J214K has a
+76-byte create body because it omits v5's second scalar and optional blob. Both
+use the same 20-byte minimal export body. Changing only the version word is not
+a valid conversion between these layouts. The creation response has no leading
+status word: mailbox status determines whether the response succeeded. Optional
+flags and fields have additional branches in the recovered decoders; the
+successful minimal constructions do not establish all of their semantics.
 
 The returned KEK material serves the Apple host's APFS key-binding path. Hardware
 returned 162 bytes in the first successful creation experiment, correcting an
