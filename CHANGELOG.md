@@ -6,6 +6,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Require clean, valid, unambiguous terminal match evidence, and allow image
+  quality retries before the final result. Revalidate the caller's claim after
+  the touch wait before reporting authentication success.
+- Subscribe to D-Bus caller departures before exposing the service, and retain
+  enrollment and deletion ownership through repeated cancellation and cleanup.
+- Reap verification and feedback helpers on failure or cancellation, continue
+  draining diagnostics when optional feedback fails, and bound the retained
+  diagnostic tail.
+- Identify the ACM endpoint and request correctly in transport timeout logs.
+
 ## 0.0.2 - 2026-09-15
 
 ### Fixed

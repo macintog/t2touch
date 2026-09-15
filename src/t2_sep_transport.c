@@ -1900,9 +1900,9 @@ static int t2_acm_exchange_locked(struct t2_sep_transport *sep,
 	ret = t2_sep_send(sep, &request);
 	if (ret) {
 		if (ret == -ETIMEDOUT)
-			t2_sep_log_mailbox_timeout(sep, "AKS",
-				T2_SEP_AKS_ENDPOINT,
-				T2_SEP_AKS_GET_CAPABILITIES, "send", 0);
+			t2_sep_log_mailbox_timeout(sep, "ACM",
+				T2_SEP_ACM_ENDPOINT,
+				request_code, "send", 0);
 		return ret;
 	}
 

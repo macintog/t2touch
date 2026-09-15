@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import signal as process_signal
 import stat
 import sys
 
@@ -124,29 +125,40 @@ def verdict_from_result(
         raise RuntimeError("malformed T2 match event list")
     if result.get("match_cleanup_valid") is not True:
         raise RuntimeError("the T2 match did not close cleanly")
+    if result.get("match_rejected") is True:
+        raise RuntimeError("the T2 rejected match startup")
+    verdict = None
     image_quality_rejected = False
     for event in events:
-        if not isinstance(event, dict) or event.get("event_kind") != "match_result":
+        if not isinstance(event, dict):
+            raise RuntimeError("malformed T2 match event")
+        if event.get("event_kind") != "match_result":
             continue
+        if verdict is not None:
+            raise RuntimeError("the T2 returned multiple terminal match results")
         if event.get("result_valid") is not True:
             raise RuntimeError("the T2 returned an invalid or unknown match result")
         if (
             event.get("matched") is True
+            and event.get("no_match", False) is False
+            and event.get("no_match_image_quality", False) is False
             and event.get("matches_enrolled_identity") is True
             and (
                 target_finger is None
                 or event.get("matches_selected_identity") is True
             )
         ):
-            return "verify-match"
+            verdict = "verify-match"
+            continue
         if event.get("no_match") is True and event.get("matched") is False:
             if event.get("no_match_image_quality") is True:
                 image_quality_rejected = True
                 continue
-            return "verify-no-match"
+            verdict = "verify-no-match"
+            continue
         raise RuntimeError("the T2 returned an unclassifiable match result")
-    if result.get("match_rejected") is True:
-        raise RuntimeError("the T2 rejected match startup")
+    if verdict is not None:
+        return verdict
     if image_quality_rejected:
         raise RuntimeError(
             "the T2 match ended after image-quality retries without a verdict"
@@ -177,14 +189,15 @@ def resolved_any_finger_from_result(result: object) -> str | None:
         or post.get("identifiers_redacted") is not True
     ):
         raise RuntimeError("resolved-any T2 match attestation is incomplete")
-    events = result.get("match_events")
-    if not isinstance(events, list):
-        raise RuntimeError("malformed T2 match event list")
-    for event in events:
+    # Use the same fail-closed terminal checks as named verification. A
+    # placement/image-quality retry is not a terminal negative verdict.
+    if verdict_from_result(result) == "verify-no-match":
+        return None
+    for event in result["match_events"]:
         if not isinstance(event, dict) or event.get("event_kind") != "match_result":
             continue
         if event.get("matched") is not True:
-            return None
+            continue
         finger_name = event.get("matched_finger_name")
         if (
             event.get("matches_enrolled_identity") is not True
@@ -193,9 +206,7 @@ def resolved_any_finger_from_result(result: object) -> str | None:
         ):
             raise RuntimeError("resolved-any T2 match result is incomplete")
         return finger_name
-    if result.get("match_rejected") is True:
-        raise RuntimeError("the T2 rejected match startup")
-    return None
+    raise RuntimeError("resolved-any T2 match result has no terminal identity")
 
 
 def desktop_user_unit_command(unit: object) -> tuple[str, ...] | None:
@@ -298,6 +309,88 @@ class T2Backend:
         except (OSError, ValueError):
             pass
 
+    @staticmethod
+    def _signal_process_group(process, sig) -> None:
+        # All supervised commands below start their own session. Include a
+        # wrapper's descendants, which may still hold the output pipes open.
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    async def _reap_process(self, process) -> None:
+        async def discard(stream):
+            if stream is not None:
+                while await stream.read(65536):
+                    pass
+
+        self._signal_process_group(
+            process, process_signal.SIGTERM
+        )
+        drained = asyncio.gather(
+            discard(process.stdout), discard(process.stderr), process.wait()
+        )
+        try:
+            # Keep draining through the deadline: cancelling pipe readers
+            # before waiting for exit can deadlock even after SIGKILL.
+            await asyncio.wait_for(asyncio.shield(drained), timeout=10)
+        except asyncio.TimeoutError:
+            self._signal_process_group(process, process_signal.SIGKILL)
+            await drained
+
+    async def _collect_process(self, process, live_feedback=None, *, probe=False):
+        """Retain ownership and drain both pipes through failure/cancellation."""
+        self.process = process
+        self.process_owner = asyncio.current_task()
+        if probe:
+            readers = (
+                asyncio.create_task(process.stdout.read()),
+                asyncio.create_task(self._read_probe_stderr(process.stderr, live_feedback)),
+                asyncio.create_task(process.wait()),
+            )
+        else:
+            readers = (asyncio.create_task(process.communicate()),)
+        try:
+            output = await asyncio.gather(*readers)
+            return (output[0], output[1]) if probe else output[0]
+        except BaseException:
+            async def finish():
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+                await self._reap_process(process)
+
+            cleanup = asyncio.create_task(finish())
+            # A second Stop/disconnect must not detach an unreaped helper.
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
+        finally:
+            if self.process is process:
+                self.process = None
+                self.process_owner = None
+
+    async def _bounded_communication(self, process):
+        """Timeout/cancellation cleanup for best-effort feedback commands."""
+        communication = asyncio.create_task(process.communicate())
+        try:
+            return await asyncio.wait_for(asyncio.shield(communication), timeout=3)
+        except BaseException:
+            self._signal_process_group(process, process_signal.SIGKILL)
+            # The original readers remain alive, so wrappers cannot leave
+            # blocked pipes, unconsumed exceptions, or an unreaped child.
+            while not communication.done():
+                try:
+                    await asyncio.shield(communication)
+                except asyncio.CancelledError:
+                    continue
+            communication.result()
+            raise
+
     def runtime_authority(self) -> t2_user_authority.RuntimeUserAuthority:
         try:
             return t2_user_authority.load_runtime(self.linux_uid)
@@ -319,15 +412,12 @@ class T2Backend:
         environment["SUDO_UID"] = str(self.linux_uid)
         process = await asyncio.create_subprocess_exec(
             *command,
+            start_new_session=True,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=environment,
         )
-        self.process = process
-        try:
-            stdout, stderr = await process.communicate()
-        finally:
-            self.process = None
+        stdout, stderr = await self._collect_process(process)
         if process.returncode != 0 or not stdout:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(detail or "fprint projection collection failed")
@@ -385,11 +475,12 @@ class T2Backend:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             str(self.project_dir / "src/discover-biometric-port.py"),
+            start_new_session=True,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
         )
-        stdout, stderr = await process.communicate()
+        stdout, stderr = await self._collect_process(process)
         if process.returncode != 0:
             raise RuntimeError(stderr.decode(errors="replace").strip())
         self.port = int(stdout.decode().strip())
@@ -464,21 +555,13 @@ class T2Backend:
                 command.append("--resolve-any-finger-name")
         process = await asyncio.create_subprocess_exec(
             *command,
+            start_new_session=True,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        self.process = process
-        assert process.stdout is not None
-        assert process.stderr is not None
-        stdout_task = asyncio.create_task(process.stdout.read())
-        stderr_task = asyncio.create_task(
-            self._read_probe_stderr(process.stderr, live_feedback)
+        stdout, stderr = await self._collect_process(
+            process, live_feedback, probe=True
         )
-        try:
-            await process.wait()
-            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
-        finally:
-            self.process = None
         if not stdout or process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(detail or "BridgeXPC probe failed")
@@ -496,13 +579,18 @@ class T2Backend:
         live_feedback: Callable[[dict], None] | None,
     ) -> bytes:
         captured = bytearray()
+        diagnostic_limit = 65536
         cue_sent = False
         prefix = b"T2_MATCH_EVENT "
         while True:
             line = await stream.readline()
             if not line:
-                return bytes(captured)
+                return bytes(captured[-diagnostic_limit:])
             captured.extend(line)
+            # Retain a diagnostic tail, compacting in batches rather than
+            # copying the entire window for every short feedback line.
+            if len(captured) > 2 * diagnostic_limit:
+                del captured[:-diagnostic_limit]
             if not line.startswith(prefix):
                 continue
             try:
@@ -511,10 +599,16 @@ class T2Backend:
                 continue
             if isinstance(event, dict):
                 if live_feedback is not None:
-                    live_feedback(event)
+                    try:
+                        live_feedback(event)
+                    except Exception:
+                        pass  # UI delivery is never an authentication verdict.
                 if event.get("event_kind") == "match_armed" and not cue_sent:
                     cue_sent = True
-                    self.schedule_feedback("ready")
+                    try:
+                        self.schedule_feedback("ready")
+                    except Exception:
+                        pass  # Audio must not stop draining the worker pipe.
 
     async def _run_native_match(
         self,
@@ -537,22 +631,14 @@ class T2Backend:
         environment["SUDO_UID"] = str(self.linux_uid)
         process = await asyncio.create_subprocess_exec(
             *command,
+            start_new_session=True,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=environment,
         )
-        self.process = process
-        assert process.stdout is not None
-        assert process.stderr is not None
-        stdout_task = asyncio.create_task(process.stdout.read())
-        stderr_task = asyncio.create_task(
-            self._read_probe_stderr(process.stderr, live_feedback)
+        stdout, stderr = await self._collect_process(
+            process, live_feedback, probe=True
         )
-        try:
-            await process.wait()
-            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
-        finally:
-            self.process = None
         if not stdout or process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(detail or "native T2 match owner failed")
@@ -644,16 +730,13 @@ class T2Backend:
             "start",
             "--no-block",
             "t2-touchid-adaptive-sync.service",
+            start_new_session=True,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=3
-            )
+            _stdout, stderr = await self._bounded_communication(process)
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
             raise RuntimeError("adaptive Catacomb sync request timed out")
         if process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
@@ -715,13 +798,12 @@ class T2Backend:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
+                start_new_session=True,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            _stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=3
-            )
+            _stdout, stderr = await self._bounded_communication(process)
             if process.returncode != 0:
                 print(
                     "Touch ID alert failed:",
@@ -738,12 +820,11 @@ class T2Backend:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
+                start_new_session=True,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=3
-            )
+            _stdout, stderr = await self._bounded_communication(process)
             if process.returncode != 0:
                 print(
                     f"Touch ID desktop unit {unit} failed:",
@@ -753,11 +834,18 @@ class T2Backend:
         except (FileNotFoundError, asyncio.TimeoutError):
             pass
 
-    async def cancel(self) -> None:
+    async def cancel(self, *, owner=None) -> None:
         process = self.process
-        if process is None or process.returncode is not None:
+        if (
+            process is None
+            or process.returncode is not None
+            or (owner is not None and getattr(self, "process_owner", None) is not owner)
+        ):
             return
-        process.terminate()
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
         try:
             await asyncio.wait_for(process.wait(), timeout=10)
         except asyncio.TimeoutError:
@@ -1142,6 +1230,9 @@ class FprintDevice(ServiceInterface):
             verdict, result = await self.backend.verify_fprint(
                 requested_finger, self._live_verify_event, projection=projection
             )
+            # The touch wait can be unbounded. Account/session/process
+            # evidence collected before it is not authority to publish now.
+            self._require_claim_owner()
             if verdict == "verify-match":
                 selected = resolved_any_finger_from_result(result)
                 if selected is None:
@@ -1247,10 +1338,13 @@ class FprintDevice(ServiceInterface):
         if task is None:
             self._set_finger_state(False, False)
             return
-        await self.backend.cancel()
+        # Suppress result publication before any shutdown await. A queued
+        # verification must not cancel another task's inventory subprocess.
         task.cancel()
+        await self.backend.cancel(owner=task)
         await asyncio.gather(task, return_exceptions=True)
-        self.verify_task = None
+        if self.verify_task is task:
+            self.verify_task = None
         self._set_finger_state(False, False)
 
     def _arm_unstarted_claim_expiry(self, *, replace: bool = False) -> None:
@@ -1380,6 +1474,7 @@ class FprintDevice(ServiceInterface):
             )
 
     async def _expire_stale_enrollment_claim(self, completed_task) -> None:
+        timer = asyncio.current_task()
         try:
             await asyncio.sleep(COMPLETED_CLAIM_SECONDS)
             client = self.enrollment_client
@@ -1388,11 +1483,17 @@ class FprintDevice(ServiceInterface):
                     await client.stop()
                 except Exception:
                     pass
-                finally:
+                # Cancellation must preserve a still-running worker's claim.
+                # A replaced timer must never clear its successor's claim.
+                if (
+                    self.claim_expiry_task is timer
+                    and getattr(client, "task", None) is None
+                ):
                     self._set_finger_state(False, False, None)
                     self._clear_claim()
         finally:
-            self.claim_expiry_task = None
+            if self.claim_expiry_task is timer:
+                self.claim_expiry_task = None
 
     async def _stop_enrollment(self, require_running: bool) -> None:
         client = self.enrollment_client
@@ -1522,6 +1623,13 @@ class FprintDevice(ServiceInterface):
                 # Once the injected client has accepted the request, caller
                 # cancellation cannot kill or replay a possibly dispatched
                 # delete. Wait for its journaled reconciliation boundary.
+                while not operation.done():
+                    try:
+                        await asyncio.shield(operation)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
                 await asyncio.gather(operation, return_exceptions=True)
                 raise
             if (
@@ -1728,6 +1836,27 @@ async def main_async(args: argparse.Namespace) -> None:
     bus.add_message_handler(legacy_introspection_handler)
     bus.add_message_handler(legacy_property_handler)
     bus.add_message_handler(sender_departure_handler)
+    # A low-level dbus-next service does not install proxy-client match rules.
+    # A local handler alone cannot receive other connections' departures.
+    subscribed = await bus.call(
+        Message(
+            destination="org.freedesktop.DBus",
+            path="/org/freedesktop/DBus",
+            interface="org.freedesktop.DBus",
+            member="AddMatch",
+            signature="s",
+            body=["type='signal',sender='org.freedesktop.DBus',"
+                  "path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',"
+                  "member='NameOwnerChanged'"],
+        )
+    )
+    if (
+        not isinstance(subscribed, Message)
+        or subscribed.message_type != MessageType.METHOD_RETURN
+        or subscribed.signature != ""
+        or subscribed.body != []
+    ):
+        raise RuntimeError("D-Bus caller departure monitoring is unavailable")
     bus.export(MANAGER_PATH, FprintManager())
     bus.export(DEVICE_PATH, device)
     await bus.request_name(BUS_NAME)
