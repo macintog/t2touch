@@ -41,6 +41,15 @@ class NativeFirstRunTests(unittest.TestCase):
         ):
             FIRST_RUN._owner(["ignored"], runner=lambda *_args, **_kwargs: completed)
 
+        completed.stderr = (
+            b"child: error: identity provisioning failed at "
+            b"credential-bearing-consumer; context was cleaned up\n"
+        )
+        with self.assertRaisesRegex(
+            FIRST_RUN.NativeFirstRunError, "credential-bearing-consumer; context was cleaned up"
+        ):
+            FIRST_RUN._owner(["ignored"], runner=lambda *_args, **_kwargs: completed)
+
         completed.stderr = b"child: error: unsafe\x00detail\n"
         with self.assertRaisesRegex(
             FIRST_RUN.NativeFirstRunError, "^native first-run owner stopped$"

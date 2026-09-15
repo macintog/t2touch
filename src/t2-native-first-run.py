@@ -46,7 +46,7 @@ def _owner_failure_detail(completed: object) -> str | None:
         return None
     detail = lines[-1].rsplit(": error: ", 1)[1]
     if not 0 < len(detail) <= 240 or re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9 ._:/()#,+='-]*", detail
+        r"[A-Za-z0-9][A-Za-z0-9 ._:/()#,+=';-]*", detail
     ) is None:
         return None
     return detail

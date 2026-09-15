@@ -13,6 +13,22 @@ wrote format-1 `EFMV`, cleared the one-byte `EFMS`, and committed `EFBS = 0x11`.
 It then polled `EFMS` within the recovered AppleEFI 40-second bound. A successful
 AKS capability response established that the application was ready afterward.
 
+A received byte is not itself readiness. The
+[VirtualSMC EFMS reference](https://github.com/acidanthera/VirtualSMC/blob/master/Docs/SMCKeys.txt)
+identifies 1 as `BootPolicyOk` and 3 as `BootPolicyReboot`. The installer accepts
+only 1 for proceeding to independent service readiness, reports 3 as requiring
+T2 boot-policy recovery, and blocks other outcomes. On a fresh Omarchy installation, the
+patched publisher was observed returning 3 after its first kernel restart;
+the response alone does not establish SEP app readiness. Private bridgeOS logs
+subsequently showed successful `StartVersionedApps` calls followed by a
+previous/current boot-volume UUID mismatch. The same bridgeOS boot session
+survived multiple Linux reboots. Neither a normal Linux reboot nor an ordinary
+poweroff cleared result 3 on that installation. A new Linux boot ID therefore
+does not prove that the T2 restarted or accepted the new OS identity. The
+operator then performed the documented physical SMC reset; the next Linux boot
+reported result 1. Installation testing exposed a separate replacement-attempt
+guard bug, so this policy result alone is not end-to-end qualification.
+
 An earlier raw endpoint-0 `0x22` attempt confused an internal bridgeOS selector
 path with an Intel mailbox command. The recovered `sepStartVersionedApps` caller
 uses AppleSEPManager selector `0x11` inside bridgeOS. It does not establish a

@@ -60,6 +60,16 @@ echo product-ready
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["product-ready"])
 
+    def test_firmware_reboot_reply_stops_without_replaying_or_staging(self):
+        for disk in (False, True):
+            with self.subTest(disk=disk):
+                result = self.run_gate("response-received:3", disk=disk)
+                self.assertEqual(result.returncode, 3)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("requests a system reboot", result.stderr)
+                self.assertIn("response-received:3", result.stderr)
+                self.assertIn("rather than repeatedly rebooting", result.stderr)
+
     def test_reinstall_restores_removed_disk_prerequisite_before_ready(self):
         result = self.run_gate("response-received:1", disk=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -88,6 +98,9 @@ echo product-ready
                 result = self.run_gate(state, disk=False)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
+                self.assertIn("installation stopped before product setup", result.stderr)
+                if state:
+                    self.assertIn(state, result.stderr)
 
     def test_reads_device_result_instead_of_enabled_parameter(self):
         with tempfile.TemporaryDirectory() as directory:
