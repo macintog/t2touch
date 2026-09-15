@@ -70,7 +70,9 @@ class FakeBackend:
             resolved_match_result() if self.verdict == "verify-match" else {}
         )
 
-    async def verify_fprint(self, _requested_finger, _live_feedback=None):
+    async def verify_fprint(self, _requested_finger, _live_feedback=None, **kwargs):
+        if _live_feedback:
+            _live_feedback({"event_kind": "match_armed"})
         return await self.verify()
 
     async def list_fingers(self):
@@ -84,6 +86,9 @@ class FakeBackend:
 
     async def cancel(self):
         self.cancel_count += 1
+
+    def schedule_feedback(self, _verdict):
+        pass
 
     def schedule_adaptive_sync(self):
         self.adaptive_sync_requests += 1
@@ -451,16 +456,42 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             device.enrolled_fingers,
             ("finger-1", "finger-2"),
         )
-        self.assertEqual(selected, ["any"])
+        self.assertEqual(selected, [])  # No readiness event from this backend.
         backend.runtime_projection.assert_awaited_once_with()
-        backend.verify_fprint.assert_awaited_once_with("finger-1", mock.ANY)
+        backend.verify_fprint.assert_awaited_once_with("finger-1", mock.ANY, projection=backend.projection)
+
+    async def test_list_then_verify_uses_presentation_once_for_same_caller(self):
+        backend = FakeBackend("verify-no-match")
+        backend.runtime_projection = AsyncMock(return_value=backend.projection)
+        device = make_device(backend)
+        await MODULE.FprintDevice.ListEnrolledFingers.__wrapped__(device, MODULE.LINUX_USER)
+        await claim(device)
+        await verify_start(device, "any")
+        await device.verify_task
+        backend.runtime_projection.assert_not_awaited()
+        await MODULE.FprintDevice.VerifyStop.__wrapped__(device)
+        await verify_start(device, "any")
+        await device.verify_task
+        backend.runtime_projection.assert_awaited_once()
+        await MODULE.FprintDevice.Release.__wrapped__(device)
+
+    async def test_another_callers_list_is_not_reused(self):
+        backend = FakeBackend("verify-no-match")
+        backend.runtime_projection = AsyncMock(return_value=backend.projection)
+        device = make_device(backend)
+        device.listed_presentation = (":1.other", ("finger-2",))
+        await claim(device)
+        await verify_start(device, "any")
+        await device.verify_task
+        backend.runtime_projection.assert_awaited_once()
+        await MODULE.FprintDevice.Release.__wrapped__(device)
 
     async def test_verification_publishes_waiting_and_terminal_properties(self):
         entered = asyncio.Event()
         finish = asyncio.Event()
 
         class LiveBackend(FakeBackend):
-            async def verify_fprint(self, _requested_finger, live_feedback=None):
+            async def verify_fprint(self, _requested_finger, live_feedback=None, **kwargs):
                 self.live_feedback = live_feedback
                 entered.set()
                 await finish.wait()
@@ -475,7 +506,12 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await verify_start(device, "any")
         await entered.wait()
         self.assertFalse(device.finger_needed)
+        self.assertFalse(device.verify_selection_sent)
+        selected = []
+        device.VerifyFingerSelected = selected.append
         backend.live_feedback({"event_kind": "match_armed"})
+        backend.live_feedback({"event_kind": "match_armed"})
+        self.assertEqual(selected, ["any"])
         self.assertTrue(device.finger_needed)
         backend.live_feedback(
             {"event_kind": "status", "status_semantics": "finger-present"}
@@ -576,6 +612,11 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
+        result = backend.verify_fprint.return_value
+        async def armed_match(_finger, feedback, **kwargs):
+            feedback({"event_kind": "match_armed"})
+            return result
+        backend.verify_fprint.side_effect = armed_match
         device = make_device(backend)
         emitted = []
         device.VerifyFingerSelected = lambda name: emitted.append(("finger", name))
@@ -790,7 +831,7 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
 
         class SlowBackend(FakeBackend):
-            async def verify_fprint(self, _requested_finger, _live_feedback=None):
+            async def verify_fprint(self, _requested_finger, _live_feedback=None, **kwargs):
                 started.set()
                 await asyncio.Event().wait()
 
@@ -1765,6 +1806,57 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         backend.verify.assert_awaited_once_with(
             target_finger=None, resolve_any_finger=True, live_feedback=None
         )
+
+    async def test_concurrent_inventory_reads_share_only_inflight_work(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.operation_lock = asyncio.Lock()
+        backend.inventory_task = None
+        release = asyncio.Event()
+        async def projection():
+            await release.wait()
+            return MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        backend.enrollment_projection = AsyncMock(side_effect=projection)
+        first = asyncio.create_task(backend.list_fingers())
+        second = asyncio.create_task(backend.list_fingers())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        release.set()
+        self.assertEqual(await second, ("finger-1",))
+        backend.enrollment_projection.assert_awaited_once()
+        self.assertEqual(await backend.list_fingers(), ("finger-1",))
+        self.assertEqual(backend.enrollment_projection.await_count, 2)
+
+    async def test_slow_audio_does_not_delay_match_result(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.runtime_authority = mock.Mock(return_value=mock.Mock(origin=MODULE.NATIVE_AUTHORITY))
+        backend._run_native_match = AsyncMock(return_value=resolved_match_result())
+        blocked = asyncio.Event()
+        async def slow_audio(_verdict):
+            await blocked.wait()
+        backend.notify_feedback = slow_audio
+        verdict, _ = await asyncio.wait_for(backend.verify(resolve_any_finger=True), 0.5)
+        self.assertEqual(verdict, "verify-match")
+        blocked.set()
+        await asyncio.gather(*tuple(backend.feedback_tasks))
+
+    async def test_prepared_projection_does_not_repeat_hardware_inventory(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.operation_lock = asyncio.Lock()
+        backend.runtime_projection = AsyncMock(side_effect=AssertionError("duplicate inventory"))
+        backend.verify = AsyncMock(return_value=("verify-match", {}))
+        view = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        await backend.verify_fprint("finger-1", projection=view)
+        backend.runtime_projection.assert_not_awaited()
+        backend.verify.assert_awaited_once_with(
+            target_finger=None, resolve_any_finger=True, live_feedback=None
+        )
+        backend.verify.reset_mock()
+        with self.assertRaises(RuntimeError):
+            await backend.verify_fprint("finger-2", projection=view)
+        backend.verify.assert_not_awaited()
 
     async def test_compatibility_transport_failure_is_never_replayed(self):
         with tempfile.TemporaryDirectory() as directory:

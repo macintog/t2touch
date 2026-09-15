@@ -36,7 +36,33 @@ Afterward, any enrolled finger can authenticate through:
 - the Omarchy lock screen
 - applications using the standard fprintd D-Bus API
 
-Your normal Linux password remains available as fallback.
+Your normal Linux password remains available as fallback. Sensor setup is not
+instant: wait for the placement prompt before touching. The service emits that
+prompt and the optional sound only once the reader is armed. On compatible
+Omarchy lock UI versions, the installer adds a preparation/placement message
+below the password field and wakes the panel once when the first prompt arrives.
+The graphical permission dialog also shows the preparation/placement message
+instead of hiding it behind a fingerprint icon.
+The password field remains available throughout. It also corrects the upstream
+check that mistakes “no fingers enrolled” for an enrolled fingerprint.
+
+This small QML integration preserves originals under
+`/var/lib/t2-touchid/omarchy-ui-backups/`. It checks all integration points before
+writing any of the three files and skips unfamiliar UI versions without changing them.
+Omarchy package updates may replace it; rerunning the installer reapplies it
+when compatible. The UI change takes effect at the next shell start/login.
+
+The Omarchy installer also installs a small UWSM environment drop-in for the
+next graphical login. When boot-framebuffer devices and a connected native DRM display exist,
+it excludes the boot framebuffer from Hyprland, preventing the observed crash
+when unlocking re-enabled a phantom display. It discovers device paths at each
+login, prefers a connected internal panel regardless of GPU vendor, then other
+connected displays, retains the remaining native GPUs, and
+preserves an explicit `AQ_DRM_DEVICES` selection. Native-only and
+framebuffer-only systems, and native GPUs without connected displays keep
+Hyprland's default selection. Remove
+`~/.config/uwsm/env-hyprland.d/20-t2touch-drm-devices.sh` to undo this part
+(or the corresponding path under `XDG_CONFIG_HOME`).
 
 ## Everyday commands
 
@@ -146,7 +172,10 @@ The uninstaller stops the userspace integration in the current session and
 does not require a reboot. A transport already pinned by SEP remains safely
 resident but is disabled for future kernel starts. The uninstaller
 intentionally preserves the private authority and fingerprint state so
-reinstall remains possible.
+reinstall remains possible. The current uninstaller leaves the Omarchy QML
+changes and user UWSM snippet in place; follow the
+[desktop rollback steps](docs/TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration)
+to remove those as well.
 
 ## What has been proven
 
@@ -161,6 +190,9 @@ userspace reinstall also completed without a reboot or hardware unbind.
 
 The public claim is intentionally narrower than broad hardware support: this
 remains a single-model proof of concept until other T2 Macs reproduce it.
+[Graphical validation](docs/GRAPHICAL_AUTH_VALIDATION.md) records the actual
+lock and permission-dialog results, the approximately 48% reduction in measured
+reader preparation time, and the remaining retry and hardware limits.
 
 Architecture, protocol provenance, and security boundaries are documented in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The small reusable protocol

@@ -12,6 +12,9 @@ The [README](README.md#what-has-been-proven) describes the tested scope.
 - Five stable neutral slots, lowest-vacancy allocation, and named deletion through an empty inventory.
 - Password fallback, reversible PAM installation, and private-state preservation on uninstall.
 - Same-session userspace reinstall when the resident transport matches.
+- Readiness messages in compatible Omarchy lock and permission dialogs.
+- Dynamic native DRM selection when a fallback framebuffer would otherwise be included.
+- Reduced redundant inventory work: measured reader readiness improved from about 7.3 to 3.8 seconds on the reference laptop.
 
 The applesmc prerequisite needs one restart when absent. A different resident
 transport requires a planned kernel restart before installation can proceed.
@@ -25,6 +28,10 @@ transport requires a planned kernel restart before installation can proceed.
 - Multiple Linux desktop users.
 - Graphical settings integration and deep-sleep recovery.
 - Kernel-upgrade coverage through DKMS CI and real hardware.
+- Faster, more consistent permission-dialog response; the latest successful test still needed multiple touches.
+- Qualification across display topologies and future Omarchy QML versions.
+- Automatic rollback/removal of the optional desktop changes during uninstall.
+- An untouched final-source clone/install/enroll replay and broader upgrade coverage.
 
 Batch delete-all and private-state purge are not exposed. Broader support or a
 release tag does not follow from the single-machine demonstration alone.

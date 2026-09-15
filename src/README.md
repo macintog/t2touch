@@ -1,5 +1,11 @@
 # T2 SEP staged transport
 
+This file retains low-level interfaces and the staged research history. For the
+installed product, use [architecture](../docs/ARCHITECTURE.md) and the current
+[fprintd contract](../docs/FPRINT_INTEGRATION.md). Historical different-boot
+procedures and default-off research gates are not the normal install sequence;
+the installed unit enables its authorized enrollment and named-deletion workers.
+
 This module is the write-capable successor to `t2-sep-probe`, but defaults to
 observation-only behavior. In its default mode it claims PCI function
 `106b:1802`, maps BAR4, and reads the two mailbox status registers. It performs
@@ -705,12 +711,13 @@ projection. It is diagnostic-only and cannot rename, enroll, or delete.
 strictly parses only the redacted projection schema. A complete projection
 lists all neutral handles. `any` and an existing numbered request both become
 an all-identities match; the numbered value only proves that the client's
-presentation handle is current. The fprintd facade refreshes this projection
-for every list and verify transaction and resolves a successful match to the
-actual neutral `VerifyFingerMatched` handle. After returning the `VerifyStart`
-reply, it emits the ABI-defined `VerifyFingerSelected("any")` instruction
-before capture so PAM never claims that a particular physical finger is
-required. Pre-match reconciliation and
+presentation handle exists in the supplied projection. The facade may consume
+the same caller’s list projection once for the next verification and coalesce
+only currently running inventory reads. Native authority is independently
+reconciled for every match. It resolves success to the actual neutral
+`VerifyFingerMatched` handle. After returning `VerifyStart`, it emits
+`VerifyFingerSelected("any")` on `match_armed`, so the placement prompt reflects
+reader readiness and never claims a particular physical finger is required. Pre-match reconciliation and
 post-match unchanged-state attestation remain mandatory.
 
 ### Identity-resolution authority
@@ -1113,6 +1120,11 @@ reconciled local/SEP identity, and matched independently through fprintd. Any
 next live attempt remains explicitly operator-gated.
 
 ## Native fprint enrollment and deletion (staged)
+
+The research gates described here remain separate from the installed service,
+which enables both worker clients. Current installed completion, authorization,
+and deletion recovery are specified in
+[FPRINT_INTEGRATION.md](../docs/FPRINT_INTEGRATION.md).
 
 The fprint enrollment consumer treats the canonical projection above as a
 mutation boundary as well as presentation. Under the worker's owned operation

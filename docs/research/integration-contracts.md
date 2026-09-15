@@ -74,3 +74,27 @@ Keep recoverable PAM configuration when installing authentication changes.
 The [T1 research reference](artifacts-and-method.md#research-credits) informed
 these lifecycle principles. T2 credential representations, request layouts,
 and hardware evidence remain specific to the T2 implementation.
+
+## Graphical readiness and performance
+
+A placement prompt must follow actual sensor readiness, not merely the start of
+an asynchronous verification task. Keep preparation and retry messages visible,
+and run optional sounds outside the authentication path. In t2touch, the
+`match_armed` event supplies the readiness signal; UI feedback never authorizes
+a match.
+
+Avoid collecting the same presentation inventory repeatedly within one client's
+list/verify sequence. A single-use projection may reduce that work, and concurrent
+requests may share a running read, while native matching still reconciles current
+private authority and attests the result afterward. Never turn this optimization
+into a cached match verdict, credential, or stale cross-client authority.
+
+Authorize a fingerprint deletion before acquiring the reader or its global
+operation lock. Otherwise the authorization dialog can wait for a reader already
+held by the operation it is trying to approve.
+
+Test the whole graphical transition: authentication must return to a responsive
+desktop, and failure must leave password fallback and recovery usable. Device
+selection must follow connected displays and explicit user configuration, not
+fixed card numbers or a preferred GPU vendor. These are integration duties;
+the three mini codecs/storage modules implement none of this desktop policy.

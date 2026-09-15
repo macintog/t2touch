@@ -277,10 +277,12 @@ class T2Backend:
         self.catacomb_root = Path("/var/lib/t2-touchid/catacomb")
         self.process: asyncio.subprocess.Process | None = None
         self.operation_lock = asyncio.Lock()
+        self.inventory_task: asyncio.Task | None = None
         if type(auto_sync_adaptive) is not bool:
             raise RuntimeError("adaptive Catacomb sync activation is invalid")
         self.auto_sync_adaptive = auto_sync_adaptive
         self.adaptive_sync_tasks: set[asyncio.Task] = set()
+        self.feedback_tasks: set[asyncio.Task] = set()
         self.port: int | None = None
         self.port_from_cache = False
         port_file = Path(
@@ -364,6 +366,16 @@ class T2Backend:
             return t2_fprint_runtime.RuntimeProjection((), 0, True)
 
     async def list_fingers(self) -> tuple[str, ...]:
+        # The lock UI and PAM can ask together. Share only a currently running
+        # read, never a completed inventory or an authentication result.
+        if self.inventory_task is None or self.inventory_task.done():
+            self.inventory_task = asyncio.create_task(self._collect_fingers())
+            self.inventory_task.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+        return await asyncio.shield(self.inventory_task)
+
+    async def _collect_fingers(self) -> tuple[str, ...]:
         async with self.operation_lock:
             return (await self.enrollment_projection()).listed_fingers
 
@@ -484,20 +496,25 @@ class T2Backend:
         live_feedback: Callable[[dict], None] | None,
     ) -> bytes:
         captured = bytearray()
+        cue_sent = False
         prefix = b"T2_MATCH_EVENT "
         while True:
             line = await stream.readline()
             if not line:
                 return bytes(captured)
             captured.extend(line)
-            if live_feedback is None or not line.startswith(prefix):
+            if not line.startswith(prefix):
                 continue
             try:
                 event = json.loads(line[len(prefix) :])
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
             if isinstance(event, dict):
-                live_feedback(event)
+                if live_feedback is not None:
+                    live_feedback(event)
+                if event.get("event_kind") == "match_armed" and not cue_sent:
+                    cue_sent = True
+                    self.schedule_feedback("ready")
 
     async def _run_native_match(
         self,
@@ -564,7 +581,6 @@ class T2Backend:
     ) -> tuple[str, dict]:
         if target_finger is not None and resolve_any_finger:
             raise RuntimeError("named and resolved-any matching conflict")
-        await self.notify_finger_requested()
         authority = self.runtime_authority()
         if authority.origin == NATIVE_AUTHORITY:
             result = await self._run_native_match(
@@ -586,17 +602,28 @@ class T2Backend:
             )
         else:
             verdict = verdict_from_result(result, target_finger)
-        await self.notify_feedback(verdict)
+        self.schedule_feedback(verdict)
         return verdict, result
 
     async def verify_fprint(
         self,
         requested_finger: str,
         live_feedback: Callable[[dict], None] | None = None,
+        *,
+        projection: t2_fprint_runtime.RuntimeProjection | None = None,
     ) -> tuple[str, dict]:
-        """Resolve presentation afresh, then let the probe resolve authority."""
+        """Validate presentation once per request; the probe resolves authority.
+
+        VerifyStart supplies the caller's request-local presentation. This is not an
+        authentication cache: native matching still reconciles live identities
+        and authorizes the current user under the hardware operation lock.
+        Standalone callers collect their own fresh projection.
+        """
         async with self.operation_lock:
-            view = await self.runtime_projection()
+            view = (
+                projection if projection is not None
+                else await self.runtime_projection()
+            )
             try:
                 request = t2_fprint_runtime.resolve_match(
                     view, requested_finger
@@ -648,6 +675,22 @@ class T2Backend:
         self.adaptive_sync_tasks.add(task)
         task.add_done_callback(self.adaptive_sync_tasks.discard)
         task.add_done_callback(self._consume_adaptive_sync_task)
+
+    def schedule_feedback(self, verdict: str) -> None:
+        """Keep bounded desktop audio outside the authentication critical path."""
+        if not hasattr(self, "feedback_tasks"):
+            self.feedback_tasks = set()
+        coroutine = (
+            self.notify_finger_requested() if verdict == "ready"
+            else self.notify_feedback(verdict)
+        )
+        task = asyncio.create_task(coroutine)
+        self.feedback_tasks.add(task)
+        def finished(completed):
+            self.feedback_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()  # Best-effort feedback cannot fail auth.
+        task.add_done_callback(finished)
 
     async def notify_feedback(self, verdict: str) -> None:
         unit = (
@@ -745,6 +788,8 @@ class FprintDevice(ServiceInterface):
         self.claimed_caller: t2_dbus_identity.PinnedDBusCaller | None = None
         self.claimed_evidence: t2_fprint_claim.ClaimEvidence | None = None
         self.verify_task: asyncio.Task | None = None
+        self.verify_selection_sent = False
+        self.listed_presentation = None
         self.delete_task: asyncio.Task | None = None
         self.claim_expiry_task: asyncio.Task | None = None
         self.enrolled_fingers: tuple[str, ...] = ()
@@ -907,6 +952,7 @@ class FprintDevice(ServiceInterface):
             )
 
     def _clear_claim(self) -> None:
+        self.listed_presentation = None
         caller = self.claimed_caller
         self.claimed_user = None
         self.claimed_sender = None
@@ -962,6 +1008,7 @@ class FprintDevice(ServiceInterface):
 
     @method()
     async def ListEnrolledFingers(self, username: "s") -> "as":
+        self.listed_presentation = None
         requested = username or LINUX_USER
         if requested not in ALLOWED_PAM_USERS:
             raise DBusError(f"{FPRINT_ERROR}.PermissionDenied", "unknown user")
@@ -976,6 +1023,9 @@ class FprintDevice(ServiceInterface):
                 f"{FPRINT_ERROR}.NoEnrolledPrints",
                 "no fingerprints are enrolled",
             )
+        # Reuse this caller's presentation list once in its next VerifyStart.
+        # This never replaces the native match's live authority/reconciliation.
+        self.listed_presentation = (current_dbus_sender(), self.enrolled_fingers)
         return list(self.enrolled_fingers)
 
     @method()
@@ -1010,8 +1060,14 @@ class FprintDevice(ServiceInterface):
         self.verify_task = current_task
         started = False
         try:
-            async with self.backend.operation_lock:
-                view = await self.backend.runtime_projection()
+            listed = self.listed_presentation
+            self.listed_presentation = None
+            if listed is not None and listed[0] == self.claimed_sender:
+                names = tuple(listed[1])
+                view = t2_fprint_runtime.RuntimeProjection(names, len(names), True)
+            else:
+                async with self.backend.operation_lock:
+                    view = await self.backend.runtime_projection()
             self._require_claim_owner()
             if self.verify_task is not current_task:
                 raise RuntimeError("verification task binding changed")
@@ -1039,9 +1095,10 @@ class FprintDevice(ServiceInterface):
                     "finger is not enrolled",
                 ) from error
             operation = asyncio.create_task(
-                self._run_verification(finger_name)
+                self._run_verification(finger_name, view)
             )
             self.verify_task = operation
+            self.verify_selection_sent = False
             # VerifyStart only schedules the backend. Native activation and
             # projection still run before Mesa accepts a touch, so publishing
             # finger-needed here hands the operator a false-ready prompt.
@@ -1068,7 +1125,9 @@ class FprintDevice(ServiceInterface):
         finally:
             self._arm_unstarted_claim_expiry(replace=True)
 
-    async def _run_verification(self, requested_finger: str) -> None:
+    async def _run_verification(
+        self, requested_finger: str, projection: t2_fprint_runtime.RuntimeProjection
+    ) -> None:
         current_task = asyncio.current_task()
         try:
             # dbus-next sends an async method's reply from the completed
@@ -1080,9 +1139,8 @@ class FprintDevice(ServiceInterface):
             # authentication, regardless of which numbered handle a client
             # supplied, and the exact match is reported only after capture.
             await asyncio.sleep(0)
-            self.VerifyFingerSelected("any")
             verdict, result = await self.backend.verify_fprint(
-                requested_finger, self._live_verify_event
+                requested_finger, self._live_verify_event, projection=projection
             )
             if verdict == "verify-match":
                 selected = resolved_any_finger_from_result(result)
@@ -1109,7 +1167,7 @@ class FprintDevice(ServiceInterface):
                 f"{public_verification_failure(error)}",
                 flush=True,
             )
-            await self.backend.notify_feedback("verify-unknown-error")
+            self.backend.schedule_feedback("verify-unknown-error")
             self.VerifyStatus("verify-unknown-error", True)
         finally:
             self._set_finger_state(False, False)
@@ -1124,6 +1182,11 @@ class FprintDevice(ServiceInterface):
     def _live_verify_event(self, event: dict) -> None:
         """Expose only nonterminal placement feedback from an untrusted stream."""
         if event.get("event_kind") == "match_armed":
+            # PAM's placement prompt must follow actual sensor readiness,
+            # not merely scheduling activation and transport setup.
+            if not self.verify_selection_sent:
+                self.verify_selection_sent = True
+                self.VerifyFingerSelected("any")
             self._set_finger_state(False, True)
             return
         semantics = event.get("status_semantics")
@@ -1214,6 +1277,7 @@ class FprintDevice(ServiceInterface):
 
     @method()
     async def EnrollStart(self, finger_name: "s"):
+        self.listed_presentation = None
         self._require_claim_owner()
         client = self.enrollment_client
         if client is None:
@@ -1384,6 +1448,7 @@ class FprintDevice(ServiceInterface):
 
     @method()
     async def DeleteEnrolledFinger(self, finger_name: "s"):
+        self.listed_presentation = None
         self._require_claim_owner()
         client = self.deletion_client
         if client is None:
