@@ -157,6 +157,10 @@ def _load_biolockout(
         output = b"" if len(reply) == 1 else reply[1]
         if wire.is_biometric_nil_output(output):
             output = b""
+        if type(output) is not bytes:
+            raise NativeStateRestoreError(
+                "BioLockout load output is malformed"
+            )
         if output:
             raise NativeStateRestoreError(
                 "BioLockout load returned unexpected output"
