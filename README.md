@@ -145,6 +145,33 @@ for the system changes it owns.
 The quick-start path creates a Linux-owned authority only when the T2 has no
 existing fingerprint authority. It refuses to overwrite an existing one.
 
+This also covers an identity retained after booting another Linux volume. The
+fingerprint template on the T2 is cryptographically tied to that volume's
+keybag, activation material, and Catacomb state, so a fresh installation cannot
+adopt the template from sensor state alone. It reports a foreign live authority
+and keeps both sides unchanged. Reuse requires an explicit migration of the
+complete private authority followed by native account rebinding and live
+validation.
+
+For another t2touch Linux installation, copy its complete root-private
+`/var/lib/t2-touchid` directory while both installations' fingerprint services
+are stopped, retaining the destination directory as a backup. Then bind the
+intact authority to the destination account without rewriting its protected
+history:
+
+```bash
+sudo t2-native-authority-rebind --linux-uid 1000 \
+  --acknowledge-complete-native-authority-migration
+sudo systemctl start t2-native-first-run.service \
+  t2-biometric-ready.service t2-touchid-post-reboot.service fprintd.service
+sudo t2-touchid-doctor
+```
+
+The rebind command accepts no identity or digest from the command line. It
+derives the current local account, validates the imported mapping and complete
+post-reboot enrollment authority, and publishes one root-private binding. A
+missing keybag, authority journal, or mapping lineage stops the rebind.
+
 Compatibility code for machines retaining macOS Touch ID state is preserved,
 but this release does not yet provide a supported end-user migration command.
 It refuses the Linux-native first-run rather than overwrite that authority.

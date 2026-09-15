@@ -29,6 +29,7 @@ CHILD_FAILURE_REASONS = {
     b"t2-touchid-manage: selected user Catacomb load did not succeed": "restore-user-load-rejected",
     b"t2-touchid-manage: SEP Catacomb is not clean after the external deletion": "external-catacomb-not-clean",
     b"t2-touchid-manage: local and live identity inventories disagree": "inventory-mismatch",
+    b"t2-touchid-manage: live T2 authority belongs to another installation": "foreign-live-authority",
 }
 
 

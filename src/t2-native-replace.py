@@ -158,7 +158,9 @@ def _require_consumers_gated() -> None:
 
 
 def _original_authority(
-    linux_uid: int, apple_uid: int, account_generation: str
+    linux_uid: int,
+    apple_uid: int,
+    account: t2_linux_account.AccountEvidence,
 ) -> tuple[t2_aks_provisioning.ProvisioningHistory, t2_user_mapping.UserMappingSet]:
     provisioning = t2_aks_provisioning.read(PROVISIONING_JOURNAL)
     if provisioning.phase != "mapping-enabled":
@@ -173,7 +175,7 @@ def _original_authority(
         not old.enabled
         or old.linux_uid != linux_uid
         or old.apple_uid != apple_uid
-        or old.linux_account_generation != account_generation
+        or not account.matches_generation(old.linux_account_generation)
         or old.account_uuid != provisioning.account_uuid
         or old.bag_uuid != provisioning.bag_uuid
         or old.keybag_sha256 != provisioning.saved_keybag_sha256
@@ -327,24 +329,37 @@ def _archive_abandoned_journal(history: t2_aks_replacement_journal.AKSReplacemen
             os.close(descriptor)
 
 
-def _common() -> tuple[int, int, str]:
+def _common() -> tuple[int, int, t2_linux_account.AccountEvidence]:
     if os.geteuid() != 0:
         raise NativeReplacementError("native identity replacement must run as root")
     linux_uid, apple_uid = _configuration()
-    account_generation = t2_linux_account.collect(linux_uid).generation
+    account = t2_linux_account.collect(linux_uid)
     _require_private_directory(STATE_ROOT, "native state root")
     _require_private_directory(ARCHIVE_ROOT, "replacement archive root")
     _require_consumers_gated()
-    return linux_uid, apple_uid, account_generation
+    return linux_uid, apple_uid, account
+
+
+def _mapped_account_generation(
+    linux_uid: int, account: t2_linux_account.AccountEvidence
+) -> str:
+    mappings = t2_user_mapping.load(MAPPING)
+    selected = [item for item in mappings.mappings if item.linux_uid == linux_uid]
+    if len(selected) != 1 or not account.matches_generation(
+        selected[0].linux_account_generation
+    ):
+        raise NativeReplacementError("replacement Linux account generation changed")
+    return selected[0].linux_account_generation
 
 
 def _start(credential_fd: int) -> t2_aks_replacement_journal.AKSReplacementHistory:
     if os.path.lexists(REPLACEMENT_JOURNAL):
         raise NativeReplacementError("a replacement journal already exists; reconcile it")
-    linux_uid, apple_uid, account_generation = _common()
+    linux_uid, apple_uid, account = _common()
     provisioning, mappings = _original_authority(
-        linux_uid, apple_uid, account_generation
+        linux_uid, apple_uid, account
     )
+    account_generation = mappings.mappings[0].linux_account_generation
     credential = _read_secret(credential_fd)
     operation_id = str(uuid.uuid4())
     new_account_uuid = str(uuid.uuid4())
@@ -410,8 +425,9 @@ def _start(credential_fd: int) -> t2_aks_replacement_journal.AKSReplacementHisto
 
 
 def _resume() -> t2_aks_replacement_journal.AKSReplacementHistory:
-    linux_uid, apple_uid, account_generation = _common()
+    linux_uid, apple_uid, account = _common()
     history = t2_aks_replacement_journal.read(REPLACEMENT_JOURNAL)
+    account_generation = _mapped_account_generation(linux_uid, account)
     _require_journal_authority(
         history, linux_uid, apple_uid, account_generation
     )

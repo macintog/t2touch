@@ -350,6 +350,10 @@ def _authorize_native_management(
             now=now,
         ),
     )
+    if decision.readiness_state == "alias-binding-mismatch":
+        raise IdentityManagementError(
+            "live T2 authority belongs to another installation"
+        )
     if decision.state not in {"authorized", "activation-authorized"}:
         raise IdentityManagementError(
             "Linux-native identity management was not authorized"

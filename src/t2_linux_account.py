@@ -29,7 +29,7 @@ import re
 import stat
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -77,6 +77,30 @@ class AccountEvidence:
     source: str = "local-files-v2"
     protected_password_record: bool = True
     home_object_bound: bool = True
+    compatible_generations: frozenset[str] = field(
+        default_factory=frozenset,
+        repr=False,
+        compare=False,
+    )
+
+    def matches_generation(self, generation: str) -> bool:
+        """Match a supported filesystem encoding or explicit migration binding."""
+
+        return generation == self.generation or generation in self.compatible_generations
+
+    def generations_are_valid(self) -> bool:
+        if not isinstance(self.compatible_generations, frozenset):
+            return False
+        generations = {self.generation, *self.compatible_generations}
+        return (
+            len(generations) == 1 + len(self.compatible_generations)
+            and all(
+                isinstance(value, str)
+                and len(value) == 64
+                and all(character in "0123456789abcdef" for character in value)
+                for value in generations
+            )
+        )
 
     def redacted(self) -> dict[str, object]:
         return {
@@ -115,6 +139,11 @@ class _HomeIdentity:
     inode: int
     birth_time_sec: int
     birth_time_nsec: int
+    compatible_filesystem_ids: frozenset[int] = field(
+        default_factory=frozenset,
+        repr=False,
+        compare=False,
+    )
 
 
 def _btrfs_filesystem_id(descriptor: int) -> int | None:
@@ -405,6 +434,14 @@ def _statx_home_identity(
     device_minor = struct.unpack_from("=I", raw, 140)[0]
     required = STATX_BASIC_STATS | STATX_BTIME
     filesystem_id = _stable_filesystem_id(descriptor)
+    try:
+        runtime_filesystem_id = os.fstatvfs(descriptor).f_fsid
+    except (AttributeError, OSError) as error:
+        raise LinuxAccountError(
+            "runtime home filesystem identity is unavailable"
+        ) from error
+    if type(runtime_filesystem_id) is not int or runtime_filesystem_id == 0:
+        raise LinuxAccountError("runtime home filesystem identity is unavailable")
     if (
         mask & required != required
         or statx_uid != info.st_uid
@@ -421,6 +458,7 @@ def _statx_home_identity(
         int(info.st_ino),
         birth_sec,
         birth_nsec,
+        frozenset({runtime_filesystem_id} - {filesystem_id}),
     )
 
 
@@ -523,7 +561,33 @@ def collect(
     _nss_matches(second_passwd, uid, resolver)
     if first_passwd != second_passwd or first_shadow != second_shadow:
         raise LinuxAccountError("local account changed during assertion")
-    return AccountEvidence(
-        uid,
-        _generation(uid, second_passwd, second_shadow, home),
+    generation = _generation(uid, second_passwd, second_shadow, home)
+    compatible_generations = frozenset(
+        _generation(
+            uid,
+            second_passwd,
+            second_shadow,
+            _HomeIdentity(
+                filesystem_id,
+                home.inode,
+                home.birth_time_sec,
+                home.birth_time_nsec,
+            ),
+        )
+        for filesystem_id in home.compatible_filesystem_ids
     )
+    try:
+        import t2_native_account_rebind
+
+        migrated_generation = t2_native_account_rebind.resolve(
+            uid, generation
+        )
+    except (ImportError, RuntimeError) as error:
+        raise LinuxAccountError(
+            "native account migration binding is invalid"
+        ) from error
+    if migrated_generation is not None:
+        compatible_generations = frozenset(
+            (*compatible_generations, migrated_generation)
+        )
+    return AccountEvidence(uid, generation, compatible_generations=compatible_generations)

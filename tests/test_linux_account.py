@@ -15,6 +15,7 @@ from unittest import mock
 SOURCE = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
 import t2_linux_account as account
+import t2_native_account_rebind as native_rebind
 
 
 class LocalAccountTests(unittest.TestCase):
@@ -148,6 +149,42 @@ class LocalAccountTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(account._stable_filesystem_id(3), 1234)
+
+    def test_runtime_btrfs_generation_remains_compatible(self):
+        canonical_home = account._HomeIdentity(
+            66, 77, 88, 99, frozenset({67})
+        )
+        with mock.patch.object(
+            account, "_home_identity", return_value=canonical_home
+        ):
+            evidence = self.collect()
+        passwd = account._passwd_snapshot(self.passwd, self.uid)
+        shadow = account._shadow_record_digest(self.shadow, passwd.name)
+        legacy = account._generation(
+            self.uid,
+            passwd,
+            shadow,
+            account._HomeIdentity(67, 77, 88, 99),
+        )
+        self.assertNotEqual(evidence.generation, legacy)
+        self.assertTrue(evidence.matches_generation(legacy))
+        self.assertTrue(evidence.generations_are_valid())
+
+    def test_explicit_native_migration_generation_remains_compatible(self):
+        migrated = "f" * 64
+        with mock.patch.object(
+            native_rebind, "resolve", return_value=migrated
+        ) as resolver:
+            evidence = self.collect()
+        resolver.assert_called_once_with(self.uid, evidence.generation)
+        self.assertTrue(evidence.matches_generation(migrated))
+        self.assertTrue(evidence.generations_are_valid())
+
+    def test_invalid_compatible_generation_container_is_rejected(self):
+        evidence = account.AccountEvidence(
+            self.uid, "a" * 64, compatible_generations=["b" * 64]
+        )
+        self.assertFalse(evidence.generations_are_valid())
 
     def test_target_password_change_changes_generation(self):
         before = self.collect().generation

@@ -133,6 +133,7 @@ def validate_account(
         or value.source != "local-files-v2"
         or value.protected_password_record is not True
         or value.home_object_bound is not True
+        or not value.generations_are_valid()
     ):
         raise IPCSessionError("Linux account collector returned invalid evidence")
     try:
@@ -632,9 +633,25 @@ class AuthorizationSession:
         self._backend = backend
         self._session = session
         self._account = account
+        self._collected_account = account
         self._account_collector = account_collector
         self._closed = False
         self.caller = session.caller(account.generation, peer.subject.uid)
+
+    def bind_account_generation(self, generation: str) -> None:
+        """Use a compatible protected-mapping generation for this session."""
+
+        if not self._collected_account.matches_generation(generation):
+            raise IPCSessionError("authorization account generation is incompatible")
+        self._account = t2_linux_account.AccountEvidence(
+            self._collected_account.linux_uid,
+            generation,
+            self._collected_account.source,
+            self._collected_account.protected_password_record,
+            self._collected_account.home_object_bound,
+            self._collected_account.compatible_generations,
+        )
+        self.caller = self._session.caller(generation, self._peer.subject.uid)
 
     @classmethod
     def from_peer(
@@ -730,7 +747,7 @@ class AuthorizationSession:
             )
         except t2_linux_account.LinuxAccountError as error:
             raise IPCSessionError("Linux account revalidation failed") from error
-        if current_account != self._account:
+        if current_account != self._collected_account:
             raise IPCSessionError("Linux account changed during authorization")
 
     def collect(

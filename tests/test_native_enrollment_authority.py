@@ -651,7 +651,9 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                 mock.patch.object(
                     native_enroll.t2_linux_account,
                     "collect",
-                    return_value=SimpleNamespace(generation=account_generation),
+                    return_value=native_enroll.t2_linux_account.AccountEvidence(
+                        linux_uid, account_generation
+                    ),
                 ),
                 mock.patch.object(
                     native_enroll.t2_aks_provisioning,

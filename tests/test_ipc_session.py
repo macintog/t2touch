@@ -358,6 +358,29 @@ class IPCSessionTests(unittest.TestCase):
         with self.assertRaises(OSError):
             fcntl.fcntl(descriptor, fcntl.F_GETFD)
 
+    def test_authorization_session_binds_compatible_mapping_generation(self):
+        backend = FakeBackend()
+        canonical = "c" * 64
+        legacy = "a" * 64
+
+        def account_collector(uid):
+            return linux_account.AccountEvidence(
+                uid,
+                canonical,
+                compatible_generations=frozenset({legacy}),
+            )
+
+        session = ipc.AuthorizationSession.from_socket(
+            self.left,
+            backend=backend,
+            account_collector=account_collector,
+        )
+        with session:
+            session.bind_account_generation(legacy)
+            self.assertEqual(session.account.generation, legacy)
+            self.assertEqual(session.caller.linux_account_generation, legacy)
+            session.revalidate()
+
     def test_authorization_session_rejects_cross_uid_claim(self):
         peer = ipc.PinnedPeer.from_socket(self.left)
         descriptor = peer.pidfd

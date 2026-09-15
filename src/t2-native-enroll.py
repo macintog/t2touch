@@ -211,7 +211,7 @@ def _load_provisioned_authority(
         raise NativeEnrollmentError(
             "protected Linux-native mapping authority does not reconcile"
         )
-    if selected.linux_account_generation != account.generation:
+    if not account.matches_generation(selected.linux_account_generation):
         raise NativeEnrollmentError(
             "selected Linux account generation changed; explicit disabled "
             "rebinding and live reconciliation are required"
@@ -296,7 +296,7 @@ def _load_provisioned_authority(
         "replacement_head_hash": replacement.head_hash,
         "replacement_initial_linux_boot_uuid": replacement.initial_linux_boot_uuid,
         "replacement_final_linux_boot_uuid": final_replacement_boot,
-        "linux_account_generation": account.generation,
+        "linux_account_generation": selected.linux_account_generation,
         "target_linux_uid": linux_uid,
         "apple_uid": apple_uid,
         "account_uuid": replacement.new_account_uuid,
