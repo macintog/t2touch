@@ -6,6 +6,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Build the bundled `applesmc-t2touch` prerequisite against the MacBookPro15,2
+  test system's 6.19.11 T2 kernel headers by replacing unavailable
+  `kzalloc_objs` calls with equivalent `kcalloc` allocations.
+
 ## 0.0.5 - 2026-09-15
 
 ### Added
