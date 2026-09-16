@@ -131,6 +131,22 @@ int main(void)
 	assert(handle == 9);
 	assert(t2_aks_unload_keybag_request_matches(
 		runtime_request, 16, 1, 3));
+	/* First-run creation uses a random 64-bit session. Its cleanup must
+	 * release only that exact owned handle; normal loading still uses 1. */
+	put_le64(runtime_request + 4, UINT64_C(0x123456789abcdef0));
+	assert(t2_aks_unload_keybag_request_matches(
+		runtime_request, 16, UINT64_C(0x123456789abcdef0), 3));
+	assert(!t2_aks_unload_keybag_request_matches(
+		runtime_request, 16, UINT64_C(0x123456789abcdef1), 3));
+	assert(!t2_aks_unload_keybag_request_matches(
+		runtime_request, 16, UINT64_C(0x123456789abcdef0), 4));
+	assert(!t2_aks_unload_keybag_request_matches(
+		runtime_request, 15, UINT64_C(0x123456789abcdef0), 3));
+	put_le32(runtime_request, 1);
+	put_le32(runtime_request, 0);
+	put_le64(runtime_request + 4, 0);
+	assert(!t2_aks_unload_keybag_request_matches(
+		runtime_request, 16, 0, 3));
 
 	memset(runtime_request, 0, sizeof(runtime_request));
 	put_le64(runtime_request + 4, 1);

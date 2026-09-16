@@ -101,7 +101,8 @@ t2_aks_unload_keybag_request_matches(const t2_aks_wire_u8 *request,
 				     t2_aks_wire_u64 session,
 				     t2_aks_wire_u32 handle)
 {
-	return request && length == 16 && session == 1 && handle &&
+	/* Match the kernel-owned session: creation/recovery need not use 1. */
+	return request && length == 16 && session && handle &&
 	       t2_aks_wire_get_le32(request) == 0 &&
 	       t2_aks_wire_get_le64(request + 4) == session &&
 	       t2_aks_wire_get_le32(request + 12) == handle;

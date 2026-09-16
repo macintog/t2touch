@@ -11,6 +11,77 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AKSToolTests(unittest.TestCase):
+    def test_recovery_open_passes_both_kernel_admission_layers(self) -> None:
+        # Compile the actual dispatch and runtime preflight blocks. A mock of
+        # userspace's exchange misses a kernel rejection before SEP dispatch.
+        kernel = (ROOT / "src/t2_sep_transport.c").read_text()
+        dispatch = kernel.split("\tif (operation == 0x03 &&", 1)[1].split(
+            "\tif (operation == 0x04 &&", 1
+        )[0]
+        preflight = kernel.split("static int t2_aks_runtime_preflight_locked", 1)[1]
+        load = preflight.split("\tcase 0x03:", 1)[1].split("\tcase 0x05:", 1)[0]
+        harness = r'''
+#include <assert.h>
+#include <errno.h>
+#include "t2_aks_protocol.h"
+typedef uint8_t u8;
+enum { T2_AKS_REPLACEMENT_PHASE_NONE = 0,
+       T2_AKS_REPLACEMENT_PHASE_RECOVER = 3 };
+struct owner {
+    int aks_replacement_phase;
+    uint64_t aks_replacement_session;
+    uint8_t aks_replacement_new_uuid[16];
+    bool aks_runtime_poisoned, aks_runtime_handle_active;
+};
+static int dispatch(struct owner *sep, u8 operation,
+                    const u8 *request_body, size_t request_body_length) {
+''' + "\tif (operation == 0x03 &&" + dispatch + r'''
+    return 0;
+}
+static int preflight(struct owner *sep, const u8 *request, size_t request_length) {
+''' + load + r'''
+}
+int main(void) {
+    struct owner owner = {0};
+    uint8_t request[32] = {0};
+    owner.aks_replacement_phase = T2_AKS_REPLACEMENT_PHASE_RECOVER;
+    owner.aks_replacement_session = 7;
+    owner.aks_replacement_new_uuid[0] = 42;
+    request[4] = 7; request[12] = 16; request[16] = 42;
+    assert(dispatch(&owner, 3, request, 32) == 0);
+    assert(preflight(&owner, request, 32) == 0);
+    request[4] = 8;
+    assert(dispatch(&owner, 3, request, 32) == -EACCES);
+    assert(preflight(&owner, request, 32) == -EACCES);
+    request[4] = 7; request[16] = 43;
+    assert(dispatch(&owner, 3, request, 32) == -EACCES);
+    assert(preflight(&owner, request, 32) == -EACCES);
+    request[16] = 42;
+    owner.aks_replacement_phase = T2_AKS_REPLACEMENT_PHASE_NONE;
+    assert(dispatch(&owner, 3, request, 32) == -EACCES);
+    assert(preflight(&owner, request, 32) == -EACCES);
+    memset(request, 0, sizeof(request));
+    request[4] = 1; request[12] = 3;
+    memcpy(request + 16, "bag", 3);
+    assert(dispatch(&owner, 3, request, 20) == 0);
+    assert(preflight(&owner, request, 20) == 0);
+    request[4] = 7;
+    assert(dispatch(&owner, 3, request, 20) == -EACCES);
+    assert(preflight(&owner, request, 20) == -EACCES);
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "admission.c"
+            executable = Path(directory) / "admission"
+            source.write_text(harness)
+            subprocess.run(
+                ["cc", "-O2", "-Wall", "-Wextra", "-Werror",
+                 "-I", str(ROOT / "src"), str(source), "-o", str(executable)],
+                check=True,
+            )
+            subprocess.run([str(executable)], check=True)
+
     def test_load_keybag_uses_exact_kernel_response_capacity(self) -> None:
         source = (ROOT / "src/t2-aks-tool.c").read_text(encoding="utf-8")
         function = source.split("static int load_keybag", 1)[1].split(

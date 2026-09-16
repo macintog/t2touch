@@ -1063,7 +1063,10 @@ class FprintDevice(ServiceInterface):
     @method()
     async def VerifyStop(self):
         self._require_claim_owner()
-        await self._stop_verification(require_running=True)
+        try:
+            await self._stop_verification(require_running=True)
+        finally:
+            self._arm_unstarted_claim_expiry(replace=True)
 
     async def _run_verification(self, requested_finger: str) -> None:
         current_task = asyncio.current_task()
@@ -1169,6 +1172,10 @@ class FprintDevice(ServiceInterface):
             self._clear_claim()
 
     async def _stop_verification(self, require_running: bool) -> None:
+        if require_running and self.verify_task is None:
+            raise DBusError(
+                f"{FPRINT_ERROR}.NoActionInProgress", "verification is not active"
+            )
         expiry_task = self.claim_expiry_task
         if expiry_task is not None:
             expiry_task.cancel()
@@ -1176,11 +1183,6 @@ class FprintDevice(ServiceInterface):
         task = self.verify_task
         if task is None:
             self._set_finger_state(False, False)
-            if require_running:
-                raise DBusError(
-                    f"{FPRINT_ERROR}.NoActionInProgress",
-                    "verification is not active",
-                )
             return
         await self.backend.cancel()
         task.cancel()
@@ -1188,13 +1190,13 @@ class FprintDevice(ServiceInterface):
         self.verify_task = None
         self._set_finger_state(False, False)
 
-    def _arm_unstarted_claim_expiry(self) -> None:
+    def _arm_unstarted_claim_expiry(self, *, replace: bool = False) -> None:
         """Restore bounded claim lifetime after a mutation call returns."""
 
         client = self.enrollment_client
         if (
             self.claimed_user is not None
-            and self.claim_expiry_task is None
+            and (self.claim_expiry_task is None or replace)
             and self.verify_task is None
             and self.delete_task is None
             and (
@@ -1202,6 +1204,10 @@ class FprintDevice(ServiceInterface):
                 or getattr(client, "task", None) is None
             )
         ):
+            # A worker may emit its terminal update while Stop awaits cleanup.
+            # Replace that completed-operation timer with an idle claim timer.
+            if self.claim_expiry_task is not None:
+                self.claim_expiry_task.cancel()
             self.claim_expiry_task = asyncio.create_task(
                 self._expire_unstarted_claim()
             )
@@ -1256,7 +1262,13 @@ class FprintDevice(ServiceInterface):
                 )
             self._set_finger_state(False, False, None)
             client.start(
-                finger_name,
+                # Legacy anatomy tokens are syntax only. The worker protocol
+                # accepts neutral handles and independently allocates a slot.
+                (
+                    finger_name
+                    if t2_fprint_identity.is_handle(finger_name)
+                    else "finger-1"
+                ),
                 self.claimed_caller,
                 self.claimed_evidence,
                 self._enrollment_update,
@@ -1277,7 +1289,10 @@ class FprintDevice(ServiceInterface):
     @method()
     async def EnrollStop(self):
         self._require_claim_owner()
-        await self._stop_enrollment(require_running=True)
+        try:
+            await self._stop_enrollment(require_running=True)
+        finally:
+            self._arm_unstarted_claim_expiry(replace=True)
 
     def _enrollment_update(self, update: object) -> None:
         if not isinstance(
@@ -1316,6 +1331,11 @@ class FprintDevice(ServiceInterface):
             self.claim_expiry_task = None
 
     async def _stop_enrollment(self, require_running: bool) -> None:
+        client = self.enrollment_client
+        if require_running and (client is None or getattr(client, "task", None) is None):
+            raise DBusError(
+                f"{FPRINT_ERROR}.NoActionInProgress", "enrollment is not active"
+            )
         expiry_task = self.claim_expiry_task
         if expiry_task is not None:
             expiry_task.cancel()
@@ -1323,11 +1343,6 @@ class FprintDevice(ServiceInterface):
         client = self.enrollment_client
         task = getattr(client, "task", None) if client is not None else None
         if task is None:
-            if require_running:
-                raise DBusError(
-                    f"{FPRINT_ERROR}.NoActionInProgress",
-                    "enrollment is not active",
-                )
             self._set_finger_state(False, False, None)
             return
         try:

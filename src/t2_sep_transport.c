@@ -547,7 +547,12 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 		return -EACCES;
 	if (operation == 0x03 &&
 	    !t2_aks_load_keybag_request_allowed(request_body,
-					 request_body_length))
+					 request_body_length) &&
+	    !(sep->aks_replacement_phase == T2_AKS_REPLACEMENT_PHASE_RECOVER &&
+	      t2_aks_identity_open_request_matches(
+		      request_body, request_body_length,
+		      sep->aks_replacement_session,
+		      sep->aks_replacement_new_uuid)))
 		return -EACCES;
 	if (operation == 0x04 &&
 	    (!sep->aks_runtime_handle_active || sep->aks_runtime_poisoned ||
@@ -1141,8 +1146,6 @@ static int t2_aks_runtime_preflight_locked(
 {
 	switch (operation) {
 	case 0x03:
-		if (!t2_aks_load_keybag_request_allowed(request, request_length))
-			return -EACCES;
 		if (sep->aks_replacement_phase !=
 		    T2_AKS_REPLACEMENT_PHASE_NONE) {
 			if (sep->aks_replacement_phase !=
@@ -1152,8 +1155,9 @@ static int t2_aks_runtime_preflight_locked(
 				    sep->aks_replacement_session,
 				    sep->aks_replacement_new_uuid))
 				return -EACCES;
-		} else if (request_length == 32 &&
-			   t2_aks_wire_get_le32(request + 12) == 16) {
+		} else if (!t2_aks_load_keybag_request_allowed(request, request_length) ||
+			   (request_length == 32 &&
+			    t2_aks_wire_get_le32(request + 12) == 16)) {
 			return -EACCES;
 		}
 		if (sep->aks_runtime_poisoned)
