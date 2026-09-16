@@ -115,7 +115,11 @@ ensure_applesmc_on_disk() {
 }
 
 check_applesmc_prerequisite() {
-  local result
+  local allow_active_upgrade=${1:-0} result
+  if [[ $allow_active_upgrade != 0 && $allow_active_upgrade != 1 ]]; then
+    echo "Internal error: active-upgrade allowance must be 0 or 1." >&2
+    return 2
+  fi
   result=$(applesmc_boot_result) || return 2
   case "$result" in
     response-received:1)
@@ -125,10 +129,17 @@ check_applesmc_prerequisite() {
       ;;
     response-received:3)
       # EFMS BootPolicyReboot is a completed firmware reply, not a missing
-      # publisher and not permission to start SEP applications in this boot.
+      # publisher. It blocks first-time product setup, but it must not block a
+      # userspace-only upgrade after the matching resident transport and the
+      # complete installed service chain have already proved SEP readiness.
+      if (( allow_active_upgrade )); then
+        ensure_applesmc_on_disk || return 2
+        echo "The T2 boot-policy reply is response-received:3; continuing a verified active in-place upgrade." >&2
+        return 0
+      fi
       echo "The applesmc publisher loaded; T2 boot policy requests a system reboot (response-received:3)." >&2
       echo "An ordinary Linux reboot or poweroff may leave the T2 boot session unchanged." >&2
-      echo "See docs/TROUBLESHOOTING.md for T2 reset recovery rather than repeatedly rebooting." >&2
+      echo "Fresh setup remains blocked; preserve diagnostics rather than repeatedly rebooting." >&2
       return 3
       ;;
     absent|disabled)

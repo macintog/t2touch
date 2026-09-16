@@ -280,9 +280,9 @@ userspace reinstall also completed without a reboot or hardware unbind.
 Full end-to-end coverage remains limited to the reference model. The
 [MacBookPro16,2 report](docs/MACBOOKPRO16_2.md) records additional
 firmware-specific results and their limits.
-[Graphical validation](docs/GRAPHICAL_AUTH_VALIDATION.md) records the actual
-lock and permission-dialog results, the approximately 48% reduction in measured
-reader preparation time, and the remaining retry and hardware limits.
+Graphical authentication may require another touch after the reader becomes
+ready. Keep password fallback available; results on the reference laptop do
+not establish the same behavior on every hardware or desktop combination.
 
 Architecture, protocol provenance, and security boundaries are documented in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The small reusable protocol

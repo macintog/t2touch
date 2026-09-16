@@ -19,6 +19,29 @@ SPEC.loader.exec_module(doctor)
 
 
 class DoctorTests(unittest.TestCase):
+    def test_unprivileged_main_requests_sudo_instead_of_partial_report(self):
+        for json_mode in (False, True):
+            with self.subTest(json=json_mode):
+                arguments = ["t2-touchid-doctor"]
+                if json_mode:
+                    arguments.append("--json")
+                with (
+                    mock.patch.object(doctor.os, "geteuid", return_value=1000),
+                    mock.patch.object(doctor.sys, "argv", arguments),
+                    mock.patch.object(doctor, "collect") as collect,
+                    mock.patch.object(
+                        doctor.subprocess,
+                        "run",
+                        return_value=types.SimpleNamespace(returncode=23),
+                    ) as elevate,
+                ):
+                    self.assertEqual(doctor.main(), 23)
+                collect.assert_not_called()
+                command = ["sudo", "--", str(MODULE_PATH)]
+                if json_mode:
+                    command.append("--json")
+                elevate.assert_called_once_with(command, check=False)
+
     def test_assignment_parser_ignores_comments_and_invalid_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config"

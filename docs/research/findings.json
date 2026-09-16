@@ -105,46 +105,28 @@
       "finding": "Recorded results include cross-boot restore, positive and negative matching, exact deletion with survivor verification, and a continuous second-finger enrollment."
     },
     {
-      "id": "installed-native-lifecycle",
-      "reference": "integration-followup.md#what-the-later-observations-establish",
-      "evidence": "recorded-installed-hardware",
-      "finding": "Installed native standard-fprintd first and additional enrollment, verification, selected deletion, durable rename, and automatic reboot reconciliation were exercised on the greenfield authority."
-    },
-    {
       "id": "mutable-identity-authority",
-      "reference": "integration-followup.md#account-proof-and-the-current-identity-set",
+      "reference": "integration-contracts.md#account-authority-and-the-current-identity-set",
       "evidence": "implementation-and-offline-regression",
       "finding": "Immutable first-enrollment account proof must be paired with the reconciled current identity set and completed mutation history, without requiring the original fingerprint to remain enrolled."
     },
     {
       "id": "durable-identity-names",
-      "reference": "integration-followup.md#names-survive-deletion",
+      "reference": "integration-contracts.md#stable-names",
       "evidence": "implementation-and-recorded-migration",
       "finding": "Neutral names are five stable enrollment slots backed by private UUIDs; deleting one never renumbers survivors, and the next successful enrollment takes the lowest vacancy."
     },
     {
       "id": "delete-forward-recovery",
-      "reference": "integration-followup.md#completion-and-interrupted-deletion",
+      "reference": "integration-contracts.md#durable-completion-and-interrupted-deletion",
       "evidence": "implementation-and-recorded-hardware",
-      "finding": "After SEP removed a selected identity, recovery supplied the committed master Catacomb and completed persistence without replaying the delete command, followed by reboot and survivor checks."
+      "finding": "If SEP has already removed the selected identity, reconcile the committed user/master Catacomb generation and exact survivor set, then finish persistence without replaying the delete command."
     },
     {
       "id": "direct-client-lifecycle",
-      "reference": "integration-followup.md#service-ownership-and-startup",
+      "reference": "integration-contracts.md#client-and-service-ownership",
       "evidence": "implementation-and-offline-regression",
       "finding": "Direct D-Bus clients must handle service loss, latch completed results, and bound cleanup waits while preserving uncertainty about hardware completion."
-    },
-    {
-      "id": "post-deletion-addition",
-      "reference": "integration-followup.md#names-survive-deletion",
-      "evidence": "implementation-and-recorded-installed-hardware",
-      "finding": "A historical post-deletion addition was retained as finger-4 and survived reboot reconciliation; the product allocator was subsequently corrected to reuse the lowest vacant one of five stable slots."
-    },
-    {
-      "id": "pam-and-password-fallback",
-      "reference": "integration-followup.md#service-ownership-and-startup",
-      "evidence": "recorded-installed-hardware",
-      "finding": "Unattended biometric/fprintd startup and real sudo fingerprint authentication succeeded; a separate fprintd-unavailable transaction timed out biometric verification and accepted the Linux password."
     }
   ]
 }

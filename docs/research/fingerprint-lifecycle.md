@@ -97,8 +97,6 @@ new addition. These checks distinguish a working newly enrolled identity from
 an old fingerprint that still matches while the new one was never persisted.
 
 An integrating project can use this sequence beneath its own transport and
-authentication service. These initial protocol experiments did not test
-fprintd/PAM or password fallback. The completed installed work later exercised
-standard fprintd enrollment, matching and selected deletion across reboot, as
-well as real sudo/PAM fingerprint success and an independent unavailable-service
-password fallback; see the [integration follow-up](integration-followup.md).
+authentication service. It must also provide the account-authority, client
+ownership, recovery, and password-fallback boundaries described in the
+[integration contracts](integration-contracts.md).

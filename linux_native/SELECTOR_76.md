@@ -1,7 +1,7 @@
 # AppleKeyStore identity creation: matched host and J152f paths
 
 This document records static interoperability evidence from the x86_64
-RecoveryOS artifact in [`ARTIFACT_PROVENANCE.md`](ARTIFACT_PROVENANCE.md).
+RecoveryOS artifact in [firmware provenance](../docs/research/artifacts-and-method.md#firmware-identities).
 The exact `j152f` bridgeOS `23P6068` restore contains an AppleKeyStore SEP app
 with the same `2155.160.13.0.1` source version. Its operation-1/version-5
 decoder independently confirms the request field widths and order below. No
@@ -317,7 +317,7 @@ derivation core using the restored salt/work factor but the inner type-5
 password extracted from a fresh ACM context, which deterministically explains
 its final mismatch. The selected flags-`6`, persisted-external-form,
 type-5-reconstruction lifecycle and its replacement gates are in
-[`ACTIVATION_PLAN_OF_RECORD.md`](ACTIVATION_PLAN_OF_RECORD.md).
+[identity and authorization reference](../docs/research/identity-and-authorization.md#the-retained-creation-input).
 
 ### Recovered v5 session construction
 

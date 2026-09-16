@@ -38,7 +38,7 @@ rebuild_boot_images
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertEqual(result.stdout.strip(), expected)
 
-    def run_gate(self, result, disk=True, fail_stage=False):
+    def run_gate(self, result, disk=True, fail_stage=False, active_upgrade=False):
         return subprocess.run(
             ["bash", "-c", '''
 set -euo pipefail
@@ -47,11 +47,12 @@ applesmc_boot_result() { printf '%s\n' "$RESULT"; }
 modinfo() { [[ $DISK == yes ]] && printf 't2_sep_boot_state: publisher\n'; }
 stage_applesmc_prerequisite() { echo staged; [[ $FAIL_STAGE == no ]]; }
 enable_applesmc_next_boot() { echo boot-options; }
-check_applesmc_prerequisite || exit $?
+check_applesmc_prerequisite "$ACTIVE_UPGRADE" || exit $?
 echo product-ready
 ''', "fixture", str(HELPER)],
             env={**os.environ, "RESULT": result, "DISK": "yes" if disk else "no",
-                 "FAIL_STAGE": "yes" if fail_stage else "no"},
+                 "FAIL_STAGE": "yes" if fail_stage else "no",
+                 "ACTIVE_UPGRADE": "1" if active_upgrade else "0"},
             capture_output=True, text=True, check=False,
         )
 
@@ -68,7 +69,31 @@ echo product-ready
                 self.assertEqual(result.stdout, "")
                 self.assertIn("requests a system reboot", result.stderr)
                 self.assertIn("response-received:3", result.stderr)
-                self.assertIn("rather than repeatedly rebooting", result.stderr)
+                self.assertIn("preserve diagnostics", result.stderr)
+
+    def test_firmware_reboot_reply_allows_verified_active_upgrade(self):
+        result = self.run_gate(
+            "response-received:3", disk=True, active_upgrade=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["product-ready"])
+        self.assertIn("verified active in-place upgrade", result.stderr)
+
+    def test_active_upgrade_restores_removed_disk_prerequisite(self):
+        result = self.run_gate(
+            "response-received:3", disk=False, active_upgrade=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["staged", "product-ready"])
+
+    def test_active_upgrade_allowance_is_typed(self):
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; check_applesmc_prerequisite invalid',
+             "fixture", str(HELPER)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be 0 or 1", result.stderr)
 
     def test_reinstall_restores_removed_disk_prerequisite_before_ready(self):
         result = self.run_gate("response-received:1", disk=False)
@@ -177,10 +202,65 @@ source_dir=unused
 prepare_update=$1
 make() { :; }
 modinfo() { echo new; }
+systemctl() { return 1; }
 prepare_transport_update() { echo prepare; return 3; }
-check_applesmc_prerequisite() { echo ready; }
+check_applesmc_prerequisite() { echo "ready:$1"; }
 ''' + block, "fixture", prepare],
                         capture_output=True, text=True, check=False,
                     )
                     self.assertEqual(result.returncode, expected, result.stderr)
-                    self.assertEqual(result.stdout.splitlines(), output)
+                    self.assertEqual(
+                        result.stdout.splitlines(),
+                        ["ready:0" if item == "ready" else item for item in output],
+                    )
+
+    def test_active_upgrade_gate_requires_every_prerequisite(self):
+        installer = (ROOT / "install.sh").read_text()
+        block = installer[installer.index("# A recurring BootPolicyReboot"):installer.index("target_dir=")]
+        units = (
+            "t2-bridge-network.service", "t2-biometric-port-refresh.service",
+            "t2-sep-transport.service", "t2-native-first-run.service",
+            "t2-biometric-ready.service", "fprintd.service",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.touch()
+            product = Path(directory) / "t2-fprintd.py"
+            product.touch()
+            block = block.replace("/etc/t2-touchid.conf", str(config))
+            block = block.replace("/opt/t2-touchid/src/t2-fprintd.py", str(product))
+            cases = [("", "1", "0:0:600:1", 0)]
+            cases += [(unit, "1", "0:0:600:1", 3) for unit in units]
+            cases += [("all", "1", "0:0:600:1", 3),
+                      ("", "0", "0:0:600:1", 3),
+                      ("", "1", "0:0:644:1", 3)]
+            for inactive, matches, metadata, expected in cases:
+                with self.subTest(inactive=inactive, matches=matches, metadata=metadata):
+                    result = subprocess.run(
+                        ["bash", "-c", r'''
+set -euo pipefail
+source "$1"
+live_transport_matches=$2
+inactive=$3
+metadata=$4
+stat() { printf '%s\n' "$metadata"; }
+# Match systemctl's ANY-active semantics for multiple positional units.
+systemctl() {
+  [[ $1 == is-active && $2 == --quiet ]] || return 2
+  shift 2
+  local unit
+  for unit in "$@"; do
+    if [[ $inactive != all && $unit != "$inactive" ]]; then
+      return 0
+    fi
+  done
+  return 3
+}
+applesmc_boot_result() { echo response-received:3; }
+ensure_applesmc_on_disk() { :; }
+''' + block + "\necho product-ready\n",
+                         "fixture", str(HELPER), matches, inactive, metadata],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "product-ready" if expected == 0 else "")

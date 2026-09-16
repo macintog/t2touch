@@ -8,7 +8,7 @@ This document separates two artifacts that were previously conflated: the
 optional KEK returned by identity creation and the saved keybag object needed
 to reload that identity after reboot. The recovery is from the signed x86_64
 AppleKeyStore artifacts and matching J152f bridgeOS `23P6068` SEP application
-recorded in [`ARTIFACT_PROVENANCE.md`](ARTIFACT_PROVENANCE.md). D137/D138 sent
+recorded in [firmware provenance](../docs/research/artifacts-and-method.md#firmware-identities). D137/D138 sent
 the create, export, persistence, and different-boot reload sequence to the
 reference T2; the later activation and biometric results remain separately
 journaled and are complete through D218.
@@ -308,7 +308,7 @@ derivation core with the restored salt and work factor. The final mismatch is
 therefore deterministic even when the literal account password is unchanged.
 
 The authoritative
-[`ACTIVATION_PLAN_OF_RECORD.md`](ACTIVATION_PLAN_OF_RECORD.md) records the
+[identity and authorization reference](../docs/research/identity-and-authorization.md#the-retained-creation-input) records the
 creation-versus-verification field map, D137's proved non-recoverability, and
 the selected replacement lifecycle. The create output was discarded and has
 no verifier input edge; creation retains only derived verifier state; and the

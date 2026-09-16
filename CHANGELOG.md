@@ -6,6 +6,37 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.0.6 - 2026-09-16
+
+This release improves enrollment recovery, upgrades on running T2 systems,
+and fingerprint authentication prompts.
+
+### Changed
+
+- Mark the live PAM placement prompt with `◎` when the reader is ready for
+  a finger. The preparation message remains separate, and password prompts
+  are unchanged.
+- Request elevation through `sudo` when `t2-touchid-doctor` is run as a normal
+  user, so it can produce a complete diagnostic report. Preserve `--json`
+  output and the normal authentication flow.
+
+### Fixed
+
+- Build the bundled `applesmc-t2touch` prerequisite against the MacBookPro15,2
+  test system's 6.19.11 T2 kernel headers by replacing unavailable
+  `kzalloc_objs` calls with equivalent `kcalloc` allocations. Contributed by
+  Brett Kulp in [PR #2](https://github.com/macintog/t2touch/pull/2).
+- Permit a userspace upgrade when T2 reports `BootPolicyReboot` and the
+  existing installation has a matching resident transport, an intact private
+  configuration, and every prerequisite service active. Fresh setup and
+  transport replacement still require a ready boot-policy result.
+- Allow enrollment recovery to proceed past earlier attempts that stopped
+  before starting or completed rollback. Journals that still need identity
+  reconciliation continue to block new enrollment.
+- Clarify boot-policy recovery guidance: preserve diagnostics when a normal
+  reboot does not clear `BootPolicyReboot`, rather than repeatedly rebooting
+  or treating an SMC reset as an established remedy.
+
 ## 0.0.5 - 2026-09-15
 
 ### Added

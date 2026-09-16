@@ -1795,11 +1795,7 @@ def _pending_observed_identity_recovery(
                 and history.outcome_unknown_stage == "terminal"
             ):
                 candidates.append((path, history))
-            elif history.phase in {
-                t2_enrollment_journal.EnrollmentPhase.RECONCILED,
-                t2_enrollment_journal.EnrollmentPhase.ADDITION_VERIFIED,
-                t2_enrollment_journal.EnrollmentPhase.POST_REBOOT_VERIFIED,
-            }:
+            elif _enrollment_history_is_complete(history):
                 # Additional enrollment legitimately coexists with the durable
                 # journals that establish the identities in its v1 baseline.
                 continue
@@ -1870,11 +1866,7 @@ def _pending_outcome_unknown_reconciliation(
                 is t2_enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN
             ):
                 candidates.append((path, history))
-            elif history.phase in {
-                t2_enrollment_journal.EnrollmentPhase.RECONCILED,
-                t2_enrollment_journal.EnrollmentPhase.ADDITION_VERIFIED,
-                t2_enrollment_journal.EnrollmentPhase.POST_REBOOT_VERIFIED,
-            }:
+            elif _enrollment_history_is_complete(history):
                 continue
             else:
                 raise NativeEnrollmentError(
@@ -1899,6 +1891,25 @@ def _pending_outcome_unknown_reconciliation(
             "outcome reconciliation journal binding changed"
         )
     return path, history
+
+
+def _enrollment_history_is_complete(
+    history: t2_enrollment_journal.EnrollmentHistory,
+) -> bool:
+    """Match the mutation registry's nonblocking enrollment phases."""
+
+    if history.phase in {
+        t2_enrollment_journal.EnrollmentPhase.BASELINE,
+        t2_enrollment_journal.EnrollmentPhase.ABORTED_BEFORE_START,
+        t2_enrollment_journal.EnrollmentPhase.ADDITION_VERIFIED,
+        t2_enrollment_journal.EnrollmentPhase.ADDITION_ROLLED_BACK,
+        t2_enrollment_journal.EnrollmentPhase.POST_REBOOT_VERIFIED,
+    }:
+        return True
+    return (
+        history.phase is t2_enrollment_journal.EnrollmentPhase.RECONCILED
+        and history.terminal_identity_uuid is None
+    )
 
 
 def _run_outcome_unknown_reconciliation(

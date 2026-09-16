@@ -1,4 +1,5 @@
 #%PAM-1.0
 # SPDX-License-Identifier: GPL-2.0-only
+auth       optional                    pam_t2touch_action_prompt.so
 auth       required                    pam_fprintd.so
 account    include                     system-local-login

@@ -411,6 +411,9 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
         authority = SimpleNamespace(
             phase=native_enroll.t2_enrollment_journal.EnrollmentPhase.POST_REBOOT_VERIFIED
         )
+        rolled_back = SimpleNamespace(
+            phase=native_enroll.t2_enrollment_journal.EnrollmentPhase.ADDITION_ROLLED_BACK
+        )
         pending = SimpleNamespace(
             phase=native_enroll.t2_enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN,
             outcome_unknown_stage="terminal",
@@ -430,19 +433,25 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             root.mkdir()
             authority_path = root / "authority.jsonl"
             pending_path = root / "pending.jsonl"
+            rolled_back_path = root / "rolled-back.jsonl"
             delete_path = root / "delete.jsonl"
             authority_path.touch()
             pending_path.touch()
+            rolled_back_path.touch()
             delete_path.touch()
             boot_path = Path(directory) / "boot_id"
             boot_path.write_text(boot_id, encoding="ascii")
             histories = {
                 authority_path: authority,
                 pending_path: pending,
+                rolled_back_path: rolled_back,
             }
             raw_histories = {
                 authority_path: [{"evidence": {"operation_kind": "enroll"}}],
                 pending_path: [{"evidence": {"operation_kind": "enroll"}}],
+                rolled_back_path: [
+                    {"evidence": {"operation_kind": "enroll"}}
+                ],
                 delete_path: [{"evidence": {"operation_kind": "delete-one"}}],
             }
             with (
@@ -454,11 +463,13 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                 mock.patch.object(
                     native_enroll.t2_enrollment_journal,
                     "validate_history",
-                    side_effect=lambda records: (
-                        authority
-                        if records is raw_histories[authority_path]
-                        else pending
-                    ),
+                    side_effect=lambda records: histories[
+                        next(
+                            path
+                            for path, raw in raw_histories.items()
+                            if records is raw
+                        )
+                    ],
                 ),
                 mock.patch.object(
                     native_enroll.t2_mutation_journal,
@@ -466,14 +477,33 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                     side_effect=lambda path: raw_histories[path],
                 ),
             ):
-                observed_path, observed_history = (
-                    native_enroll._pending_observed_identity_recovery(
-                        mappings, selected
-                    )
+                phase = native_enroll.t2_enrollment_journal.EnrollmentPhase
+                completed = (
+                    phase.BASELINE, phase.ABORTED_BEFORE_START,
+                    phase.ADDITION_VERIFIED, phase.ADDITION_ROLLED_BACK,
+                    phase.POST_REBOOT_VERIFIED, phase.RECONCILED,
                 )
-
-        self.assertEqual(observed_path, pending_path)
-        self.assertIs(observed_history, pending)
+                for selector in (
+                    native_enroll._pending_observed_identity_recovery,
+                    native_enroll._pending_outcome_unknown_reconciliation,
+                ):
+                    for sibling_phase in completed:
+                        with self.subTest(selector=selector.__name__, phase=sibling_phase):
+                            rolled_back.phase = sibling_phase
+                            rolled_back.terminal_identity_uuid = None
+                            observed_path, observed_history = selector(mappings, selected)
+                            self.assertEqual(observed_path, pending_path)
+                            self.assertIs(observed_history, pending)
+                    # Reconciled enrollment with a new identity still requires
+                    # verification; it must not disappear from admission.
+                    rolled_back.phase = phase.RECONCILED
+                    rolled_back.terminal_identity_uuid = identifier(43)
+                    with self.subTest(selector=selector.__name__, incomplete=True):
+                        with self.assertRaisesRegex(
+                            native_enroll.NativeEnrollmentError,
+                            "not a terminal recovery candidate",
+                        ):
+                            selector(mappings, selected)
 
     def test_add_finger_preflight_needs_no_input_descriptors(self) -> None:
         """Protect the live no-touch gate from normal ceremony FD admission."""

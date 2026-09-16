@@ -9,6 +9,7 @@ Module.symvers
 modules.order
 src/t2-aks-tool
 src/t2-pam-fingerprint-prompt
+src/pam_t2touch_action_prompt.so
 .venv/
 *.tar.gz
 *.cat

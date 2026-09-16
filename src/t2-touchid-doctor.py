@@ -13,6 +13,7 @@ import re
 import socket
 import stat
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -454,6 +455,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = parser.parse_args()
+    if os.geteuid() != 0:
+        command = ["sudo", "--", str(Path(__file__).resolve())]
+        if args.json:
+            command.append("--json")
+        try:
+            return subprocess.run(command, check=False).returncode
+        except FileNotFoundError:
+            print(
+                "t2-touchid-doctor: sudo is unavailable; run this report as root",
+                file=sys.stderr,
+            )
+            return 2
     checks = collect()
     if args.json:
         print(json.dumps({"checks": [asdict(check) for check in checks]}, indent=2))

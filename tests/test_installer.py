@@ -16,12 +16,32 @@ class InstallerTests(unittest.TestCase):
     def test_kernel_gate_precedes_product_writes(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertLess(
-            installer.index("check_applesmc_prerequisite || exit $?"),
+            installer.index(
+                'check_applesmc_prerequisite "$active_installed_upgrade" || exit $?'
+            ),
             installer.index("target_dir=/opt/t2-touchid"),
         )
         self.assertLess(
             installer.index("prepare_transport_update || exit $?"),
             installer.index("target_dir=/opt/t2-touchid"),
+        )
+
+    def test_active_upgrade_exception_requires_complete_running_chain(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+
+        self.assertIn("if (( live_transport_matches ))", installer)
+        self.assertIn("stat -c '%u:%g:%a:%h' /etc/t2-touchid.conf", installer)
+        for unit in (
+            "t2-bridge-network.service",
+            "t2-biometric-port-refresh.service",
+            "t2-sep-transport.service",
+            "t2-native-first-run.service",
+            "t2-biometric-ready.service",
+            "fprintd.service",
+        ):
+            self.assertIn(unit, installer)
+        self.assertIn(
+            'check_applesmc_prerequisite "$active_installed_upgrade"', installer
         )
 
     def test_dbus_policy_directory_is_created_before_policy_write(self):

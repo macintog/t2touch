@@ -3,8 +3,11 @@
 Start with the installed diagnostic:
 
 ```sh
-sudo t2-touchid-doctor
+t2-touchid-doctor
 ```
+
+The doctor requests elevation through `sudo` so its report is complete. The
+normal Touch ID prompt and password fallback remain available.
 
 Keep password authentication available while diagnosing Touch ID. The doctor
 reports failed components without exposing keybag or biometric identifiers.
@@ -23,20 +26,19 @@ kernel has the capability. The installer checks the live driver.
 
 The publisher is loaded and has received a firmware response. EFMS result 3
 means `BootPolicyReboot`; it is not a missing driver or the ready result 1.
-The installer stops without replaying the transaction, rebuilding the module,
-or starting product setup. A Linux restart or ordinary poweroff may leave the
-T2 boot session running. On the reference laptop after an OS reinstall, both
-left result 3 unchanged; the operator's physical SMC reset cleared it to 1.
-BridgeOS logs before the reset showed a previous/current boot-volume mismatch.
+Fresh product setup stops without replaying the transaction, rebuilding the
+module, or starting SEP applications. Retain the boot ID, kernel applesmc
+messages, and result for diagnosis if a normal reboot leaves it unchanged.
 
-Shut down cleanly and follow [Apple's T2 SMC reset instructions](https://support.apple.com/en-us/102605)
-for your machine. Laptop and desktop procedures differ. Boot Linux again and
-rerun `./install-omarchy.sh`. Do not substitute a reference-machine UUID, edit
-EFI-owned identity keys, or bypass the policy check. If result 3 remains after
-the reset, retain the boot ID, kernel applesmc messages, and result for diagnosis.
+An already-running installation is different. When its resident transport
+matches the requested build, its root-private configuration is intact, and the
+complete prerequisite service chain is active, the installer permits an
+in-place userspace upgrade and restarts only the upper service chain. This does
+not relax the result-1 requirement for fresh setup or transport replacement.
 
-Earlier installers collapsed this reply into “missing, ambiguous, failed, or
-unsupported,” concealing the actual cause. Current diagnostics print the result.
+Earlier installers either collapsed this reply into “missing, ambiguous,
+failed, or unsupported” or blocked an otherwise healthy userspace upgrade.
+Current diagnostics print the result and distinguish those two cases.
 Other failed or unknown replies remain blocking, and result 1 still requires the
 independent service readiness checks before PAM is installed. See the
 [boot-policy reference](research/boot-and-storage.md#publishing-boot-state).
@@ -193,9 +195,8 @@ A working `sudo` fingerprint test does not prove either graphical path works.
 With the compatible Omarchy integration installed and the shell restarted, the
 lock and permission dialogs show preparation followed by the actual placement
 message. Wait for that message, then briefly touch and lift. A touch during
-preparation may be missed. The final lock test accepted the first ready touch;
-the permission dialog still needed a couple of tries. Password fallback remains
-available. See the [measured results](GRAPHICAL_AUTH_VALIDATION.md).
+preparation may be missed. Another touch may be needed after readiness;
+password fallback remains available.
 
 If no message appears, check the installer's UI integration notice: unfamiliar
 QML versions are skipped without modifying them. Package upgrades can replace

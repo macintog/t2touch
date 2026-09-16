@@ -3,8 +3,7 @@
 This is experimental authentication software, validated on one MacBookPro16,1.
 Keep password authentication and an authenticated recovery terminal available
 while changing PAM or the desktop integration. See the
-[tested scope](README.md#what-has-been-proven) and
-[graphical validation](docs/GRAPHICAL_AUTH_VALIDATION.md).
+[tested scope](README.md#what-has-been-proven).
 
 ## Trust boundaries
 

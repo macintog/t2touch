@@ -85,7 +85,8 @@ The installer starts this chain and installs PAM only after native fprintd
 readiness succeeds. The Omarchy wrapper then installs a per-user UWSM DRM
 selector and guarded readiness-message changes to compatible lock and Polkit
 QML. Those desktop changes take effect at the next shell start/login. See
-[graphical validation](GRAPHICAL_AUTH_VALIDATION.md) for behavior and limits.
+[desktop compatibility](COMPATIBILITY.md#display-and-desktop-compatibility)
+for behavior and limits.
 
 Fresh installations select `linux-native` authority. Compatibility mode retains
 an existing Apple authority and adds the imported keybag and encrypted-credential

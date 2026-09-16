@@ -123,20 +123,10 @@ tool is installed, it also records metadata and wrapped KBAG data. A displayed
 KBAG key is wrapped material, not a usable AES key. The script performs no
 decryption and downloads nothing.
 
-## 5. Controlled device validation (completed on the reference machine)
+## 5. Controlled device validation
 
-The once-deferred device experiment is complete on the MacBookPro16,1. D196-
-D200 proved mode-0 consumption, native persistence, and different-boot E4;
-D204-D205 proved positive and negative matching; D217 proved exact deletion,
-recovery, and survivor verification; and D218 proved uninterrupted additional
-enrollment with immediate new-identity-only matching. The D218 immutable
-artifact/read-only snapshot is
-`D218-continuous-second-finger-ceremony-20260913`, with private-manifest
-SHA-256
-`52f960e06e35e462326c89109597c586b6bd5d3376fa91011d2a93660eb6dd25`.
-
-The historical non-mutating checklist generator remains useful when repeating
-the experiment on a new machine:
+Prepare the non-mutating prerequisite checklist before a separately authorized
+hardware experiment:
 
 ```bash
 ./scripts/hardware-experiment-preflight.sh /path/to/private/output

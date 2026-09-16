@@ -49,7 +49,28 @@ if (( prepare_update )); then
   echo "No identified transport change needs preparation." >&2
   exit 2
 fi
-check_applesmc_prerequisite || exit $?
+
+# A recurring BootPolicyReboot reply must still block fresh setup. It does not
+# invalidate an already-running installation: when the resident transport is
+# the requested build and every prerequisite service is currently healthy, the
+# installer only replaces userspace and restarts the upper service chain.
+active_installed_upgrade=0
+if (( live_transport_matches )) &&
+  [[ -f /etc/t2-touchid.conf && ! -L /etc/t2-touchid.conf ]] &&
+  [[ $(stat -c '%u:%g:%a:%h' /etc/t2-touchid.conf 2>/dev/null) == 0:0:600:1 ]] &&
+  [[ -f /opt/t2-touchid/src/t2-fprintd.py ]]; then
+  active_installed_upgrade=1
+  # With multiple units, is-active succeeds if ANY unit is active.
+  for unit in t2-bridge-network.service \
+    t2-biometric-port-refresh.service t2-sep-transport.service \
+    t2-native-first-run.service t2-biometric-ready.service fprintd.service; do
+    if ! systemctl is-active --quiet "$unit"; then
+      active_installed_upgrade=0
+      break
+    fi
+  done
+fi
+check_applesmc_prerequisite "$active_installed_upgrade" || exit $?
 
 target_dir=/opt/t2-touchid
 target_user=$SUDO_USER
@@ -346,6 +367,9 @@ install -o root -g root -m 0755 "$source_dir/src/t2-aks-tool" /usr/local/sbin/t2
 install -o root -g root -m 0755 \
   "$source_dir/src/t2-pam-fingerprint-prompt" \
   /usr/local/sbin/t2-pam-fingerprint-prompt
+install -o root -g root -m 0755 \
+  "$source_dir/src/pam_t2touch_action_prompt.so" \
+  /usr/lib/security/pam_t2touch_action_prompt.so
 install -o root -g root -m 0644 "$source_dir/src/t2_sep_transport.ko" /usr/local/lib/t2-touchid/t2_sep_transport.ko
 install -o root -g root -m 0755 "$source_dir/src/t2-keybag-load.sh" /usr/local/sbin/t2-keybag-load
 install -o root -g root -m 0700 "$source_dir/src/t2-keybag-unlock.sh" /usr/local/sbin/t2-keybag-unlock

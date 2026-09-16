@@ -63,8 +63,7 @@ the authentication verdict, and keep a recovery path ready before locking.
 Recover the GUI promptly if it fails. For latency work, report measured phases
 and keep reader readiness separate from physical-touch and full-login timing.
 GPU fixtures must cover integrated, discrete, single-GPU, and disconnected
-layouts; fixture coverage does not qualify untested hardware. See the retained
-[validation report](docs/GRAPHICAL_AUTH_VALIDATION.md).
+layouts; fixture coverage does not qualify untested hardware.
 
 Never commit or publish keybags, Catacombs, credentials, packet captures,
 Apple binaries, raw BridgeXPC replies, biometric payloads, device addresses,

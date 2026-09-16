@@ -63,17 +63,15 @@ kernel GPU-routing or power controls. Without that condition, Hyprland keeps
 its default selection. No GPU vendor, PCI address, card number, or Mac model
 is hardcoded.
 
-Fourteen hardware-free fixtures cover these layouts, including missing driver
-links and shell strict mode. Actual display and reboot validation covers only
-the MacBookPro16,1 reference laptop. Fixtures are regression checks, not physical
-qualification of discrete-only, integrated-only, or other multi-GPU machines.
+Physical display and reboot coverage is limited to the MacBookPro16,1 reference
+laptop. Regression fixtures do not qualify discrete-only, integrated-only, or
+other multi-GPU machines.
 
 The Omarchy UI helper checks all three QML files before writing any of them,
 backs up originals, and skips unfamiliar integration points. Package updates
 may replace the patch. A skipped UI patch does not disable the backend protocol
 or DRM selector, but readiness messages then depend on the installed desktop.
-See [graphical validation](GRAPHICAL_AUTH_VALIDATION.md) and
-[rollback](TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration).
+See the [rollback instructions](TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration).
 
 ## Evidence from the shared restore
 

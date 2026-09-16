@@ -56,8 +56,8 @@ class PamAssetTests(unittest.TestCase):
     def test_sudo_skips_fingerprint_until_keybags_are_ready(self):
         sudo_stack = (ROOT / "pam/sudo").read_text()
 
-        self.assertIn("[success=3 default=ignore]", sudo_stack)
-        self.assertIn("[success=ignore default=2]", sudo_stack)
+        self.assertIn("[success=4 default=ignore]", sudo_stack)
+        self.assertIn("[success=ignore default=3]", sudo_stack)
         self.assertIn("t2-pam-fingerprint-ready", sudo_stack)
         self.assertNotIn("t2-pam-unlock", sudo_stack)
 
@@ -102,10 +102,22 @@ class PamAssetTests(unittest.TestCase):
     def test_sudo_prompt_warns_against_early_password_input(self):
         prompt = (ROOT / "src/t2-pam-fingerprint-prompt.c").read_text()
 
+        self.assertNotIn("◎", prompt)
         self.assertIn("Preparing the fingerprint sensor", prompt)
         self.assertIn("hear the ready cue", prompt)
         self.assertNotIn("Touch the fingerprint sensor now", prompt)
         self.assertIn("Do not type your password until", prompt)
+
+    def test_action_marker_wraps_only_the_live_fingerprint_request(self):
+        source = (ROOT / "src/pam_t2touch_action_prompt.c").read_text()
+
+        self.assertIn("◎ Place your finger on the fingerprint reader", source)
+        self.assertIn('strcmp(rewritten[index].msg, action_prompt) == 0', source)
+        for name in ("sudo", "polkit-1", "omarchy-lock-fingerprint"):
+            stack = (ROOT / "pam" / name).read_text()
+            marker = stack.index("pam_t2touch_action_prompt.so")
+            fingerprint = stack.index("pam_fprintd.so")
+            self.assertLess(marker, fingerprint)
 
     def test_every_successful_unlock_path_publishes_readiness(self):
         for name in (
