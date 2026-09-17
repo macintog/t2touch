@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import t2_enrollment_journal
+import t2_external_inventory_sync
 import t2_mutation_journal
 import t2_mutation_registry
+import t2_native_state_recovery
 import t2_user_authority
 
 
@@ -54,16 +56,19 @@ def _completed_heads(
         operation_id = records[0].get("operation_id") if records else None
         evidence = records[0].get("evidence") if records else None
         # Enrollment, rename, and native single-delete journals wrap the
-        # shared biometric baseline under ``evidence.baseline``.  External
-        # deletion reconciliation is deliberately a host-only projection and
-        # its validated baseline is the evidence object itself.  Its mapping
-        # generation already commits the complete account/bag mapping, so the
-        # Apple user plus that generation is the immutable authority binding
-        # available for this journal kind.
-        external_delete = entry.kind == "reconcile-external-delete"
+        # shared biometric baseline under ``evidence.baseline``.  The typed
+        # external reconciliation and native-state recovery journals use a
+        # validated top-level baseline instead.  Their mapping generation
+        # commits the complete account/bag mapping, so the Apple user plus that
+        # generation is their immutable authority binding.
+        mapping_bound = entry.kind in {
+            "reconcile-external-delete",
+            t2_external_inventory_sync.KIND,
+            t2_native_state_recovery.KIND,
+        }
         baseline = (
             evidence
-            if external_delete and isinstance(evidence, dict)
+            if mapping_bound and isinstance(evidence, dict)
             else evidence.get("baseline")
             if isinstance(evidence, dict)
             else None
@@ -84,7 +89,7 @@ def _completed_heads(
             or baseline.get("apple_uid") != apple_user_id
             or baseline.get("mapping_generation") != mapping_generation
             or (
-                not external_delete
+                not mapping_bound
                 and (
                     baseline.get("account_uuid") != account_uuid
                     or baseline.get("bag_uuid") != bag_uuid

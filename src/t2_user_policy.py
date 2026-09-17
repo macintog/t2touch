@@ -47,6 +47,11 @@ OPERATION_POLICIES = {
         "org.t2linux.touchid.identity-management",
         True,
     ),
+    "recover-state": OperationPolicy(
+        "identity-management",
+        "org.t2linux.touchid.identity-management",
+        True,
+    ),
 }
 
 

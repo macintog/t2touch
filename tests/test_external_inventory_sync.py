@@ -26,6 +26,30 @@ def inventory(local, dirty=True):
     return live
 
 
+def empty_inventory(*, dirty=True):
+    empty = codec.decode_user_catacomb(fixture(), 501)
+    empty = codec.decode_user_catacomb(
+        empty.clear_after_stable_sep_empty(sep_empty_attested=True), 501
+    )
+    live = live_for(empty)
+    live['catacomb'].update(
+        present=False,
+        uuid=str(uuid.UUID(int=0)),
+        hash='0' * 64,
+        user_states=[
+            {
+                'kind': 'master', 'user_id': 0xFFFFFFFF,
+                'state': 3, 'needs_save': False,
+            },
+            {
+                'kind': 'user', 'user_id': 501,
+                'state': 7 if dirty else 3, 'needs_save': dirty,
+            },
+        ],
+    )
+    return live
+
+
 class ExternalInventoryTests(unittest.TestCase):
     def setUp(self):
         value = codec.decode_user_catacomb(fixture(), 501)
@@ -47,6 +71,78 @@ class ExternalInventoryTests(unittest.TestCase):
         self.assertEqual(result.identities[0], self.local.identities[0])
         self.assertEqual(result.identities[1].name, 'finger-2')
 
+    def test_explicit_empty_reprovision_clears_local_identity(self):
+        live = empty_inventory()
+        result = codec.decode_user_catacomb(
+            sync.plan(self.local, live, allow_empty=True), 501
+        )
+        self.assertEqual(result.identities, ())
+        self.assertEqual(result.account_uuid, self.local.account_uuid)
+        self.assertEqual(result.keybag_uuid, self.local.keybag_uuid)
+        with self.assertRaises(sync.ExternalInventoryError):
+            sync.plan(self.local, live)
+
+    def test_explicit_empty_reprovision_persists_zero_count_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('store', 'backups', 'mutations'):
+                (root / name).mkdir(mode=0o700)
+            original = {
+                'user_000001f5.cat': self.local.replace_secure_data(
+                    self.local.secure_data
+                ),
+                'master.cat': master_fixture(),
+                'biolockout.cat': biolockout_fixture(),
+            }
+            for name, data in original.items():
+                path = root / 'store' / name
+                path.write_bytes(data)
+                path.chmod(0o600)
+            store = stores.CatacombStore(root / 'store', 501)
+            lease = SimpleNamespace(connection_generation=str(uuid.UUID(int=42)))
+            user_blob = b'LTFC' + b'u' * 28
+            master_blob = b'LTFC' + b'm' * 28
+            transport = mock.Mock()
+            transport.prepare.side_effect = [
+                (0, len(user_blob)), (0, len(master_blob)),
+            ]
+            transport.complete.side_effect = [
+                (0, bytearray(user_blob)), (0, bytearray(master_blob)),
+            ]
+            live = empty_inventory()
+            collect = mock.Mock(
+                side_effect=[
+                    copy.deepcopy(live),
+                    copy.deepcopy(live),
+                    empty_inventory(dirty=False),
+                ]
+            )
+            with mock.patch.object(
+                sync.bridge, 'CatacombBridgeTransport', return_value=transport
+            ):
+                result = sync.reconcile(
+                    local=self.local,
+                    live=live,
+                    store=store,
+                    lease=lease,
+                    mapping_generation='b' * 64,
+                    backup_root=root / 'backups',
+                    mutation_root=root / 'mutations',
+                    collect=collect,
+                    allow_empty=True,
+                )
+            components = store.read_committed_components()
+            saved_user = codec.decode_user_catacomb(
+                components['user_000001f5.cat'], 501
+            )
+            saved_master = codec.decode_master_catacomb(components['master.cat'])
+            self.assertEqual(saved_user.identities, ())
+            self.assertEqual(saved_user.secure_data, user_blob)
+            self.assertEqual(saved_master.enrollment_count, 0)
+            self.assertEqual(saved_master.secure_data, master_blob)
+            self.assertEqual(result['identity_count'], 0)
+            self.assertFalse(registry.blocks_new_mutation(root / 'mutations'))
+
     def test_rejects_unstable_wrong_user_group_and_unloaded_state(self):
         changes = [lambda x: x.update(double_collection_equal=False),
                    lambda x: x.update(apple_uid=502),
@@ -62,13 +158,21 @@ class ExternalInventoryTests(unittest.TestCase):
                 with self.assertRaises((sync.ExternalInventoryError, sync.inventory.IdentityInventoryError)):
                     sync.plan(self.local, live)
 
-    def exercise(self, *, fail_confirm=False, race_at=None, fail_record=None):
+    def exercise(
+        self, *, fail_confirm=False, race_at=None, fail_record=None,
+        stale_master_count=None,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ('store', 'backups', 'mutations'):
                 (root / name).mkdir(mode=0o700)
+            master_bytes = master_fixture()
+            if stale_master_count is not None:
+                master_bytes = codec.decode_master_catacomb(master_bytes).encode(
+                    enrollment_count=stale_master_count
+                )
             original = {'user_000001f5.cat': self.local.replace_secure_data(self.local.secure_data),
-                        'master.cat': master_fixture(), 'biolockout.cat': biolockout_fixture()}
+                        'master.cat': master_bytes, 'biolockout.cat': biolockout_fixture()}
             for name, data in original.items():
                 path = root / 'store' / name
                 path.write_bytes(data)
@@ -110,8 +214,12 @@ class ExternalInventoryTests(unittest.TestCase):
             self.assertFalse(result['fingerprint_mutation_performed'])
             self.assertTrue(result['external_inventory_reconciled'])
             saved = codec.decode_user_catacomb(store.read_committed_components()['user_000001f5.cat'], 501)
+            saved_master = codec.decode_master_catacomb(
+                store.read_committed_components()['master.cat']
+            )
             self.assertEqual(saved.identities[0].uuid, self.external.identities[0].uuid)
             self.assertEqual(saved.secure_data, user_blob)
+            self.assertEqual(saved_master.enrollment_count, len(self.external.identities))
             self.assertEqual(transport.confirm.call_count, 2)
             self.assertFalse(registry.blocks_new_mutation(root / 'mutations'))
             backup = next((root / 'backups').iterdir())
@@ -123,6 +231,9 @@ class ExternalInventoryTests(unittest.TestCase):
             altered[-1]['evidence']['identity_snapshot_sha256'] = 'c' * 64
             with self.assertRaises(sync.ExternalInventoryError):
                 sync.validate_history(altered)
+
+    def test_replacement_normalizes_stale_master_enrollment_count(self):
+        self.exercise(stale_master_count=3)
 
     def test_intent_only_abort_requires_unchanged_backup_and_no_prepare(self):
         with tempfile.TemporaryDirectory() as directory:

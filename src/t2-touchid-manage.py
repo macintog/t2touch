@@ -66,7 +66,9 @@ import t2_identity_rename_reconciliation
 import t2_mutation_journal
 import t2_mutation_registry
 import t2_native_state_restore
+import t2_native_state_recovery
 import t2_native_caller_authorization
+import t2_user_activation_journal
 import t2_user_activation_operation
 import t2_user_authority
 import t2_user_mapping
@@ -363,9 +365,40 @@ def _authorize_native_management(
     return decision, operation_id
 
 
+def _activation_journal_path(operation_id: str) -> Path:
+    """Allocate a journal file while retaining the policy-bound operation ID."""
+    preferred = ACTIVATION_ROOT / f"{operation_id}.jsonl"
+    if not os.path.lexists(preferred):
+        return preferred
+    _private_root_owned(preferred, directory=False)
+    try:
+        prior = t2_user_activation_journal.read(preferred)
+    except (
+        OSError,
+        t2_user_activation_journal.UserActivationJournalError,
+        t2_mutation_journal.JournalError,
+    ) as error:
+        raise IdentityManagementError(
+            "prior management activation journal is invalid"
+        ) from error
+    if prior.phase not in {
+        t2_user_activation_journal.UserActivationPhase.READY,
+        t2_user_activation_journal.UserActivationPhase.RECOVERED_READY,
+    }:
+        raise IdentityManagementError(
+            "prior management activation journal is unresolved"
+        )
+    for _attempt in range(32):
+        candidate = ACTIVATION_ROOT / f"{uuid.uuid4()}.jsonl"
+        if not os.path.lexists(candidate):
+            return candidate
+    raise IdentityManagementError("could not allocate an activation journal")
+
+
 @contextmanager
 def _native_management_lease(
     configuration: dict[str, object], *, operation: str, restore_state: bool = True,
+    collect_live: bool = True,
     authorization_session: object | None = None,
     operation_id: str | None = None,
 ) -> Iterator[tuple[
@@ -377,6 +410,10 @@ def _native_management_lease(
     dict[str, object],
 ]]:
     """Hold Linux-native keybag authority across one management connection."""
+    if restore_state and not collect_live:
+        raise IdentityManagementError(
+            "native management cannot restore without live readback"
+        )
     authority = t2_user_authority.load(int(configuration["linux_uid"]))
     selected = authority.selected
     if (
@@ -426,7 +463,7 @@ def _native_management_lease(
                 else None
             ),
         )
-        activation_journal = ACTIVATION_ROOT / f"{activation_id}.jsonl"
+        activation_journal = _activation_journal_path(activation_id)
         with t2_activation_bundle.activation_secret(
             Path(selected.activation_secret_path),
             selected.activation_secret_sha256,
@@ -497,8 +534,12 @@ def _native_management_lease(
                                 components[f"user_{selected.apple_uid:08x}.cat"],
                                 selected.apple_uid,
                             )
-                            live = t2_bridge_inventory.collect_stable_private_inventory(
-                                lease, selected.apple_uid
+                            live = (
+                                t2_bridge_inventory.collect_stable_private_inventory(
+                                    lease, selected.apple_uid
+                                )
+                                if collect_live
+                                else {}
                             )
                             reconciled = (
                                 t2_identity_inventory.summarize(local, live)
@@ -1560,6 +1601,576 @@ def _external_reconciliation_readback(
     t2_external_delete_reconcile.verify(plan, local, live)
 
 
+def run_native_state_recovery(
+    configuration: dict[str, object],
+    *,
+    allow_fingerprint_loss: bool = False,
+) -> dict[str, object]:
+    """Explicitly recover one exact retained-master Linux-native generation."""
+
+    if type(allow_fingerprint_loss) is not bool:
+        raise IdentityManagementError("fingerprint-loss acknowledgement is invalid")
+    require_mapping_capability(configuration, "identity-management")
+    if configuration.get("authority_mode") != "linux-native":
+        raise IdentityManagementError(
+            "native-state recovery requires Linux-native authority"
+        )
+    recovery_hold = STATE_ROOT / "native-recovery-hold"
+    if not os.path.lexists(recovery_hold):
+        raise IdentityManagementError(
+            "native-state recovery requires the installer recovery hold"
+        )
+    _private_root_owned(recovery_hold, directory=False)
+    if t2_mutation_registry.blocks_new_mutation(
+        MUTATION_ROOT, excluding_kind=t2_native_state_recovery.KIND
+    ):
+        raise IdentityManagementError(
+            "another biometric mutation is unfinished or awaits verification"
+        )
+    if os.path.lexists(STORE_ROOT / "prepare") or os.path.lexists(
+        STORE_ROOT / "commit"
+    ):
+        raise IdentityManagementError("a local Catacomb transaction needs recovery")
+
+    journal_path = t2_native_state_recovery.find_journal(MUTATION_ROOT)
+    if journal_path is None:
+        operation_id = str(uuid.uuid4())
+        history = None
+    else:
+        records = t2_mutation_journal.read(journal_path)
+        history = t2_native_state_recovery.validate_history(records)
+        operation_id = history.operation_id
+        if history.complete:
+            reenrollment_required = (
+                history.milestone == "EMPTY_REPROVISION_COMPLETE"
+            )
+            return {
+                "schema_version": 1,
+                "operation": "native-state-recovery",
+                "state": "already-complete",
+                "identity_count": (
+                    0
+                    if reenrollment_required
+                    else history.baseline["identity_count"]
+                ),
+                "fingerprint_mutation_performed": False,
+                "fingerprint_reenrollment_required": reenrollment_required,
+                "identifiers_redacted": True,
+            }
+        resumable_canonical_restart = (
+            t2_native_state_recovery.canonical_restart_is_resumable(records)
+        )
+        resumable_canonical_master_reply = (
+            t2_native_state_recovery.canonical_master_reply_is_resumable(
+                records
+            )
+        )
+        resumable_empty_reprovision = (
+            t2_native_state_recovery.empty_reprovision_is_resumable(records)
+        )
+        if resumable_empty_reprovision and not allow_fingerprint_loss:
+            raise IdentityManagementError(
+                "the saved fingerprint generation is incompatible; preserving it "
+                "and stopping before empty reprovision (rerun only if fingerprint "
+                "loss and reenrollment are accepted)"
+            )
+        if (
+            history.blocked
+            and not resumable_canonical_restart
+            and not resumable_canonical_master_reply
+            and not resumable_empty_reprovision
+        ) or history.milestone in {
+            "PREPARE_MASTER_INTENT",
+            "PREPARE_USER_INTENT",
+            "REMOVE_EMPTY_USER_INTENT",
+            "MASTER_EXPORT_PREPARE_INTENT",
+            "MASTER_EXPORT_PREPARED",
+            "MASTER_EXPORT_COMPLETE_INTENT",
+            "MASTER_EXPORT_CAPTURED",
+            "MASTER_EXPORT_CONFIRM_INTENT",
+            "REPREPARE_MASTER_INTENT",
+            "REPREPARE_USER_INTENT",
+            "RETAINED_MASTER_LOAD_INTENT",
+            "SAVED_USER_LOAD_INTENT",
+            "CANONICAL_MASTER_LOAD_INTENT",
+            "CANONICAL_USER_LOAD_INTENT",
+            "EMPTY_REPROVISION_MASTER_INTENT",
+            "EMPTY_REPROVISION_USER_INTENT",
+            "EMPTY_REPROVISION_BIOLOCKOUT_INTENT",
+            "CATACOMB_PERSISTENCE_INTENT",
+            "BIOLOCKOUT_LOAD_INTENT",
+        }:
+            raise IdentityManagementError(
+                "native-state recovery has an ambiguous command outcome; do not retry"
+            )
+
+    with _native_management_lease(
+        configuration,
+        operation="recover-state",
+        restore_state=False,
+        collect_live=False,
+        operation_id=operation_id,
+    ) as (authority, store, _host, local, lease, _live):
+        selected = authority.selected
+        components = store.read_committed_components()
+        final_live = None
+        if history is not None:
+            t2_native_state_recovery.require_authority_unchanged(
+                history,
+                apple_user_id=selected.apple_uid,
+                mapping_generation=configuration["mapping_generation"],
+                components=components,
+                user=local,
+            )
+
+        artifact_root = STATE_ROOT / "native-recovery-artifacts"
+        artifact_root.mkdir(mode=0o700, exist_ok=True)
+        _private_root_owned(artifact_root, directory=True)
+        artifact_directory = artifact_root / operation_id
+        artifact_directory.mkdir(mode=0o700, exist_ok=True)
+        _private_root_owned(artifact_directory, directory=True)
+        master_artifact = artifact_directory / "intermediate-master.cat"
+        candidate_master_artifact = (
+            artifact_directory / "cold-retained-master.cat"
+        )
+
+        def finish_recovery(active_lease, current_history, current_local):
+            if current_history.milestone == "SAVED_USER_RECONCILED":
+                persistence_live = (
+                    t2_bridge_inventory.collect_stable_private_inventory(
+                        active_lease, selected.apple_uid
+                    )
+                )
+                t2_external_inventory_sync.live_pairs(
+                    persistence_live, selected.apple_uid
+                )
+                states = persistence_live["catacomb"]["user_states"]
+                persistence_required = any(
+                    item.get("needs_save") is True for item in states
+                )
+                current_history = (
+                    t2_native_state_recovery.begin_catacomb_persistence(
+                        journal_path, required=persistence_required
+                    )
+                )
+                if persistence_required:
+                    t2_external_inventory_sync.reconcile(
+                        local=current_local,
+                        live=persistence_live,
+                        store=store,
+                        lease=active_lease,
+                        mapping_generation=configuration["mapping_generation"],
+                        backup_root=EXTERNAL_BACKUP_ROOT,
+                        mutation_root=MUTATION_ROOT,
+                        collect=(
+                            t2_bridge_inventory.collect_stable_private_inventory
+                        ),
+                    )
+                    refreshed = store.read_committed_components()
+                    current_local = t2_catacomb_codec.decode_user_catacomb(
+                        refreshed[f"user_{selected.apple_uid:08x}.cat"],
+                        selected.apple_uid,
+                    )
+                else:
+                    t2_external_inventory_sync.live_pairs(
+                        persistence_live, selected.apple_uid, clean=True
+                    )
+                    t2_identity_inventory.summarize(
+                        current_local, persistence_live
+                    )
+                current_history = (
+                    t2_native_state_recovery.reconcile_catacomb_persistence(
+                        journal_path,
+                        persisted=persistence_required,
+                        components=store.read_committed_components(),
+                        user=current_local,
+                    )
+                )
+            if current_history.milestone == "CATACOMB_PERSISTENCE_RECONCILED":
+                current_history = t2_native_state_recovery.restore_biolockout(
+                    active_lease,
+                    apple_user_id=selected.apple_uid,
+                    store=t2_biolockout_store.BioLockoutStore(
+                        str(STATE_ROOT / "biolockout")
+                    ),
+                    journal_path=journal_path,
+                )
+            elif current_history.milestone == "BIOLOCKOUT_RECONCILED":
+                current_history = t2_native_state_recovery.complete_reconciled(
+                    journal_path
+                )
+            final = t2_bridge_inventory.collect_stable_private_inventory(
+                active_lease, selected.apple_uid
+            )
+            t2_external_inventory_sync.live_pairs(
+                final, selected.apple_uid, clean=True
+            )
+            return current_history, current_local, final
+
+        def finish_empty_reprovision(
+            active_lease, current_history, current_local
+        ):
+            if current_history.milestone != "EMPTY_REPROVISION_READY":
+                raise IdentityManagementError(
+                    "empty reprovision is not at its persistence boundary"
+                )
+            empty_live = t2_bridge_inventory.collect_stable_private_inventory(
+                active_lease, selected.apple_uid
+            )
+            result = t2_external_inventory_sync.reconcile(
+                local=current_local,
+                live=empty_live,
+                store=store,
+                lease=active_lease,
+                mapping_generation=configuration["mapping_generation"],
+                backup_root=EXTERNAL_BACKUP_ROOT,
+                mutation_root=MUTATION_ROOT,
+                collect=t2_bridge_inventory.collect_stable_private_inventory,
+                allow_empty=True,
+            )
+            if (
+                result.get("external_inventory_reconciled") is not True
+                or result.get("identity_count") != 0
+            ):
+                raise IdentityManagementError(
+                    "empty Catacomb persistence did not reconcile"
+                )
+            refreshed = store.read_committed_components()
+            current_local = t2_catacomb_codec.decode_user_catacomb(
+                refreshed[f"user_{selected.apple_uid:08x}.cat"],
+                selected.apple_uid,
+            )
+            current_history = t2_native_state_recovery.reconcile_empty_catacombs(
+                active_lease,
+                apple_user_id=selected.apple_uid,
+                components=refreshed,
+                journal_path=journal_path,
+            )
+            current_history = (
+                t2_native_state_recovery.restore_empty_reprovision_biolockout(
+                    active_lease,
+                    apple_user_id=selected.apple_uid,
+                    store=t2_biolockout_store.BioLockoutStore(
+                        str(STATE_ROOT / "biolockout")
+                    ),
+                    journal_path=journal_path,
+                )
+            )
+            final = t2_bridge_inventory.collect_stable_private_inventory(
+                active_lease, selected.apple_uid
+            )
+            return current_history, current_local, final
+
+        if history is None:
+            live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, selected.apple_uid
+            )
+            journal_path = MUTATION_ROOT / f"{operation_id}.jsonl"
+            history = t2_native_state_recovery.create_journal(
+                journal_path,
+                operation_id,
+                apple_user_id=selected.apple_uid,
+                mapping_generation=configuration["mapping_generation"],
+                linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                live=live,
+                components=components,
+                user=local,
+            )
+
+        if history.milestone in {
+            "BASELINE_RECONCILED", "PREPARE_MASTER_ACCEPTED"
+        }:
+            # The selected API connection proved the exact state-3 baseline.
+            # Command 0x31 is admitted only before client-version selection, so
+            # close that generation and retain the surrounding AKS/ACM proof
+            # while opening the narrowly allowlisted pre-client generation.
+            lease.invalidate()
+            with t2_bridge_connection.BridgeConnectionLease.connect(
+                str(configuration["host"]),
+                str(configuration["interface"]),
+                _port(),
+                timeout=60,
+                defer_client_version=True,
+            ) as recovery_lease:
+                history = t2_native_state_recovery.prepare_missing_components(
+                    recovery_lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+                history = t2_native_state_recovery.restore_saved_user(
+                    recovery_lease,
+                    apple_user_id=selected.apple_uid,
+                    user=local,
+                    journal_path=journal_path,
+                )
+                history, local, final_live = finish_recovery(
+                    recovery_lease, history, local
+                )
+        else:
+            if history.milestone == "CANONICAL_USER_LOAD_REPLY_REJECTED":
+                history = (
+                    t2_native_state_recovery.reconcile_incompatible_user_surface(
+                        lease,
+                        apple_user_id=selected.apple_uid,
+                        journal_path=journal_path,
+                    )
+                )
+            if history.milestone in {
+                "EMPTY_REPROVISION_SURFACE_RECONCILED",
+                "EMPTY_REPROVISION_MASTER_ACCEPTED",
+            }:
+                lease.invalidate()
+                with t2_bridge_connection.BridgeConnectionLease.connect(
+                    str(configuration["host"]),
+                    str(configuration["interface"]),
+                    _port(),
+                    timeout=60,
+                    defer_client_version=True,
+                ) as recovery_lease:
+                    history = t2_native_state_recovery.prepare_empty_reprovision(
+                        recovery_lease,
+                        apple_user_id=selected.apple_uid,
+                        journal_path=journal_path,
+                    )
+                    history, local, final_live = finish_empty_reprovision(
+                        recovery_lease, history, local
+                    )
+            elif history.milestone in {
+                "EMPTY_REPROVISION_USER_ACCEPTED",
+                "EMPTY_REPROVISION_CLIENT_SELECTED",
+            }:
+                history = t2_native_state_recovery.reconcile_empty_reprovision(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+                history, local, final_live = finish_empty_reprovision(
+                    lease, history, local
+                )
+            if history.milestone == "MISSING_COMPONENTS_POST_STATE_REJECTED":
+                history = (
+                    t2_native_state_recovery.reconcile_loaded_empty_user(
+                        lease,
+                        apple_user_id=selected.apple_uid,
+                        journal_path=journal_path,
+                    )
+                )
+            if history.milestone == "LOADED_EMPTY_USER_RECONCILED":
+                history = t2_native_state_recovery.remove_loaded_empty_user(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+            elif history.milestone == "REMOVE_EMPTY_USER_ACCEPTED":
+                history = t2_native_state_recovery.reconcile_removed_user(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "REMOVED_USER_RECONCILED":
+                history = t2_native_state_recovery.settle_removed_master(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    master_archive=components["master.cat"],
+                    artifact_path=master_artifact,
+                    journal_path=journal_path,
+                )
+            elif history.milestone == "MASTER_EXPORT_CONFIRMED":
+                history = t2_native_state_recovery.reconcile_settled_master(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+            if history.milestone in {
+                "MASTER_SETTLED", "REPREPARE_MASTER_ACCEPTED"
+            }:
+                lease.invalidate()
+                with t2_bridge_connection.BridgeConnectionLease.connect(
+                    str(configuration["host"]),
+                    str(configuration["interface"]),
+                    _port(),
+                    timeout=60,
+                    defer_client_version=True,
+                ) as recovery_lease:
+                    history = (
+                        t2_native_state_recovery.reprepare_missing_components(
+                            recovery_lease,
+                            apple_user_id=selected.apple_uid,
+                            journal_path=journal_path,
+                        )
+                    )
+                    history = t2_native_state_recovery.restore_saved_user(
+                        recovery_lease,
+                        apple_user_id=selected.apple_uid,
+                        user=local,
+                        journal_path=journal_path,
+                    )
+                    history, local, final_live = finish_recovery(
+                        recovery_lease, history, local
+                    )
+            elif history.milestone in {
+                "REPREPARE_USER_ACCEPTED", "RECLIENT_VERSION_SELECTED"
+            }:
+                history = (
+                    t2_native_state_recovery.reconcile_reprepared_components(
+                        lease,
+                        apple_user_id=selected.apple_uid,
+                        journal_path=journal_path,
+                    )
+                )
+            if history.milestone == "REPREPARED_COMPONENTS_POST_STATE_REJECTED":
+                history = t2_native_state_recovery.prepare_cold_restart(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                    master_archive=components["master.cat"],
+                    user=local,
+                    intermediate_path=master_artifact,
+                    candidate_path=candidate_master_artifact,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "COLD_RESTART_PREPARED":
+                history = t2_native_state_recovery.reconcile_cold_surface(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                    journal_path=journal_path,
+                )
+            if history.milestone == "COLD_SURFACE_RECONCILED":
+                history = t2_native_state_recovery.load_canonical_master(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    master_archive=components["master.cat"],
+                    user=local,
+                    journal_path=journal_path,
+                )
+            elif history.milestone == "RETAINED_MASTER_LOAD_ACCEPTED":
+                history = t2_native_state_recovery.reconcile_cold_master(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+            if history.milestone in {
+                "COLD_MASTER_RECONCILED", "SAVED_USER_LOAD_REPLY_REJECTED"
+            }:
+                history = t2_native_state_recovery.prepare_canonical_restart(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    linux_boot_uuid=BOOT_ID.read_text(encoding="ascii").strip(),
+                    master_archive=components["master.cat"],
+                    user=local,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "CANONICAL_RESTART_PREPARED":
+                history = (
+                    t2_native_state_recovery.reconcile_canonical_cold_surface(
+                        lease,
+                        apple_user_id=selected.apple_uid,
+                        linux_boot_uuid=BOOT_ID.read_text(
+                            encoding="ascii"
+                        ).strip(),
+                        journal_path=journal_path,
+                    )
+                )
+            if history.milestone == "CANONICAL_COLD_SURFACE_RECONCILED":
+                history = t2_native_state_recovery.load_canonical_master(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    master_archive=components["master.cat"],
+                    user=local,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "CANONICAL_MASTER_LOAD_ACCEPTED":
+                history = t2_native_state_recovery.reconcile_canonical_master(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "CANONICAL_MASTER_LOAD_REPLY_REJECTED":
+                history = (
+                    t2_native_state_recovery.reconcile_canonical_master_reply(
+                        lease,
+                        apple_user_id=selected.apple_uid,
+                        journal_path=journal_path,
+                    )
+                )
+            if history.milestone in {
+                "CANONICAL_MASTER_RECONCILED",
+                "CANONICAL_MASTER_REPLY_RECONCILED",
+            }:
+                history = t2_native_state_recovery.load_canonical_user(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    user=local,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "CANONICAL_USER_LOAD_ACCEPTED":
+                history = t2_native_state_recovery.reconcile_saved_user(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    user=local,
+                    journal_path=journal_path,
+                )
+            if history.milestone in {
+                "PREPARE_USER_ACCEPTED",
+                "CLIENT_VERSION_SELECTED",
+            }:
+                history = t2_native_state_recovery.reconcile_missing_components(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    journal_path=journal_path,
+                )
+            if history.milestone == "MISSING_COMPONENTS_RECONCILED":
+                history = t2_native_state_recovery.restore_saved_user(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    user=local,
+                    journal_path=journal_path,
+                )
+            elif history.milestone == "SAVED_USER_LOAD_ACCEPTED":
+                history = t2_native_state_recovery.reconcile_saved_user(
+                    lease,
+                    apple_user_id=selected.apple_uid,
+                    user=local,
+                    journal_path=journal_path,
+                )
+            if history.milestone in {
+                "SAVED_USER_RECONCILED",
+                "CATACOMB_PERSISTENCE_RECONCILED",
+                "BIOLOCKOUT_RECONCILED",
+            }:
+                history, local, final_live = finish_recovery(
+                    lease, history, local
+                )
+
+        if history.milestone in {
+            "COLD_RESTART_PREPARED", "CANONICAL_RESTART_PREPARED"
+        }:
+            raise IdentityManagementError(
+                "cold bridgeOS restart and a different Linux boot are required"
+            )
+        if not history.complete:
+            raise IdentityManagementError(
+                "native-state recovery did not reach its completion boundary"
+            )
+        if final_live is None:
+            final_live = t2_bridge_inventory.collect_stable_private_inventory(
+                lease, selected.apple_uid
+            )
+        inventory = t2_identity_inventory.summarize(local, final_live)
+        return {
+            "schema_version": 1,
+            "operation": "native-state-recovery",
+            "state": "complete",
+            "identity_count": inventory["identity_count"],
+            "fingerprint_mutation_performed": False,
+            "fingerprint_reenrollment_required": (
+                history.milestone == "EMPTY_REPROVISION_COMPLETE"
+            ),
+            "identifiers_redacted": True,
+        }
+
+
 def run_external_delete_reconciliation(
     configuration: dict[str, object],
     *,
@@ -1615,10 +2226,20 @@ def run_external_delete_reconciliation(
         user_name = f'user_{configuration["apple_uid"]:08x}.cat'
         if if_needed:
             cold_restored = False
-            # Cold bridgeOS has not loaded the Linux-owned Catacombs yet.
-            # Its empty inventory is not evidence of an external deletion.
-            # Restore only that exact master-only state, then independently
-            # compare the fresh inventory before admitting fprintd startup.
+            if (
+                configuration.get("authority_mode") == "linux-native"
+                and t2_native_state_recovery.is_retained_master_inventory(
+                    live, configuration["apple_uid"]
+                )
+            ):
+                raise IdentityManagementError(
+                    "retained master requires explicit native-state recovery"
+                )
+            # Cold bridgeOS has not loaded the Linux-owned user Catacomb yet;
+            # after an abrupt host exit it can retain only the clean master.
+            # Neither exact master-only shape is evidence of an external
+            # deletion. Restore it, then independently compare fresh inventory
+            # before admitting fprintd startup.
             if (
                 configuration.get("authority_mode") == "linux-native"
                 and t2_native_state_restore.is_cold_unloaded_inventory(
@@ -1655,6 +2276,27 @@ def run_external_delete_reconciliation(
                         collect=t2_bridge_inventory.collect_stable_private_inventory,
                     )
             else:
+                if (
+                    configuration.get("authority_mode") == "linux-native"
+                    and not cold_restored
+                ):
+                    # Exact identities alone do not prove that a prior cold
+                    # restore reached its final BioLockout load.  Re-enter the
+                    # guarded restore on the same proven generation: with the
+                    # user already loaded it dispatches no Catacomb load and
+                    # reconciles only the rolling BioLockout authority.
+                    t2_native_state_restore.restore_for_enrollment(
+                        lease,
+                        apple_user_id=configuration["apple_uid"],
+                        catacomb_store=store,
+                        biolockout_store=t2_biolockout_store.BioLockoutStore(
+                            str(STATE_ROOT / "biolockout")
+                        ),
+                    )
+                    live = t2_bridge_inventory.collect_stable_private_inventory(
+                        lease, configuration["apple_uid"]
+                    )
+                    inventory = t2_identity_inventory.summarize(local, live)
                 return {
                     "schema_version": 1,
                     "external_deletion_reconciliation_needed": False,
@@ -3530,6 +4172,16 @@ def main() -> int:
     recover_delete.add_argument(
         "--acknowledge-interrupted-delete-recovery", action="store_true"
     )
+    recover_native_state = subparsers.add_parser(
+        "recover-native-state",
+        help="recover one exact retained-master Linux-native generation",
+    )
+    recover_native_state.add_argument(
+        "--acknowledge-retained-master-recovery", action="store_true"
+    )
+    recover_native_state.add_argument(
+        "--acknowledge-fingerprint-loss-and-reenrollment", action="store_true"
+    )
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("run through sudo from the mapped desktop user")
@@ -3571,6 +4223,10 @@ def main() -> int:
         args.acknowledge_interrupted_delete_recovery
     ):
         parser.error("interrupted-delete recovery acknowledgement is required")
+    if args.command == "recover-native-state" and not (
+        args.acknowledge_retained_master_recovery
+    ):
+        parser.error("retained-master recovery acknowledgement is required")
     try:
         configuration = runtime_configuration()
         _private_root_owned(STATE_ROOT, directory=True)
@@ -3597,6 +4253,14 @@ def main() -> int:
             elif args.command == "recover-delete":
                 with sleep_inhibitor():
                     result = run_delete_recovery(configuration)
+            elif args.command == "recover-native-state":
+                with sleep_inhibitor():
+                    result = run_native_state_recovery(
+                        configuration,
+                        allow_fingerprint_loss=(
+                            args.acknowledge_fingerprint_loss_and_reenrollment
+                        ),
+                    )
             elif args.command == "plan-delete":
                 result = run_delete_preflight(configuration, slot=args.slot)
             elif args.command == "plan-fprint-rename":
@@ -3669,6 +4333,7 @@ def main() -> int:
         t2_mutation_journal.JournalError,
         t2_mutation_registry.MutationRegistryError,
         t2_native_state_restore.NativeStateRestoreError,
+        t2_native_state_recovery.NativeStateRecoveryError,
         t2_user_activation_operation.UserActivationOperationError,
         t2_user_authority.UserAuthorityError,
         t2_user_policy.UserPolicyError,

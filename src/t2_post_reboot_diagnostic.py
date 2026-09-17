@@ -25,6 +25,7 @@ STAGES = frozenset(
 
 
 CHILD_FAILURE_REASONS = {
+    b"t2-touchid-manage: retained master requires explicit native-state recovery": "retained-master-recovery-required",
     b"t2-touchid-manage: restored master Catacomb does not advertise the selected user": "restore-user-not-advertised",
     b"t2-touchid-manage: selected user Catacomb load did not succeed": "restore-user-load-rejected",
     b"t2-touchid-manage: SEP Catacomb is not clean after the external deletion": "external-catacomb-not-clean",

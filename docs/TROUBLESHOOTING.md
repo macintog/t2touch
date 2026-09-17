@@ -93,22 +93,93 @@ inspect that service's journal. The automatic management child previously
 mistook a cold unloaded Catacomb for an external fingerprint deletion and
 stopped with “SEP Catacomb is not clean after the external deletion.”
 
-The exact cold generation has an absent Catacomb, empty live inventories, and
-only a clean master component at state 1 (unloaded). Startup now restores the
-committed Linux-owned master, user, and rolling BioLockout state through
-the existing guarded restore routine, then requires fresh exact inventory
-equality. Loaded-empty, dirty, foreign, and ambiguous states do not qualify;
-external deletion reconciliation retains its existing checks. Preserve the
-private state and journals rather than reenrolling or deleting recovery evidence.
+The exact recoverable generation has an absent Catacomb, empty live inventories,
+and only a clean master component. A cold T2 reports that master at state 1
+(unloaded); after an abrupt host exit bridgeOS can retain it at state 3
+(securely loaded) while the selected-user component is absent. State 1 remains
+the ordinary guarded cold-load path. State 3 is different: bridgeOS rejects a
+direct saved-user load until the missing master/user components are admitted at
+the pre-client protocol boundary.
 
-Cold startup keeps the connection that proved the pristine master-only state,
-then loads the committed master and selected-user blobs in that order. It does
-not issue missing-component command `0x31`: bridgeOS can retain the user even
-while it is absent from the component list, and declaring it missing creates a
-loaded-empty save-dirty state. Startup requires the selected user, exact
-identity inventory, group absence, and rolling BioLockout state to reconcile
-before publishing fprintd. A master-only state 3 is a partial restore and is
-not retried as a pristine cold generation.
+Normal startup therefore fails closed with
+`retained-master-recovery-required`; it does not replay a rejected load or
+mistake the empty inventory for an external deletion. Preserve private state
+and journals, then run the explicit recovery under the installer's persistent
+service hold:
+
+```bash
+./install-omarchy.sh --prepare-native-recovery
+sudo t2-touchid-manage recover-native-state \
+  --acknowledge-retained-master-recovery
+./install-omarchy.sh
+```
+
+This recovery fails closed if bridgeOS rejects the saved selected-user
+Catacomb. It preserves the enrolled local archive and stops before creating or
+persisting an empty generation. A normal install or upgrade never opts into
+fingerprint loss. If preserving the existing enrollment has proven impossible
+and the operator explicitly accepts deleting its local association and
+reenrolling, resume with both acknowledgements:
+
+```bash
+sudo t2-touchid-manage recover-native-state \
+  --acknowledge-retained-master-recovery \
+  --acknowledge-fingerprint-loss-and-reenrollment
+```
+
+The recovery requires the exact stable state-3 master-only surface and unchanged
+mapped Linux authority. It durably records intent before the pre-client
+master-then-user `0x31` sequence, accepts only prepared state 1 or 5 for the
+selected user, loads the saved user once, verifies the exact committed identity
+set and group absence, persists any state-7 user/master Catacombs through the
+existing typed save transaction, restores rolling BioLockout state, and finally
+requires a clean stable readback. If accepted preparation instead exposes the
+selected user as loaded and dirty with no identities, the same journal proves
+that exact empty surface, removes only that user once, saves and confirms the
+dirty master, and reruns component admission from the resulting master-only
+surface. If this bridgeOS build again produces state 7 for the empty selected
+user, the command preserves the exported intermediate master, derives the
+recorded retained-master candidate without replacing canonical state, and
+reports that a cold bridgeOS restart is required. After a different Linux boot,
+rerun the same recovery command. It proceeds only from an exact state-1 cold
+surface, loads the canonical enrolled master once, and then loads its matching
+saved user once. Earlier recovery code instead loaded the exported empty-
+generation master; bridgeOS accepted that master but rejected the enrolled user.
+Such a journal is redirected through one more cold boundary and never replays
+the rejected command. A Linux reboot that leaves bridgeOS warm does not satisfy
+either gate.
+
+On bridgeOS 23P6068 the canonical-master `0x40` load can return a nonzero reply
+while independently moving the exact cold master from state 1 to state 3. The
+journal treats the reply as terminal until a later stable read proves precisely
+that master-only transition with zero identities and groups. It then records
+that the load was not replayed and proceeds to the matching saved user once.
+An unchanged state-1 master or any additional component remains blocked.
+This is the narrow production form of the recorded compatibility repair; it
+does not admit a loaded user containing an identity. A rejected or
+transport-ambiguous command is never replayed. Foreign, grouped, changed,
+nonempty, or otherwise ambiguous state remains blocked for evidence-based
+recovery.
+
+If the canonical user is then explicitly rejected, the enrolled archive does
+not belong to the master generation retained by bridgeOS. Recovery does not
+repeat either rejected load, does not try an older backup blindly, and stops
+with the enrolled archive preserved. Only the separate
+`--acknowledge-fingerprint-loss-and-reenrollment` option permits the following
+empty reprovision. From the exact clean master-only, zero-identity, zero-group
+surface, that explicitly destructive path admits a fresh empty selected-user
+component at the pre-client boundary, exports the resulting user/master pair,
+normalizes the master enrollment count to zero, and atomically commits both
+components while preserving the prior generation in the private backup store.
+The Linux account/keybag authority is unchanged, but the old fingerprint is
+unrecoverable and `t2touch enroll` is required after installation finishes. Any
+different live surface remains blocked.
+
+Each recovery invocation uses a separate root-private activation-journal file
+while retaining the recovery operation ID inside that journal. A completed
+ready activation from an earlier invocation is preserved as evidence and does
+not prevent the recovery transaction from resuming. An unresolved or malformed
+activation history still stops the command before biometric recovery dispatch.
 
 ## Another operating system changed the enrolled fingerprints
 

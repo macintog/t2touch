@@ -95,6 +95,116 @@ class IdentityManagementCommandTests(unittest.TestCase):
         self.assertFalse(result["external_deletion_reconciled"])
         self.assertFalse(result["local_catacomb_mutated"])
 
+    def test_automatic_external_check_never_mutates_retained_master(self):
+        configuration = {
+            "authority_mode": "linux-native",
+            "apple_uid": 501,
+            "mapping_generation": "a" * 64,
+        }
+        context = mock.MagicMock()
+        lease = mock.Mock()
+        retained = object()
+        context.__enter__.return_value = (
+            None, mock.Mock(), {}, object(), lease, retained
+        )
+        with (
+            mock.patch.object(
+                MODULE.t2_external_inventory_sync, "abort_undispatched"
+            ),
+            mock.patch.object(MODULE, "require_mapping_capability"),
+            mock.patch.object(
+                MODULE.t2_mutation_registry,
+                "blocks_new_mutation",
+                return_value=False,
+            ),
+            mock.patch.object(MODULE.os.path, "lexists", return_value=False),
+            mock.patch.object(MODULE, "_private_root_owned"),
+            mock.patch.object(
+                MODULE, "_native_management_lease", return_value=context
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "is_retained_master_inventory",
+                return_value=True,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_restore, "restore_for_enrollment"
+            ) as restore,
+        ):
+            with self.assertRaisesRegex(
+                MODULE.IdentityManagementError,
+                "explicit native-state recovery",
+            ):
+                MODULE.run_external_delete_reconciliation(
+                    configuration, if_needed=True
+                )
+        restore.assert_not_called()
+
+    def test_automatic_external_check_finishes_biolockout_after_exact_inventory(self):
+        configuration = {
+            "authority_mode": "linux-native",
+            "apple_uid": 501,
+            "mapping_generation": "a" * 64,
+        }
+        store = mock.Mock()
+        store.read_committed_components.return_value = {}
+        lease = mock.Mock()
+        local = object()
+        initial = object()
+        final = object()
+        context = mock.MagicMock()
+        context.__enter__.return_value = (
+            None, store, {}, local, lease, initial
+        )
+        with (
+            mock.patch.object(
+                MODULE.t2_external_inventory_sync, "abort_undispatched"
+            ),
+            mock.patch.object(MODULE, "require_mapping_capability"),
+            mock.patch.object(
+                MODULE.t2_mutation_registry,
+                "blocks_new_mutation",
+                return_value=False,
+            ),
+            mock.patch.object(MODULE.os.path, "lexists", return_value=False),
+            mock.patch.object(MODULE, "_private_root_owned"),
+            mock.patch.object(
+                MODULE, "_native_management_lease", return_value=context
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "is_retained_master_inventory",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_restore,
+                "is_cold_unloaded_inventory",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_restore, "restore_for_enrollment"
+            ) as restore,
+            mock.patch.object(
+                MODULE.t2_bridge_inventory,
+                "collect_stable_private_inventory",
+                return_value=final,
+            ),
+            mock.patch.object(
+                MODULE.t2_identity_inventory,
+                "summarize",
+                return_value={"identity_count": 1},
+            ) as summarize,
+        ):
+            result = MODULE.run_external_delete_reconciliation(
+                configuration, if_needed=True
+            )
+        restore.assert_called_once()
+        self.assertEqual(
+            [call.args for call in summarize.call_args_list],
+            [(local, initial), (local, final)],
+        )
+        self.assertFalse(result["external_deletion_reconciled"])
+
     def test_status_is_redacted_and_counts_only_rename_operations(self):
         entries = (
             SimpleNamespace(
@@ -250,6 +360,198 @@ class IdentityManagementCommandTests(unittest.TestCase):
             ):
                 MODULE.run_external_delete_reconciliation({})
         capability.assert_called_once_with({}, "identity-management")
+
+    def test_native_state_recovery_requires_installer_hold(self):
+        configuration = {"authority_mode": "linux-native"}
+        with (
+            mock.patch.object(MODULE, "require_mapping_capability") as capability,
+            mock.patch.object(MODULE.os.path, "lexists", return_value=False),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.IdentityManagementError, "installer recovery hold"
+            ):
+                MODULE.run_native_state_recovery(configuration)
+        capability.assert_called_once_with(configuration, "identity-management")
+
+    def test_native_state_recovery_preserves_incompatible_fingerprint_by_default(self):
+        configuration = {"authority_mode": "linux-native"}
+        journal = Path("/var/lib/t2-touchid/mutations/recovery.jsonl")
+        history = SimpleNamespace(
+            operation_id=str(uuid.UUID(int=81)),
+            complete=False,
+            blocked=True,
+            milestone="CANONICAL_USER_LOAD_REPLY_REJECTED",
+        )
+
+        def lexists(path):
+            return path == MODULE.STATE_ROOT / "native-recovery-hold"
+
+        with (
+            mock.patch.object(MODULE, "require_mapping_capability"),
+            mock.patch.object(MODULE.os.path, "lexists", side_effect=lexists),
+            mock.patch.object(MODULE, "_private_root_owned"),
+            mock.patch.object(
+                MODULE.t2_mutation_registry,
+                "blocks_new_mutation",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "find_journal",
+                return_value=journal,
+            ),
+            mock.patch.object(
+                MODULE.t2_mutation_journal, "read", return_value=[object()]
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "validate_history",
+                return_value=history,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "canonical_restart_is_resumable",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "canonical_master_reply_is_resumable",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "empty_reprovision_is_resumable",
+                return_value=True,
+            ),
+            mock.patch.object(MODULE, "_native_management_lease") as lease,
+        ):
+            with self.assertRaisesRegex(
+                MODULE.IdentityManagementError, "preserving it"
+            ):
+                MODULE.run_native_state_recovery(configuration)
+        lease.assert_not_called()
+
+    def test_native_state_recovery_requires_specific_loss_acknowledgement(self):
+        configuration = {"authority_mode": "linux-native"}
+        journal = Path("/var/lib/t2-touchid/mutations/recovery.jsonl")
+        history = SimpleNamespace(
+            operation_id=str(uuid.UUID(int=82)),
+            complete=False,
+            blocked=True,
+            milestone="CANONICAL_USER_LOAD_REPLY_REJECTED",
+        )
+        context = mock.MagicMock()
+        context.__enter__.side_effect = RuntimeError("entered recovery lease")
+
+        def lexists(path):
+            return path == MODULE.STATE_ROOT / "native-recovery-hold"
+
+        with (
+            mock.patch.object(MODULE, "require_mapping_capability"),
+            mock.patch.object(MODULE.os.path, "lexists", side_effect=lexists),
+            mock.patch.object(MODULE, "_private_root_owned"),
+            mock.patch.object(
+                MODULE.t2_mutation_registry,
+                "blocks_new_mutation",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "find_journal",
+                return_value=journal,
+            ),
+            mock.patch.object(
+                MODULE.t2_mutation_journal, "read", return_value=[object()]
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "validate_history",
+                return_value=history,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "canonical_restart_is_resumable",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "canonical_master_reply_is_resumable",
+                return_value=False,
+            ),
+            mock.patch.object(
+                MODULE.t2_native_state_recovery,
+                "empty_reprovision_is_resumable",
+                return_value=True,
+            ),
+            mock.patch.object(
+                MODULE, "_native_management_lease", return_value=context
+            ) as lease,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "entered recovery lease"):
+                MODULE.run_native_state_recovery(
+                    configuration, allow_fingerprint_loss=True
+                )
+        lease.assert_called_once()
+
+    def test_activation_journal_path_uses_preferred_name_when_absent(self):
+        operation_id = str(uuid.UUID(int=70))
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            MODULE, "ACTIVATION_ROOT", Path(directory)
+        ):
+            self.assertEqual(
+                MODULE._activation_journal_path(operation_id),
+                Path(directory) / f"{operation_id}.jsonl",
+            )
+
+    def test_activation_journal_path_retains_ready_history_on_resume(self):
+        operation_id = str(uuid.UUID(int=71))
+        replacement = uuid.UUID(int=72)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preferred = root / f"{operation_id}.jsonl"
+            preferred.write_text("retained", encoding="ascii")
+            with (
+                mock.patch.object(MODULE, "ACTIVATION_ROOT", root),
+                mock.patch.object(MODULE, "_private_root_owned"),
+                mock.patch.object(
+                    MODULE.t2_user_activation_journal,
+                    "read",
+                    return_value=SimpleNamespace(
+                        phase=(
+                            MODULE.t2_user_activation_journal.UserActivationPhase.READY
+                        )
+                    ),
+                ),
+                mock.patch.object(MODULE.uuid, "uuid4", return_value=replacement),
+            ):
+                selected = MODULE._activation_journal_path(operation_id)
+            self.assertEqual(selected, root / f"{replacement}.jsonl")
+            self.assertEqual(preferred.read_text(encoding="ascii"), "retained")
+
+    def test_activation_journal_path_refuses_unresolved_history(self):
+        operation_id = str(uuid.UUID(int=73))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / f"{operation_id}.jsonl").write_text(
+                "retained", encoding="ascii"
+            )
+            with (
+                mock.patch.object(MODULE, "ACTIVATION_ROOT", root),
+                mock.patch.object(MODULE, "_private_root_owned"),
+                mock.patch.object(
+                    MODULE.t2_user_activation_journal,
+                    "read",
+                    return_value=SimpleNamespace(
+                        phase=(
+                            MODULE.t2_user_activation_journal.UserActivationPhase.OUTCOME_UNKNOWN
+                        )
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.IdentityManagementError, "unresolved"
+                ):
+                    MODULE._activation_journal_path(operation_id)
 
     def test_delete_broker_dispatches_once_then_persists_survivors(self):
         generation = "00000000-0000-0000-0000-000000000111"

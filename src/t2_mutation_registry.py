@@ -17,6 +17,7 @@ import t2_identity_delete_journal
 import t2_identity_delete_batch_journal
 import t2_identity_rename_journal
 import t2_mutation_journal
+import t2_native_state_recovery
 
 
 class MutationRegistryError(RuntimeError):
@@ -197,6 +198,21 @@ def scan(root: Path) -> tuple[MutationEntry, ...]:
             # No typed completion state exists yet, so these are conservatively
             # owned by their future broker and always block another mutation.
             result.append(MutationEntry(kind, "unrouted", True, False))
+        elif kind == t2_native_state_recovery.KIND:
+            try:
+                history = t2_native_state_recovery.validate_history(records)
+            except t2_native_state_recovery.NativeStateRecoveryError as error:
+                raise MutationRegistryError(
+                    "native-state recovery journal is invalid"
+                ) from error
+            result.append(
+                MutationEntry(
+                    kind,
+                    history.milestone.lower().replace("_", "-"),
+                    not history.complete,
+                    False,
+                )
+            )
         else:
             raise MutationRegistryError("mutation journal kind is unsupported")
     return tuple(result)

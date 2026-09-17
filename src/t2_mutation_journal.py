@@ -27,6 +27,7 @@ ALLOWED_KINDS = {
     "delete-one",
     "delete-batch",
     "recovery",
+    "native-state-restore",
     "sync-user-catacomb",
     "reconcile-external-delete",
 }

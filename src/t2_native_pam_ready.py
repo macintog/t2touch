@@ -10,12 +10,15 @@ import pwd
 import stat
 from collections.abc import Callable
 
+import t2_catacomb_codec
+import t2_catacomb_store
 import t2_mutation_registry
 import t2_user_authority
 
 
 CONFIG = Path("/etc/t2-touchid.conf")
 MUTATION_ROOT = Path("/var/lib/t2-touchid/mutations")
+STORE_ROOT = Path("/var/lib/t2-touchid/catacomb")
 ROOT_UID = 0
 
 
@@ -23,21 +26,36 @@ class NativePamReadyError(RuntimeError):
     pass
 
 
+def _local_identity_count(apple_uid: int) -> int:
+    store = t2_catacomb_store.CatacombStore(STORE_ROOT, apple_uid)
+    components = store.read_committed_components()
+    user = t2_catacomb_codec.decode_user_catacomb(
+        components[f"user_{apple_uid:08x}.cat"], apple_uid
+    )
+    return len(user.identities)
+
+
 def require_native_readiness(
     linux_uid: int,
     *,
     authority_loader: Callable[[int], object] = t2_user_authority.load_runtime,
     mutation_scanner: Callable[[Path], object] = t2_mutation_registry.scan,
+    identity_counter: Callable[[int], int] = _local_identity_count,
 ) -> None:
     if type(linux_uid) is not int or linux_uid <= 0:
         raise NativePamReadyError("configured Linux UID is invalid")
-    if not callable(authority_loader) or not callable(mutation_scanner):
+    if (
+        not callable(authority_loader)
+        or not callable(mutation_scanner)
+        or not callable(identity_counter)
+    ):
         raise NativePamReadyError("native PAM readiness dependency is unavailable")
     try:
         authority = authority_loader(linux_uid)
         selected = authority.mapping_set.resolve(linux_uid, "verify")
         entries = mutation_scanner(MUTATION_ROOT)
         blocked = any(entry.blocks_new_mutation for entry in entries)
+        identity_count = identity_counter(selected.apple_uid)
     except (
         OSError,
         AttributeError,
@@ -48,6 +66,8 @@ def require_native_readiness(
         authority.origin != "linux-native-e4"
         or selected != authority.selected
         or selected.linux_uid != linux_uid
+        or type(identity_count) is not int
+        or identity_count <= 0
         or blocked
     ):
         raise NativePamReadyError("native PAM authority is not ready")

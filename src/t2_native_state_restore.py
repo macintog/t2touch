@@ -29,9 +29,14 @@ SECURELY_LOADED_STATE_BITS = 0x03
 
 
 def is_cold_unloaded_inventory(live: object, apple_user_id: int) -> bool:
-    """Recognize only a stable master-only bridgeOS restore generation.
+    """Recognize only a stable, clean master-only restore generation.
 
-    An empty loaded user can be an external deletion or corruption. It must
+    A cold generation reports an unloaded master (state 1).  A retained,
+    securely loaded master (state 3) is deliberately excluded: the selected
+    user must first be re-admitted through the pre-client missing-component
+    sequence, and a direct user load is rejected by bridgeOS.
+
+    An empty loaded *user* can be an external deletion or corruption. It must
     never be treated as permission to restore the committed identities.
     """
     if not isinstance(live, dict):
@@ -320,10 +325,12 @@ def restore_for_enrollment(
                 "live identity Catacomb is not securely loaded"
             )
         if not live_identities:
-            # A true cold bridgeOS generation advertises only a loadable master
-            # (state 1). Loading it makes the committed user blob admissible.
-            # By contrast, an already-loaded user with no live identities is
-            # the D206 no-Catacomb corruption and must never be overwritten.
+            # A cold bridgeOS generation advertises a loadable master (state 1).
+            # A retained state-3 master is not a direct-load boundary: the
+            # selected user must first be re-admitted by the separately
+            # journaled recovery path.  An already-loaded user with no live
+            # identities is the D206 no-Catacomb corruption and must never be
+            # overwritten.
             if (
                 user_component in by_component
                 and by_component[user_component].state & 0x02
@@ -331,6 +338,13 @@ def restore_for_enrollment(
             ):
                 raise NativeStateRestoreError(
                     "live identities are absent while the committed Catacomb reports loaded; cold bridgeOS restart required"
+                )
+            if (
+                user_component not in by_component
+                and by_component[master_component].state != 0x01
+            ):
+                raise NativeStateRestoreError(
+                    "retained master requires explicit native-state recovery"
                 )
             if (
                 user_component in by_component

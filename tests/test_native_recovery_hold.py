@@ -84,6 +84,10 @@ systemctl() {
         self.assertLess(text.index('hold_native_recovery ||'),
                         text.index('systemctl reload dbus.service'))
         recovery = text.index('    /usr/local/sbin/t2-sep-transport-load --prepare-native-recovery')
+        completed = text.index('    if (( validated_recovery_upgrade ));', recovery - 1000)
+        preserve = text.index('      /usr/local/sbin/t2-sep-transport-load\n', completed)
+        self.assertLess(completed, preserve)
+        self.assertLess(preserve, recovery)
         resume = text.index('  resume_native_recovery ||')
         self.assertIn('exit 0', text[recovery:resume])
         self.assertLess(resume, text.index('  start_linux_native_touchid_chain ||'))

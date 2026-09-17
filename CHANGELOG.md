@@ -6,6 +6,63 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.0.8 - 2026-09-17
+
+This release preserves enrolled fingerprints during recovery and makes
+journaled recovery and management operations resumable across verified
+state transitions and cold boots.
+
+### Fixed
+
+- Normalize the saved master Catacomb enrollment count to the exact stable live
+  identity count during external-inventory reconciliation. Previously a stale
+  local count could be paired with a freshly exported master secret and a
+  reconciled user archive: authentication continued in the warm bridgeOS
+  session, but the mismatched pair could reject the user archive after reboot.
+- Preserve an incompatible enrolled archive by default during retained-master
+  recovery. Empty-generation reprovision now requires a separate explicit
+  fingerprint-loss-and-reenrollment acknowledgement; installs and upgrades
+  never provide it automatically. When no fingerprints remain, skip fingerprint
+  PAM immediately instead of delaying the password prompt.
+- Admit completed, typed external-inventory and native-state recovery journals
+  as mapping-bound mutation authority. Their retained audit evidence no longer
+  prevents a later authorized fingerprint enrollment.
+- Reconcile the bridgeOS 23P6068 canonical-master load when it returns a
+  nonzero reply but independently changes the exact cold master from state 1
+  to state 3. Never replay that load; continue to the saved user only after the
+  journal and a stable zero-identity, zero-group master-only readback prove the
+  observed transition. All other nonzero replies remain terminal.
+- Correct retained-master recovery after hardware showed that bridgeOS rejects
+  a direct saved-user load from the clean state-3 master-only surface. Normal
+  startup now fails closed with a specific reason. An explicit acknowledged
+  command runs the observed pre-client component-admission sequence under the
+  installer recovery hold, journals every non-retryable boundary, verifies the
+  exact saved identities, persists dirty Catacombs, restores BioLockout, and
+  requires clean final readback.
+- Keep the matching SEP-pinned transport resident when preparing recovery for
+  a validated completed installation. Do not request first-run provisioning or
+  replacement gates that would force an impossible live module unload.
+- Recover the exact empty loaded-user state that bridgeOS can produce after
+  accepting retained-master component preparation. The same typed journal now
+  removes only that proven-empty user once, persists and confirms the dirty
+  master, and recreates the missing components. If bridgeOS again exposes an
+  empty loaded user, derive the recorded retained-master candidate offline and
+  require a different Linux boot with a truly cold state-1 surface. Restore the
+  canonical enrolled master and its matching saved user there; hardware proved
+  that an exported empty-generation master cannot accept the enrolled user.
+  Upgrade an already-rejected derived-master journal through a second cold
+  boundary without replaying the rejected command. Accepted commands remain
+  non-replayable across failures.
+- Resume a journaled management operation with a new activation-journal file
+  after its prior activation reached verified ready state. Keep the original
+  activation evidence and the policy-bound operation ID instead of failing on
+  the existing filename; unresolved activation histories still block.
+
+### Limitations
+
+- This remains experimental authentication software. Keep password fallback and
+  a recovery terminal available; these changes do not qualify additional models.
+
 ## 0.0.7 - 2026-09-16
 
 This release focuses on reliable fingerprint authentication, recoverable

@@ -379,6 +379,7 @@ install -d -o root -g root -m 0700 \
   /var/lib/t2-touchid/biolockout /var/lib/t2-touchid/catacomb \
   /var/lib/t2-touchid/fprint-sequence \
   /var/lib/t2-touchid/mutations /var/lib/t2-touchid/native-match \
+  /var/lib/t2-touchid/native-recovery-artifacts \
   /var/lib/t2-touchid/users \
   /var/lib/t2-touchid/replacement-archive \
   "/var/lib/t2-touchid/users/$target_uid" \
@@ -685,7 +686,17 @@ if [[ $authority_mode == linux-native ]]; then
     t2-touchid-post-reboot.service fprintd.service 2>/dev/null || true
   if (( prepare_native_recovery )); then
     systemctl start t2-biometric-port-refresh.service
-    /usr/local/sbin/t2-sep-transport-load --prepare-native-recovery
+    if (( validated_recovery_upgrade )); then
+      # A completed installation already has its Linux-native authority. Its
+      # retained-Catacomb repair uses Bridge plus the existing AKS/ACM identity
+      # and needs neither identity creation nor replacement. Asking the loader
+      # to enable those first-run capabilities would try to unload the
+      # SEP-pinned matching module, which is intentionally impossible in the
+      # current boot. Preserve the validated resident transport instead.
+      /usr/local/sbin/t2-sep-transport-load
+    else
+      /usr/local/sbin/t2-sep-transport-load --prepare-native-recovery
+    fi
     echo "Native recovery services installed. Automatic biometric services remain paused across reboot."
     echo "After reconciling private state, rerun the normal installer to resume setup."
     exit 0

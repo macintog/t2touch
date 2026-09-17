@@ -34,7 +34,13 @@ class ExternalInventoryError(RuntimeError):
     pass
 
 
-def live_pairs(live: dict, apple_uid: int, *, clean: bool = False) -> set:
+def live_pairs(
+    live: dict,
+    apple_uid: int,
+    *,
+    clean: bool = False,
+    allow_empty: bool = False,
+) -> set:
     if (not isinstance(live, dict) or live.get('double_collection_equal') is not True
             or live.get('biometric_protocol_version') != 2
             or live.get('apple_uid') != apple_uid):
@@ -42,10 +48,12 @@ def live_pairs(live: dict, apple_uid: int, *, clean: bool = False) -> set:
     pairs = inventory._live_pairs(live.get('per_user_identity_records'), apple_uid)
     if pairs != inventory._configured_global_pairs(live.get('global_identity_records'), apple_uid):
         raise ExternalInventoryError('external per-user and global inventories disagree')
-    if not 0 < len(pairs) <= names.MAX_ENROLLED_IDENTITIES:
+    if not 0 <= len(pairs) <= names.MAX_ENROLLED_IDENTITIES or (
+        not pairs and not allow_empty
+    ):
         raise ExternalInventoryError('external inventory has unsupported capacity')
     cat = live.get('catacomb')
-    if not isinstance(cat, dict) or cat.get('present') is not True:
+    if not isinstance(cat, dict):
         raise ExternalInventoryError('external inventory has no loaded Catacomb')
     journal.require_uuid(cat.get('uuid'), 'Catacomb UUID')
     journal.require_sha256(cat.get('hash'), 'Catacomb hash')
@@ -62,11 +70,25 @@ def live_pairs(live: dict, apple_uid: int, *, clean: bool = False) -> set:
                 or item['needs_save'] is not (item['state'] == 7)):
             raise ExternalInventoryError('external component is not securely loaded')
         found.add(key)
+    if not pairs:
+        if (
+            cat.get('present') is not False
+            or cat.get('uuid') != str(uuid.UUID(int=0))
+            or cat.get('hash') != '0' * 64
+            or found != {('master', 0xFFFFFFFF), ('user', apple_uid)}
+        ):
+            raise ExternalInventoryError(
+                'empty external inventory has no exact Catacomb authority'
+            )
+    elif cat.get('present') is not True:
+        raise ExternalInventoryError('external inventory has no loaded Catacomb')
     return pairs
 
 
-def plan(local: codec.UserCatacomb, live: dict) -> bytes:
-    pairs = live_pairs(live, local.expected_user_id)
+def plan(
+    local: codec.UserCatacomb, live: dict, *, allow_empty: bool = False
+) -> bytes:
+    pairs = live_pairs(live, local.expected_user_id, allow_empty=allow_empty)
     result = local
     for identity in local.identities:
         if (identity.user_id, identity.uuid) not in pairs:
@@ -84,7 +106,12 @@ def plan(local: codec.UserCatacomb, live: dict) -> bytes:
         entity = next(n for n in range(1, 256) if n not in {item.entity for item in result.identities})
         result = codec.decode_user_catacomb(result.add(identity_uuid=identity_uuid, entity=entity, name=handle), local.expected_user_id)
         occupied.add(handle)
-    inventory.summarize(result, live)
+    if pairs:
+        inventory.summarize(result, live)
+    elif result.identities:
+        raise ExternalInventoryError(
+            'empty external inventory did not produce an empty local plan'
+        )
     return result.replace_secure_data(result.secure_data)
 
 
@@ -167,10 +194,13 @@ def abort_undispatched(*, mutation_root: Path, store_root: Path, backup_root: Pa
 
 
 def reconcile(*, local, live, store, lease, mapping_generation, backup_root: Path,
-              mutation_root: Path, collect) -> dict:
+              mutation_root: Path, collect, allow_empty: bool = False,
+              operation_id: str | None = None) -> dict:
     """Save a changed inventory under an already-authorized native lease."""
-    pairs = live_pairs(live, local.expected_user_id)
-    encoded_plan = plan(local, live)
+    pairs = live_pairs(
+        live, local.expected_user_id, allow_empty=allow_empty
+    )
+    encoded_plan = plan(local, live, allow_empty=allow_empty)
     proposed = codec.decode_user_catacomb(encoded_plan, local.expected_user_id)
     components = store.read_committed_components()
     user_name = f'user_{local.expected_user_id:08x}.cat'
@@ -178,9 +208,26 @@ def reconcile(*, local, live, store, lease, mapping_generation, backup_root: Pat
         raise ExternalInventoryError('local inventory changed before reconciliation')
     # Reject races before the first save request; the hardware has other owners.
     fresh = collect(lease, local.expected_user_id)
-    if live_pairs(fresh, local.expected_user_id) != pairs or fresh['catacomb'] != live['catacomb']:
+    if (
+        live_pairs(
+            fresh, local.expected_user_id, allow_empty=allow_empty
+        ) != pairs
+        or fresh['catacomb'] != live['catacomb']
+    ):
         raise ExternalInventoryError('external inventory changed before persistence')
-    operation_id = str(uuid.uuid4())
+    if operation_id is None:
+        operation_id = str(uuid.uuid4())
+    else:
+        try:
+            parsed_operation_id = uuid.UUID(operation_id)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ExternalInventoryError(
+                'external inventory operation ID is invalid'
+            ) from error
+        if str(parsed_operation_id) != operation_id:
+            raise ExternalInventoryError(
+                'external inventory operation ID is invalid'
+            )
     backup = backup_store.create_backup(backup_root, operation_id, components)
     identity_hash = hashlib.sha256(journal.canonical(sorted(pairs))).hexdigest()
     path = mutation_root / f'{operation_id}.jsonl'
@@ -224,11 +271,23 @@ def reconcile(*, local, live, store, lease, mapping_generation, backup_root: Pat
         if len(blob) != size:
             raise ExternalInventoryError('external master export length changed')
         master = codec.decode_master_catacomb(components['master.cat'])
-        staged['master.cat'] = store.stage_component('master.cat', master.encode(secure_data=bytes(blob)), {user_name, 'master.cat'})
+        staged['master.cat'] = store.stage_component(
+            'master.cat',
+            master.encode(
+                secure_data=bytes(blob),
+                enrollment_count=len(pairs),
+            ),
+            {user_name, 'master.cat'},
+        )
         digest = hashlib.sha256(journal.canonical(staged)).hexdigest()
         # A race after export cannot authorize publishing the wrong templates.
         fresh = collect(lease, local.expected_user_id)
-        if live_pairs(fresh, local.expected_user_id) != pairs or fresh['catacomb']['uuid'] != live['catacomb']['uuid']:
+        if (
+            live_pairs(
+                fresh, local.expected_user_id, allow_empty=allow_empty
+            ) != pairs
+            or fresh['catacomb']['uuid'] != live['catacomb']['uuid']
+        ):
             raise ExternalInventoryError('external inventory changed during persistence')
         record(STEPS[4], digest)
         store.cross_commit_boundary(staged)
@@ -236,7 +295,15 @@ def reconcile(*, local, live, store, lease, mapping_generation, backup_root: Pat
         transport.confirm(master_descriptor)
         saved = codec.decode_user_catacomb(store.read_committed_components()[user_name], local.expected_user_id)
         fresh = collect(lease, local.expected_user_id)
-        if live_pairs(fresh, local.expected_user_id, clean=True) != pairs or fresh['catacomb']['uuid'] != live['catacomb']['uuid']:
+        if (
+            live_pairs(
+                fresh,
+                local.expected_user_id,
+                clean=True,
+                allow_empty=allow_empty,
+            ) != pairs
+            or fresh['catacomb']['uuid'] != live['catacomb']['uuid']
+        ):
             raise ExternalInventoryError('external inventory changed after persistence')
         inventory.summarize(saved, fresh)
         record(STEPS[6], digest)

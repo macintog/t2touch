@@ -97,6 +97,12 @@ class PostRebootReconcilerTests(unittest.TestCase):
             ),
             "foreign-live-authority",
         )
+        self.assertEqual(
+            post_reboot_diagnostic.child_failure_reason(
+                b"t2-touchid-manage: retained master requires explicit native-state recovery\n"
+            ),
+            "retained-master-recovery-required",
+        )
         for private in (b"private payload", message + b" private identifier", b"x" * 513,
                         "private payload", None):
             self.assertIsNone(post_reboot_diagnostic.child_failure_reason(private))

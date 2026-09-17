@@ -24,6 +24,11 @@ start_touchid_stage() {
     # shellcheck disable=SC2154
     echo "  sudo t2-touchid-user-map status --linux-uid $target_uid" >&2
     echo "Account rebinding is intentionally never automatic." >&2
+  elif [[ $unit == t2-touchid-post-reboot.service ]]; then
+    echo "If the redacted reason is retained-master-recovery-required, run:" >&2
+    echo "  ./install-omarchy.sh --prepare-native-recovery" >&2
+    echo "  sudo t2-touchid-manage recover-native-state --acknowledge-retained-master-recovery" >&2
+    echo "  ./install-omarchy.sh" >&2
   fi
   return 1
 }

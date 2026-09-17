@@ -13,8 +13,10 @@ import t2_identity_delete_batch_journal as batch_journal
 import t2_external_delete_reconcile as external_reconcile
 import t2_mutation_journal as mutation
 import t2_mutation_registry as registry
+import t2_native_state_recovery as native_recovery
 from tests.test_external_delete_reconcile import baseline_evidence as external_baseline
 from tests.test_mutation_journal import baseline
+from tests.test_native_state_recovery import authority, retained_inventory
 
 
 class MutationRegistryTests(unittest.TestCase):
@@ -192,6 +194,28 @@ class MutationRegistryTests(unittest.TestCase):
             (root / "unexpected").write_text("bad")
             with self.assertRaises(registry.MutationRegistryError):
                 registry.scan(root)
+
+    def test_native_state_recovery_blocks_from_its_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            operation_id = "00000000-0000-0000-0000-000000000076"
+            path = root / f"{operation_id}.jsonl"
+            user, components = authority()
+            native_recovery.create_journal(
+                path,
+                operation_id,
+                apple_user_id=501,
+                mapping_generation="a" * 64,
+                linux_boot_uuid="00000000-0000-0000-0000-000000000001",
+                live=retained_inventory(),
+                components=components,
+                user=user,
+            )
+            entry = registry.scan(root)[0]
+            self.assertEqual(entry.kind, native_recovery.KIND)
+            self.assertEqual(entry.phase, "baseline-reconciled")
+            self.assertTrue(entry.blocks_new_mutation)
 
 
 if __name__ == "__main__":

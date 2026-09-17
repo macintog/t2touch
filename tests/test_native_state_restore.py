@@ -53,7 +53,7 @@ class FakeLease:
 
 
 class NativeStateRestoreTests(unittest.TestCase):
-    def test_cold_inventory_requires_exact_unloaded_master_only_state(self):
+    def test_cold_inventory_requires_exact_clean_master_only_state(self):
         cold = {
             "double_collection_equal": True,
             "apple_uid": USER,
@@ -84,7 +84,7 @@ class NativeStateRestoreTests(unittest.TestCase):
                 changed = copy.deepcopy(cold)
                 changed[field] = value
                 self.assertFalse(restore.is_cold_unloaded_inventory(changed, USER))
-        for state in (0, 3, 7, 9, True):
+        for state in (0, 2, 7, 9, True):
             with self.subTest(master_state=state):
                 changed = copy.deepcopy(cold)
                 changed["catacomb"]["user_states"][0]["state"] = state
@@ -246,6 +246,51 @@ class NativeStateRestoreTests(unittest.TestCase):
             state_reads=(master_state(1), master_state(3), states(3, 3)),
             identity_reads=(b"", identity),
         )
+        catacomb = SimpleNamespace(
+            read_committed_components=lambda: {
+                "master.cat": b"master",
+                "user_000001f5.cat": b"user",
+            }
+        )
+        biolockout = SimpleNamespace(
+            current=lambda: SimpleNamespace(payload=b"HRLB-current")
+        )
+        with (
+            patch.object(
+                restore.t2_catacomb_codec,
+                "decode_master_catacomb",
+                return_value=SimpleNamespace(secure_data=b"LTFC-master"),
+            ),
+            patch.object(
+                restore.t2_catacomb_codec,
+                "decode_user_catacomb",
+                return_value=SimpleNamespace(
+                    secure_data=b"LTFC-user",
+                    identities=(
+                        SimpleNamespace(
+                            user_id=USER,
+                            uuid=str(uuid.UUID(int=1)),
+                        ),
+                    ),
+                ),
+            ),
+        ):
+            count = restore.restore_for_enrollment(
+                lease,
+                apple_user_id=USER,
+                catacomb_store=catacomb,
+                biolockout_store=biolockout,
+            )
+        self.assertEqual(count, 1)
+        self.assertEqual(lease.commands.count(0x40), 2)
+        self.assertFalse(lease.invalidated)
+
+    def test_clean_retained_master_requires_explicit_recovery(self):
+        identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes
+        lease = FakeLease(
+            state_reads=(master_state(3), master_state(3), states(3, 3)),
+            identity_reads=(b"", identity),
+        )
         catacomb = SimpleNamespace(read_committed_components=lambda: {
             "master.cat": b"master", "user_000001f5.cat": b"user",
         })
@@ -259,15 +304,18 @@ class NativeStateRestoreTests(unittest.TestCase):
                          return_value=SimpleNamespace(secure_data=b"LTFC-user", identities=(
                              SimpleNamespace(user_id=USER, uuid=str(uuid.UUID(int=1))),))),
         ):
-            count = restore.restore_for_enrollment(
-                lease,
-                apple_user_id=USER,
-                catacomb_store=catacomb,
-                biolockout_store=biolockout,
-            )
-        self.assertEqual(count, 1)
-        self.assertEqual(lease.commands.count(0x40), 2)
-        self.assertFalse(lease.invalidated)
+            with self.assertRaisesRegex(
+                restore.NativeStateRestoreError,
+                "explicit native-state recovery",
+            ):
+                restore.restore_for_enrollment(
+                    lease,
+                    apple_user_id=USER,
+                    catacomb_store=catacomb,
+                    biolockout_store=biolockout,
+                )
+        self.assertEqual(lease.commands.count(0x40), 0)
+        self.assertTrue(lease.invalidated)
 
     def test_live_identity_allows_secure_dirty_user_for_following_enrollment(self):
         identity = struct.pack("<I", USER) + uuid.UUID(int=1).bytes

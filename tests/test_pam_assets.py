@@ -87,7 +87,7 @@ class PamAssetTests(unittest.TestCase):
         self.assertNotIn("t2-pam-unlock", sudo_stack)
 
     def test_native_e4_readiness_does_not_require_compatibility_markers(self):
-        selected = SimpleNamespace(linux_uid=1000)
+        selected = SimpleNamespace(linux_uid=1000, apple_uid=501)
         authority = SimpleNamespace(
             origin="linux-native-e4",
             selected=selected,
@@ -105,12 +105,30 @@ class PamAssetTests(unittest.TestCase):
             mutation_scanner=lambda _root: (
                 SimpleNamespace(blocks_new_mutation=False),
             ),
+            identity_counter=lambda apple_uid: 1 if apple_uid == 501 else 0,
         )
 
         helper = (ROOT / "src/t2-pam-fingerprint-ready.sh").read_text()
         self.assertIn("T2_TOUCHID_AUTHORITY_MODE", helper)
         self.assertIn("t2_native_pam_ready.py", helper)
         self.assertIn("keybags-unlocked", helper)
+
+    def test_native_e4_readiness_skips_pam_when_no_fingerprints_exist(self):
+        selected = SimpleNamespace(linux_uid=1000, apple_uid=501)
+        authority = SimpleNamespace(
+            origin="linux-native-e4",
+            selected=selected,
+            mapping_set=SimpleNamespace(resolve=lambda _uid, _capability: selected),
+        )
+        with self.assertRaisesRegex(
+            NATIVE_READY.NativePamReadyError, "not ready"
+        ):
+            NATIVE_READY.require_native_readiness(
+                1000,
+                authority_loader=lambda _uid: authority,
+                mutation_scanner=lambda _root: (),
+                identity_counter=lambda _apple_uid: 0,
+            )
 
     def test_pam_unlock_prompts_separately_without_shell_storage(self):
         helper = (ROOT / "src/t2-pam-unlock.sh").read_text()

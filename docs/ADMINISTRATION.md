@@ -124,7 +124,7 @@ unchanged.
 | `t2-touchid-delete` | `/usr/local/sbin` | pkexec helper for one-slot deletion |
 | `t2-touchid-purge` | `/usr/local/sbin` | pkexec helper for batch deletion |
 | `t2-fprintd-enroll-tui-launch` | `/usr/local/sbin` | Product enrollment TUI used by `t2touch enroll` |
-| `t2-touchid-manage` | `/usr/local/sbin` | Admin mutations; adaptive-sync unit `ExecStart` |
+| `t2-touchid-manage` | `/usr/local/sbin` | Admin mutations, adaptive sync, and explicit retained-master recovery |
 | `t2-fprint-enrollment-worker`, `t2-fprint-delete-worker` | `/usr/local/sbin` | Root workers launched by the daemon |
 | `t2-aks-tool` | `/usr/local/sbin` | AKS helper used by PAM and keybag units |
 | `t2-pam-unlock`, `t2-pam-fingerprint-ready`, `t2-pam-fingerprint-prompt` | `/usr/local/sbin` | PAM stack helpers |
