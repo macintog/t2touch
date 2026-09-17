@@ -47,6 +47,9 @@ def collect_account(uid):
     return account.AccountEvidence(uid, "a" * 64)
 
 
+LINUX_PIDFD = hasattr(os, "pidfd_open") and Path("/proc/self/stat").exists()
+
+
 class FprintClaimTests(unittest.TestCase):
     def caller(self, uid=None):
         selected_uid = os.getuid() if uid is None else uid
@@ -60,6 +63,7 @@ class FprintClaimTests(unittest.TestCase):
             ":1.42", subject, descriptor
         )
 
+    @unittest.skipUnless(LINUX_PIDFD, "pidfd and /proc claim evidence require Linux")
     def test_collects_and_revalidates_redacted_claim_evidence(self):
         caller = self.caller()
         backend = FakeBackend(os.getuid())
@@ -84,6 +88,7 @@ class FprintClaimTests(unittest.TestCase):
         finally:
             caller.close()
 
+    @unittest.skipUnless(LINUX_PIDFD, "pidfd and /proc claim evidence require Linux")
     def test_session_change_fails_revalidation(self):
         caller = self.caller()
         backend = FakeBackend(os.getuid())
@@ -101,6 +106,7 @@ class FprintClaimTests(unittest.TestCase):
         finally:
             caller.close()
 
+    @unittest.skipUnless(LINUX_PIDFD, "pidfd and /proc claim evidence require Linux")
     def test_account_change_fails_revalidation(self):
         caller = self.caller()
         backend = FakeBackend(os.getuid())
@@ -123,6 +129,7 @@ class FprintClaimTests(unittest.TestCase):
         finally:
             caller.close()
 
+    @unittest.skipUnless(LINUX_PIDFD, "pidfd and /proc claim evidence require Linux")
     def test_nonroot_cannot_bind_another_users_session(self):
         caller = self.caller()
         different_uid = os.getuid() + 1
@@ -144,6 +151,7 @@ class FprintClaimTests(unittest.TestCase):
         finally:
             caller.close()
 
+    @unittest.skipUnless(LINUX_PIDFD, "pidfd and /proc claim evidence require Linux")
     def test_root_requires_direct_session_binding_to_target_user(self):
         target_uid = os.getuid()
         original_subject = polkit.read_process_subject(os.getpid(), os.getuid())
@@ -196,6 +204,36 @@ class FprintClaimTests(unittest.TestCase):
                 caller.close()
         self.assertEqual(original_subject.uid, os.getuid())
 
+    def test_polkit_helper_cgroup_accepts_accept_yes_instance_formats(self):
+        samples = (
+            b"0::/system.slice/system-polkit\\x2dagent\\x2dhelper.slice/"
+            b"polkit-agent-helper@0-0-0_0-1000.service\n",
+            b"0::/system.slice/system-polkit\\x2dagent\\x2dhelper.slice/"
+            b"polkit-agent-helper@0-1676-1000.service",
+            b"0::/system.slice/system-polkit\\x2dagent\\x2dhelper.slice/"
+            b"polkit-agent-helper@13324-26155-1680-1000.service\n",
+        )
+        for sample in samples:
+            matched = claim.POLKIT_AGENT_CGROUP.fullmatch(sample)
+            self.assertIsNotNone(matched, sample)
+            self.assertEqual(int(matched.group(1), 10), 1000)
+
+    def test_polkit_helper_cgroup_rejects_unrelated_units(self):
+        self.assertIsNone(
+            claim.POLKIT_AGENT_CGROUP.fullmatch(
+                b"0::/user.slice/user-1000.slice/session-1.scope\n"
+            )
+        )
+
+    def test_polkit_helper_binding_does_not_require_proc_exe_access(self):
+        source = Path(claim.__file__).read_text(encoding="utf-8")
+        helper = source[source.index("def _is_polkit_agent_helper(") :]
+        helper = helper[: helper.index("\ndef _polkit_target_session(")]
+        self.assertNotIn('process_root / "exe"', helper)
+        self.assertIn("POLKIT_AGENT_CGROUP.fullmatch", helper)
+        self.assertIn("expected.st_uid", helper)
+
+    @unittest.skipUnless(LINUX_PIDFD, "pidfd and /proc claim evidence require Linux")
     def test_setuid_root_claim_is_always_verification_only(self):
         target_uid = os.getuid()
         original = polkit.read_process_subject(os.getpid(), target_uid)

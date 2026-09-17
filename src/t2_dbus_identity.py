@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import os
-import signal
+import select
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -78,7 +78,13 @@ class PinnedDBusCaller:
         if self._closed:
             raise DBusIdentityError("D-Bus caller pidfd is closed")
         try:
-            signal.pidfd_send_signal(self.pidfd, 0)
+            poller = select.poll()
+            poller.register(
+                self.pidfd,
+                select.POLLIN | select.POLLERR | select.POLLHUP,
+            )
+            if poller.poll(0):
+                raise DBusIdentityError("D-Bus caller process disappeared")
             current = t2_polkit_grant.read_process_subject(
                 self.subject.pid,
                 self.subject.uid,
@@ -86,6 +92,8 @@ class PinnedDBusCaller:
                 allow_root=True,
                 allow_setuid_root=self.subject.setuid_real_uid is not None,
             )
+        except DBusIdentityError:
+            raise
         except (OSError, t2_polkit_grant.PolkitGrantError) as error:
             raise DBusIdentityError("D-Bus caller process disappeared") from error
         if current != self.subject:

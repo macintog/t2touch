@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Copy to /etc/t2-touchid.conf and keep it root-owned, mode 0600.
+# The installer fills T2_TOUCHID_HOST and T2_TOUCHID_INTERFACE. Do not copy
+# these placeholders by hand.
 T2_TOUCHID_USER=your-linux-user
 T2_TOUCHID_HOST=fe80::replace-with-the-t2-link-local-address
 T2_TOUCHID_INTERFACE=replace-with-the-t2-usb-network-interface

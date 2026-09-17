@@ -45,6 +45,7 @@ import t2_enrollment_finalizer
 import t2_enrollment_journal
 import t2_enrollment_persistence_journal
 import t2_external_delete_reconcile
+import t2_external_inventory_sync
 import t2_fprint_projection
 import t2_fprint_sequence
 import t2_identity_delete
@@ -1567,6 +1568,12 @@ def run_external_delete_reconciliation(
     """Prune one local-only identity after an external SEP deletion."""
 
     require_mapping_capability(configuration, "identity-management")
+    if if_needed and configuration.get("authority_mode") == "linux-native":
+        t2_external_inventory_sync.abort_undispatched(
+            mutation_root=MUTATION_ROOT, store_root=STORE_ROOT,
+            backup_root=EXTERNAL_BACKUP_ROOT, apple_uid=configuration["apple_uid"],
+            mapping_generation=configuration["mapping_generation"],
+        )
     if t2_mutation_registry.blocks_new_mutation(MUTATION_ROOT):
         raise IdentityManagementError(
             "an earlier biometric mutation is unfinished or awaits verification"
@@ -1640,7 +1647,13 @@ def run_external_delete_reconciliation(
                     # A restored generation must match exactly. Never prune
                     # local identities to disguise a failed cold-start proof.
                     raise
-                pass
+                if configuration.get("authority_mode") == "linux-native" and live.get("per_user_identity_records"):
+                    return t2_external_inventory_sync.reconcile(
+                        local=local, live=live, store=store, lease=lease,
+                        mapping_generation=configuration["mapping_generation"],
+                        backup_root=EXTERNAL_BACKUP_ROOT, mutation_root=MUTATION_ROOT,
+                        collect=t2_bridge_inventory.collect_stable_private_inventory,
+                    )
             else:
                 return {
                     "schema_version": 1,
@@ -3639,6 +3652,7 @@ def main() -> int:
         t2_catacomb_store.CatacombStoreError,
         t2_enrollment_finalizer.EnrollmentFinalizerError,
         t2_external_delete_reconcile.ExternalDeleteReconcileError,
+        t2_external_inventory_sync.ExternalInventoryError,
         t2_identity_delete.IdentityDeleteError,
         t2_identity_delete_bridge.IdentityDeleteBridgeError,
         t2_identity_delete_journal.IdentityDeleteJournalError,

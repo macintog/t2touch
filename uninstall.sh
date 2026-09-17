@@ -23,6 +23,18 @@ if [[ -r /etc/t2-touchid.conf ]]; then
   fi
 fi
 
+# PAM rollback validates every destination before writing any of them. Do it
+# before disabling services or removing modules so a conflict leaves the
+# installed product intact and preparation can be retried safely.
+pam_backup_present=0
+for marker in /var/lib/t2-touchid/pam-backups/*.original \
+  /var/lib/t2-touchid/pam-backups/*.absent; do
+  [[ -e $marker ]] && pam_backup_present=1
+done
+if (( pam_backup_present )); then
+  "$source_dir/tools/rollback-pam.sh"
+fi
+
 systemctl disable --now fprintd.service t2-touchid-adaptive-sync.service \
   t2-touchid-post-reboot.service t2-biometric-ready.service \
   t2-native-first-run.service \
@@ -53,19 +65,11 @@ if [[ -d $applesmc_dkms_state ]]; then
   dkms remove -m applesmc-t2touch -v 0.1.0 --all
 fi
 rm -rf -- "$applesmc_dkms_source"
-pam_backup_present=0
-for marker in /var/lib/t2-touchid/pam-backups/*.original \
-  /var/lib/t2-touchid/pam-backups/*.absent; do
-  [[ -e $marker ]] && pam_backup_present=1
-done
-if (( pam_backup_present )); then
-  "$source_dir/tools/rollback-pam.sh"
-fi
 for file in /etc/systemd/system/{fprintd,t2-native-first-run,t2-touchid-adaptive-sync,t2-touchid-post-reboot,t2-biometric-ready,t2-biometric-port-refresh,t2-bridge-network,t2-credential-unlock,t2-interactive-unlock,t2-keybag-load,t2-sep-transport}.service \
   /etc/systemd/system/t2-bridge-network-ready@.service \
   /usr/local/bin/t2touch \
   /usr/lib/security/pam_t2touch_action_prompt.so \
-  /usr/local/sbin/{t2-aks-tool,t2-keybag-load,t2-keybag-unlock,t2-pam-unlock,t2-pam-fingerprint-ready,t2-pam-fingerprint-prompt,t2-credential-unlock,t2-biometric-ready,t2-biometric-port-refresh,t2-bridge-network-prepare,t2-bridge-network-ready,t2-sep-transport-load,t2-sep-transport-unload,t2-fprintd-enroll-tui-launch,t2-fprintd-preview-tui-launch,t2-fprintd-verify-tui-launch,t2-fprintd-negative-tui-launch,t2-fprintd-delete-tui-launch,t2-sudo-pam-test-launch,t2-native-enroll-tui-launch,t2-native-new-finger-tui-launch,t2-native-match-tui-launch,t2-native-negative-tui-launch,t2-second-finger-tui-launch,t2-touchid-delete,t2-touchid-purge,t2-touchid-doctor,t2-touchid-inventory,t2-touchid-identities,t2-touchid-provision-catacomb,t2-touchid-identify-finger,t2-touchid-manage,t2-touchid-baseline,t2-catacomb-fixture-check,t2-acm-preflight,t2-aks-observe-test,t2-acm-lifecycle-test,t2-acm-policy-preflight,t2-acm-authorize-test,t2-acm-identity-secret-test,t2-touchid-enroll-test,t2-touchid-enroll,t2-touchid-user-map,t2-native-authority-rebind,t2-touchid-user-broker-gate,t2-touchid-fprint-status,t2-touchid-fprint-enrollment-gate,t2-touchid-post-reboot,t2-fprint-enrollment-worker,t2-fprint-delete-worker} \
+  /usr/local/sbin/{t2-aks-tool,t2-keybag-load,t2-keybag-unlock,t2-pam-unlock,t2-pam-fingerprint-ready,t2-pam-fingerprint-prompt,t2-credential-unlock,t2-biometric-ready,t2-biometric-port-refresh,t2-bridge-network-prepare,t2-bridge-network-ready,t2-sep-transport-load,t2-sep-transport-unload,t2-sep-prerequisite-ready,t2-fprintd-enroll-tui-launch,t2-fprintd-preview-tui-launch,t2-fprintd-verify-tui-launch,t2-fprintd-negative-tui-launch,t2-fprintd-delete-tui-launch,t2-sudo-pam-test-launch,t2-native-enroll-tui-launch,t2-native-new-finger-tui-launch,t2-native-match-tui-launch,t2-native-enroll,t2-native-negative-tui-launch,t2-second-finger-tui-launch,t2-touchid-delete,t2-touchid-purge,t2-touchid-doctor,t2-touchid-inventory,t2-touchid-identities,t2-touchid-provision-catacomb,t2-touchid-identify-finger,t2-touchid-manage,t2-touchid-baseline,t2-catacomb-fixture-check,t2-acm-preflight,t2-aks-observe-test,t2-acm-lifecycle-test,t2-acm-policy-preflight,t2-acm-authorize-test,t2-acm-identity-secret-test,t2-touchid-enroll-test,t2-touchid-enroll,t2-touchid-user-map,t2-native-authority-rebind,t2-touchid-user-broker-gate,t2-touchid-fprint-status,t2-touchid-fprint-enrollment-gate,t2-touchid-post-reboot,t2-fprint-enrollment-worker,t2-fprint-delete-worker} \
   /etc/systemd/system/{fprintd,t2-native-first-run,t2-biometric-ready,t2-touchid-post-reboot,t2-touchid-adaptive-sync}.service.d/90-native-recovery.conf \
   /etc/systemd/system/fprintd.service.d/05-account-home.conf \
   /etc/systemd/system/fprintd.service.d/10-authority.conf \
@@ -74,9 +78,11 @@ for file in /etc/systemd/system/{fprintd,t2-native-first-run,t2-touchid-adaptive
   /etc/systemd/system/fprintd.service.d/20-native-identity-management.conf \
   /etc/systemd/system/t2-native-first-run.service.d/10-authority.conf \
   /etc/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf \
+  /usr/lib/tmpfiles.d/t2-touchid.conf \
   /etc/modprobe.d/t2-sep-transport.conf \
   /etc/modprobe.d/t2-sep-transport-autoload.conf \
   /etc/modprobe.d/t2-sep-boot-state.conf \
+  /etc/modprobe.d/t2-sep-create-version.conf \
   /usr/share/polkit-1/actions/org.t2linux.touchid.policy \
   /etc/dbus-1/system.d/99-t2-touchid-fprint.conf; do
   [[ ! -e $file ]] || rm -- "$file"

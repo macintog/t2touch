@@ -31,8 +31,8 @@ jobs:
       - name: Install build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck build-essential libssl-dev
-          python -m pip install --requirement requirements.txt
+          sudo apt-get install -y --no-install-recommends shellcheck build-essential libpam0g-dev libssl-dev
+          tools/install-python-deps.sh "$(command -v python)"
       - name: Compile Python sources
         run: python -m py_compile src/*.py tests/*.py
       - name: Run unit tests
@@ -42,7 +42,7 @@ jobs:
       - name: Check shell scripts
         run: shellcheck install.sh uninstall.sh src/*.sh tools/*.sh tools/macos/*.sh
       - name: Build the userspace tools
-        run: make -C src t2-aks-tool t2-pam-fingerprint-prompt
+        run: make -C src t2-aks-tool t2-pam-fingerprint-prompt pam_t2touch_action_prompt.so t2-recovery-usb-observer
       - name: Check public-tree privacy
         run: |
           tools/privacy-check.sh

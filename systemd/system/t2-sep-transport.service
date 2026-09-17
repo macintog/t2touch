@@ -9,6 +9,27 @@ Type=oneshot
 ExecStart=/usr/local/sbin/t2-sep-transport-load
 ExecStop=/usr/local/sbin/t2-sep-transport-unload
 RemainAfterExit=yes
+CapabilityBoundingSet=CAP_SYS_MODULE
+DevicePolicy=closed
+DeviceAllow=/dev/t2-aks rw
+DeviceAllow=/dev/t2-acm rw
+DeviceAllow=/dev/null rw
+
+ProtectSystem=strict
+NoNewPrivileges=true
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @module
 
 [Install]
 WantedBy=multi-user.target

@@ -28,7 +28,25 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectKernelModules=true
+ProtectHostname=true
+# Caller authorization pins non-root PAM clients through D-Bus ProcessFD and
+# revalidates their /proc identity. Hiding other users here makes every
+# unprivileged lock-screen and direct fprintd client look as though it exited.
+ProtectProc=default
 RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# runuser needs SETGID/SETUID. Caller liveness uses poll(2) on its D-Bus
+# ProcessFD, and Polkit helpers are bound to their exact systemd cgroup, so
+# caller validation does not need CAP_KILL or CAP_SYS_PTRACE.
+# RestrictSUIDSGID stays off.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SETGID CAP_SETUID CAP_SYS_ADMIN
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=/dev/t2-aks rw
+DeviceAllow=/dev/t2-acm rw
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/urandom r
 RestrictAddressFamilies=AF_UNIX AF_LOCAL AF_NETLINK AF_INET6
 MemoryDenyWriteExecute=true
 SystemCallFilter=@system-service

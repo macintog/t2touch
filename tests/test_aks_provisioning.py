@@ -52,6 +52,25 @@ class FakeTransport:
 
 
 class AKSProvisioningTests(unittest.TestCase):
+    def test_torn_reply_keeps_create_intent_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "provision.jsonl"
+            operation_id = str(uuid.UUID(int=1))
+            before = provisioning.create(
+                path, operation_id=operation_id,
+                account_uuid=str(uuid.UUID(int=2)),
+                linux_boot_uuid=str(uuid.UUID(int=3)),
+                connection_generation=str(uuid.UUID(int=4)),
+                preflight_sha256="a" * 64, session=7, request_sha256="b" * 64,
+                xart_ready=True, primary_identity_absent=True, inventory_stable=True,
+            )
+            with path.open("ab") as stream:
+                stream.write(b'{"milestone":"AKS_CREATE_SUCC')
+            recovered = provisioning.read(path)
+            self.assertEqual(recovered.phase, before.phase)
+            self.assertEqual(recovered.record_count, before.record_count + 1)
+            self.assertEqual(provisioning.read(path), recovered)
+
     def test_v4_operation_reaches_mapping_with_wiped_buffers(self):
         with patch.object(FakeTransport, "create_version", 4):
             self.test_operation_owns_create_export_buffers_and_fresh_owner_gate()

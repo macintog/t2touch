@@ -112,6 +112,8 @@ def validate_history(records: list[dict[str, Any]]) -> IdentityDeleteHistory:
     )
 
     for record in records[1:]:
+        if journal.is_repair_milestone(record.get("milestone")):
+            continue
         if record.get("operation_id") != operation_id:
             raise IdentityDeleteJournalError("operation ID changed inside delete journal")
         milestone = record.get("milestone")

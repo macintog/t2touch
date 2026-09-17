@@ -580,11 +580,33 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(verify_start(device, "any"))
         await entered.wait()
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(MODULE.DBusError) as raised:
             await task
+        self.assertTrue(raised.exception.type.endswith(".NoActionInProgress"))
         self.assertIsNone(device.verify_task)
         self.assertIsNotNone(device.claim_expiry_task)
         await MODULE.FprintDevice.Release.__wrapped__(device)
+
+    async def test_cancelled_inventory_method_raises_typed_error(self):
+        entered = asyncio.Event()
+
+        class BlockingBackend(FakeBackend):
+            async def list_fingers(self):
+                entered.set()
+                await asyncio.Event().wait()
+                return ("finger-1",)
+
+        device = make_device(BlockingBackend())
+        task = asyncio.create_task(
+            MODULE.FprintDevice.ListEnrolledFingers.__wrapped__(
+                device, MODULE.LINUX_USER
+            )
+        )
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(MODULE.DBusError) as raised:
+            await task
+        self.assertTrue(raised.exception.type.endswith(".Internal"))
 
     async def test_claim_revoked_during_capture_cannot_publish_match(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -1113,8 +1135,9 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await entered.wait()
 
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(MODULE.DBusError) as raised:
             await task
+        self.assertTrue(raised.exception.type.endswith(".NoActionInProgress"))
 
         self.assertIsNone(client.start_arguments)
         self.assertIsNotNone(device.claim_expiry_task)
@@ -1139,7 +1162,11 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await entered.wait()
 
         verification = asyncio.create_task(verify_start(device, "any"))
-        await asyncio.sleep(0)
+        for _ in range(50):
+            if device.verify_task is not None:
+                break
+            await asyncio.sleep(0)
+        self.assertIsNotNone(device.verify_task)
         release.set()
         with self.assertRaises(MODULE.DBusError) as raised:
             await task
@@ -1349,8 +1376,9 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(raised.exception.type.endswith(".AlreadyInUse"))
 
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(MODULE.DBusError) as raised:
             await task
+        self.assertTrue(raised.exception.type.endswith(".PrintsNotDeleted"))
 
         self.assertIsNone(device.delete_task)
         self.assertIsNone(client.arguments)
@@ -1377,8 +1405,9 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(device.delete_task, task)
 
         client.release.set()
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(MODULE.DBusError) as raised:
             await task
+        self.assertTrue(raised.exception.type.endswith(".PrintsNotDeleted"))
         self.assertIsNone(device.delete_task)
         self.assertIsNotNone(device.claim_expiry_task)
         await MODULE.FprintDevice.Release.__wrapped__(device)
@@ -1390,7 +1419,7 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(raised.exception.type.endswith(".PermissionDenied"))
         await claim(device)
         with self.assertRaises(MODULE.DBusError) as raised:
-            device.DeleteEnrolledFingers2()
+            await MODULE.FprintDevice.DeleteEnrolledFingers2.__wrapped__(device)
         self.assertTrue(raised.exception.type.endswith(".PermissionDenied"))
         await MODULE.FprintDevice.Release.__wrapped__(device)
 
@@ -1643,7 +1672,7 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(backend.system_sleeping)
         self.assertIsNone(backend.inventory_projection)
         await sleep_task
-        backend._quiesce_hardware_for_sleep.assert_awaited_once_with()
+        backend._quiesce_hardware_for_sleep.assert_awaited_once_with(1)
 
         backend.system_sleep_changed(False)
         await asyncio.sleep(0)
@@ -1696,6 +1725,62 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await waiter
         phase_after_collection.assert_not_called()
+
+    def test_authority_cache_reuses_load_until_stat_token_changes(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.linux_uid = 1000
+        authority = mock.Mock(
+            origin=MODULE.NATIVE_AUTHORITY,
+            enrollment_journal=Path("/var/lib/t2-touchid/users/1000/op.jsonl"),
+        )
+        token = ("linux-native", "map", "manifest", "journal")
+        backend._authority_cache_token = mock.Mock(return_value=token)
+        backend._cached_runtime_authority = None
+        backend._cached_runtime_authority_token = None
+        with mock.patch.object(
+            MODULE.t2_user_authority, "load_runtime", return_value=authority
+        ) as load:
+            self.assertIs(backend.runtime_authority(), authority)
+            self.assertIs(backend.runtime_authority(), authority)
+            load.assert_called_once_with(1000)
+            backend._authority_cache_token.return_value = ("changed",)
+            self.assertIs(backend.runtime_authority(), authority)
+            self.assertEqual(load.call_count, 2)
+
+    async def test_list_enrolled_fingers_is_rate_limited_per_sender(self):
+        backend = FakeBackend()
+        backend.list_fingers = AsyncMock(return_value=("finger-1",))
+        device = make_device(backend)
+        for _ in range(MODULE.METHOD_RATE_LIMIT):
+            listed = await MODULE.FprintDevice.ListEnrolledFingers.__wrapped__(
+                device, MODULE.LINUX_USER
+            )
+            self.assertEqual(listed, ["finger-1"])
+        with self.assertRaises(MODULE.DBusError) as raised:
+            await MODULE.FprintDevice.ListEnrolledFingers.__wrapped__(
+                device, MODULE.LINUX_USER
+            )
+        self.assertTrue(raised.exception.type.endswith(".AlreadyInUse"))
+
+    async def test_claim_is_rate_limited_per_sender(self):
+        device = make_device()
+        for _ in range(MODULE.METHOD_RATE_LIMIT):
+            await MODULE.FprintDevice.Claim.__wrapped__(
+                device, MODULE.LINUX_USER
+            )
+            await MODULE.FprintDevice.Release.__wrapped__(device)
+        with self.assertRaises(MODULE.DBusError) as raised:
+            await MODULE.FprintDevice.Claim.__wrapped__(
+                device, MODULE.LINUX_USER
+            )
+        self.assertTrue(raised.exception.type.endswith(".AlreadyInUse"))
+
+    async def test_claimed_property_signal_is_unicast_to_owner(self):
+        bus = FakeBus()
+        device = make_device(identity_bus=bus)
+        device.claimed_sender = ":1.100"
+        device._set_finger_state(False, True)
+        self.assertEqual(bus.sent[0].destination, ":1.100")
 
     async def test_inventory_projection_stays_warm_until_generation_changes(self):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
@@ -1967,7 +2052,21 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ProtectHome=tmpfs", adaptive)
         self.assertNotIn("ProtectHome=yes", adaptive)
-        self.assertIn("for service in fprintd t2-touchid-adaptive-sync", installer)
+        self.assertIn(
+            "/etc/systemd/system/fprintd.service.d/05-account-home.conf",
+            installer,
+        )
+        self.assertLess(
+            installer.index(
+                "/etc/systemd/system/fprintd.service.d/05-account-home.conf"
+            ),
+            installer.index(
+                "t2-touchid-adaptive-sync.service.d/05-account-home.conf"
+            ),
+        )
+        self.assertNotIn(
+            "for service in fprintd t2-touchid-adaptive-sync", installer
+        )
         self.assertIn(
             "t2-touchid-adaptive-sync.service.d/05-account-home.conf",
             uninstaller,
@@ -2011,6 +2110,9 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_policy_authenticates_every_request_against_all(self):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
         backend.operation_lock = asyncio.Lock()
+        backend.runtime_authority = mock.Mock(
+            return_value=mock.Mock(origin=MODULE.NATIVE_AUTHORITY)
+        )
         backend.runtime_projection = AsyncMock()
         backend.verify = AsyncMock(return_value=("verify-match", {}))
 
@@ -2081,6 +2183,9 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_prepared_projection_does_not_repeat_hardware_inventory(self):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
         backend.operation_lock = asyncio.Lock()
+        backend.runtime_authority = mock.Mock(
+            return_value=mock.Mock(origin=MODULE.NATIVE_AUTHORITY)
+        )
         backend.runtime_projection = AsyncMock(side_effect=AssertionError("duplicate inventory"))
         backend.verify = AsyncMock(return_value=("verify-match", {}))
         view = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)

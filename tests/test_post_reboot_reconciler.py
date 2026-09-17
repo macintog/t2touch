@@ -104,6 +104,29 @@ class PostRebootReconcilerTests(unittest.TestCase):
             post_reboot_diagnostic.staged("external-deletion-reconciliation",
                                           RuntimeError(), reason="private identifier")
 
+    def test_external_inventory_save_requires_explicit_non_fingerprint_proof(self):
+        mapping = SimpleNamespace(mappings=(SimpleNamespace(enabled=True, linux_uid=1000),))
+        proof = {"schema_version": 1, "identifiers_redacted": True,
+                 "external_inventory_reconciled": True, "sep_mutation_performed": True,
+                 "fingerprint_mutation_performed": False,
+                 "external_deletion_reconciliation_needed": False}
+        with (
+            mock.patch.object(native_reconciler.t2_user_mapping, "load", return_value=mapping),
+            mock.patch.object(native_reconciler.os.path, "lexists", return_value=True),
+        ):
+            for permitted in (True, False):
+                document = dict(proof)
+                if not permitted:
+                    del document["fingerprint_mutation_performed"]
+                runner = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps(document)))
+                if permitted:
+                    result = native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+                    self.assertEqual(result.state, "external-inventory-reconciled")
+                    self.assertTrue(result.journal_updated)
+                else:
+                    with self.assertRaises(native_reconciler.NativePostRebootReconcilerError):
+                        native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+
     def test_external_reconciliation_skips_only_empty_initial_state(self):
         mapping_set = SimpleNamespace(
             mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)

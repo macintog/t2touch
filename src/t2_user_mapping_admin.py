@@ -155,14 +155,26 @@ def _write_all(descriptor: int, data: bytes) -> None:
         offset += written
 
 
+def _link_noreplace(directory: int, source: str, target: str) -> None:
+    try:
+        os.link(source, target, src_dir_fd=directory, dst_dir_fd=directory)
+    except FileExistsError as error:
+        raise UserMappingAdminError("mapping appeared during initial publish") from error
+    except OSError as error:
+        raise UserMappingAdminError("atomic no-replace mapping publish failed") from error
+    try:
+        os.unlink(source, dir_fd=directory)
+    except OSError as error:
+        raise UserMappingAdminError("atomic no-replace mapping publish failed") from error
+
+
 def _rename_noreplace(directory: int, source: str, target: str) -> None:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
-    except (OSError, AttributeError) as error:
-        raise UserMappingAdminError(
-            "atomic no-replace mapping publish is unavailable"
-        ) from error
+    except (OSError, AttributeError):
+        _link_noreplace(directory, source, target)
+        return
     renameat2.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -178,11 +190,15 @@ def _rename_noreplace(directory: int, source: str, target: str) -> None:
         target.encode("ascii"),
         RENAME_NOREPLACE,
     )
-    if result != 0:
-        error = ctypes.get_errno()
-        if error == errno.EEXIST:
-            raise UserMappingAdminError("mapping appeared during initial publish")
-        raise UserMappingAdminError("atomic no-replace mapping publish failed")
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.EINVAL, errno.ENOSYS}:
+        _link_noreplace(directory, source, target)
+        return
+    if error == errno.EEXIST:
+        raise UserMappingAdminError("mapping appeared during initial publish")
+    raise UserMappingAdminError("atomic no-replace mapping publish failed")
 
 
 def _sync_directory(directory: int) -> None:

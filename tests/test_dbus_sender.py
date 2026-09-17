@@ -72,6 +72,29 @@ class SenderAwareBusTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(sender.DBusSenderError):
             sender.current_sender()
 
+    async def test_cancelled_method_emits_typed_error_reply(self):
+        replies = []
+
+        class DummySendReply:
+            def send_error(self, error):
+                replies.append(error)
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                raise AssertionError("dbus-next SendReply must not see CancelledError")
+
+        def delegated(_message, send_reply):
+            with send_reply:
+                raise asyncio.CancelledError
+
+        bus = object.__new__(sender.SenderAwareMessageBus)
+        with mock.patch.object(
+            MessageBus, "_make_method_handler", return_value=delegated
+        ):
+            handler = bus._make_method_handler(object(), object())
+        handler(SimpleNamespace(sender=":1.9"), DummySendReply())
+        self.assertEqual(len(replies), 1)
+        self.assertTrue(replies[0].type.endswith(".NoActionInProgress"))
+
 
 if __name__ == "__main__":
     unittest.main()

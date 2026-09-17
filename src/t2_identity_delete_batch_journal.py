@@ -74,6 +74,8 @@ def validate_history(records: list[dict[str, Any]]) -> IdentityDeleteBatchHistor
     pending = None
 
     for record in records[1:]:
+        if journal.is_repair_milestone(record.get("milestone")):
+            continue
         if record.get("operation_id") != operation_id:
             raise IdentityDeleteBatchJournalError(
                 "operation ID changed inside batch-delete journal"

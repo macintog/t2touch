@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>T2 Linux Touch ID</vendor>
-  <vendor_url>https://github.com/jmurth1234/t2-touchid-linux</vendor_url>
+  <vendor_url>https://github.com/macintog/t2touch</vendor_url>
   <icon_name>fingerprint</icon_name>
 
   <action id="org.t2linux.touchid.verify">

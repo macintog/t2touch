@@ -473,6 +473,8 @@ def validate_history(records: list[dict[str, Any]]) -> ExternalDeleteHistory:
     phase = ExternalDeletePhase.BASELINE
     intent = None
     for record in records[1:]:
+        if t2_mutation_journal.is_repair_milestone(record.get("milestone")):
+            continue
         if record.get("operation_id") != operation_id:
             raise ExternalDeleteReconcileError("external-delete operation ID changed")
         milestone = record.get("milestone")

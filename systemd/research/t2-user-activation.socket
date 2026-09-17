@@ -6,10 +6,11 @@ Documentation=file:/opt/t2-touchid/README.md
 [Socket]
 ListenSequentialPacket=/run/t2-touchid/activation.sock
 Accept=yes
-SocketMode=0666
-DirectoryMode=0755
+SocketMode=0660
+DirectoryMode=0700
 RemoveOnStop=yes
 MaxConnections=16
+MaxConnectionsPerSource=1
 
 [Install]
 WantedBy=sockets.target

@@ -1,0 +1,6 @@
+# Expected upstream PAM fingerprints
+
+These files are the stock Arch and Omarchy stacks that `tools/install-pam.sh`
+may replace on first install without `--force`. A live `/etc/pam.d` file that
+does not match one of these snapshots (or the t2touch replacement template)
+prints a diff and requires `--force` or `T2TOUCH_FORCE_PAM=1`.

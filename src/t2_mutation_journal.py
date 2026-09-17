@@ -20,6 +20,7 @@ from typing import Any
 
 
 FORMAT_VERSION = 1
+REPAIR_MILESTONE = "TORN_TAIL_TRUNCATED"
 ALLOWED_KINDS = {
     "enroll",
     "rename",
@@ -57,6 +58,60 @@ BASELINE_KEYS = {
 
 class JournalError(RuntimeError):
     pass
+
+
+def is_repair_milestone(milestone: object) -> bool:
+    return milestone == REPAIR_MILESTONE
+
+
+def _durable_file_sync(descriptor: int) -> None:
+    sync = getattr(os, "fdatasync", os.fsync)
+    sync(descriptor)
+
+
+def _sync_directory(path: Path) -> None:
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _payload_from_fd(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > 8 * 1024 * 1024:
+            raise JournalError("mutation journal ownership, mode, or size is unsafe")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def split_complete_lines(payload: bytes) -> tuple[list[bytes], bytes]:
+    """Separate newline-terminated records from a possible torn tail."""
+
+    if not payload:
+        return [], b""
+    if payload.endswith(b"\n"):
+        return payload.splitlines(keepends=True), b""
+    index = payload.rfind(b"\n")
+    if index < 0:
+        return [], payload
+    return payload[: index + 1].splitlines(keepends=True), payload[index + 1 :]
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    written = 0
+    while written < len(payload):
+        count = os.write(descriptor, payload[written:])
+        if count <= 0:
+            raise JournalError("journal append made no forward progress")
+        written += count
 
 
 def canonical(value: Any) -> bytes:
@@ -259,6 +314,65 @@ def validate_records(lines: list[bytes]) -> list[dict[str, Any]]:
     return records
 
 
+def _unsigned_record(
+    operation_id: str,
+    sequence: int,
+    previous_hash: str | None,
+    milestone: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    unsigned = {
+        "format_version": FORMAT_VERSION,
+        "operation_id": operation_id,
+        "sequence": sequence,
+        "previous_hash": previous_hash,
+        "milestone": milestone,
+        "evidence": evidence,
+    }
+    return {**unsigned, "record_hash": record_hash(unsigned)}
+
+
+def _append_record(
+    descriptor: int,
+    record: dict[str, Any],
+    *,
+    durable: bool,
+) -> None:
+    _write_all(descriptor, canonical(record) + b"\n")
+    if durable:
+        _durable_file_sync(descriptor)
+
+
+def _repair_torn_tail(
+    descriptor: int, lines: list[bytes], torn_tail: bytes
+) -> list[dict[str, Any]]:
+    records = validate_records(lines)
+    if not records or not torn_tail:
+        raise JournalError("invalid journal JSON at sequence 0")
+    complete_size = sum(len(line) for line in lines)
+    os.ftruncate(descriptor, complete_size)
+    record = _unsigned_record(
+        records[0]["operation_id"],
+        len(records),
+        records[-1]["record_hash"],
+        REPAIR_MILESTONE,
+        {"truncated_bytes": len(torn_tail)},
+    )
+    _append_record(descriptor, record, durable=True)
+    records.append(record)
+    return records
+
+
+def _load_records(descriptor: int, *, repair: bool) -> list[dict[str, Any]]:
+    payload = _payload_from_fd(descriptor)
+    lines, torn_tail = split_complete_lines(payload)
+    if not torn_tail:
+        return validate_records(lines)
+    if not repair:
+        raise JournalError(f"invalid journal JSON at sequence {len(lines)}")
+    return _repair_torn_tail(descriptor, lines, torn_tail)
+
+
 def append(
     path: Path,
     operation_id: str,
@@ -268,6 +382,7 @@ def append(
     exclusive: bool = False,
     expected_record_count: int | None = None,
     expected_previous_hash: str | None = None,
+    durable: bool = True,
 ) -> dict[str, Any]:
     if expected_record_count is None and expected_previous_hash is not None:
         raise JournalError("guarded append hash requires an expected record count")
@@ -307,8 +422,7 @@ def append(
             raise JournalError("journal is not a private caller-owned regular file")
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        with os.fdopen(os.dup(fd), "rb") as stream:
-            records = validate_records(stream.readlines())
+        records = _load_records(fd, repair=True)
         if expected_record_count is not None and len(records) != expected_record_count:
             raise JournalError("journal changed before the guarded append")
         actual_previous_hash = records[-1]["record_hash"] if records else None
@@ -319,29 +433,16 @@ def append(
             raise JournalError("journal head changed before the guarded append")
         if records and records[0]["operation_id"] != operation_id:
             raise JournalError("journal belongs to another operation")
-        previous_hash = actual_previous_hash
-        unsigned = {
-            "format_version": FORMAT_VERSION,
-            "operation_id": operation_id,
-            "sequence": len(records),
-            "previous_hash": previous_hash,
-            "milestone": milestone,
-            "evidence": evidence,
-        }
-        record = {**unsigned, "record_hash": record_hash(unsigned)}
-        payload = canonical(record) + b"\n"
-        written = 0
-        while written < len(payload):
-            count = os.write(fd, payload[written:])
-            if count <= 0:
-                raise JournalError("journal append made no forward progress")
-            written += count
-        os.fsync(fd)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        record = _unsigned_record(
+            operation_id,
+            len(records),
+            actual_previous_hash,
+            milestone,
+            evidence,
+        )
+        _append_record(fd, record, durable=durable)
+        if durable:
+            _sync_directory(path)
         return record
     finally:
         os.close(fd)
@@ -393,6 +494,7 @@ def read(path: Path) -> list[dict[str, Any]]:
         descriptor = os.open(path, flags)
     except OSError as error:
         raise JournalError("cannot safely open mutation journal") from error
+    torn = False
     try:
         info = os.fstat(descriptor)
         if (
@@ -404,10 +506,42 @@ def read(path: Path) -> list[dict[str, Any]]:
         ):
             raise JournalError("mutation journal ownership, mode, or size is unsafe")
         fcntl.flock(descriptor, fcntl.LOCK_SH)
-        with os.fdopen(os.dup(descriptor), "rb") as stream:
-            lines = stream.readlines()
-        if len(lines) > 4096:
+        payload = _payload_from_fd(descriptor)
+        lines, torn_tail = split_complete_lines(payload)
+        if len(lines) + (1 if torn_tail else 0) > 4096:
             raise JournalError("mutation journal has too many records")
-        return validate_records(lines)
+        if not torn_tail:
+            return validate_records(lines)
+        torn = True
+    finally:
+        os.close(descriptor)
+    if not torn:
+        raise JournalError("cannot safely open mutation journal")
+    return _repair_journal(path)
+
+
+def _repair_journal(path: Path) -> list[dict[str, Any]]:
+    flags = os.O_RDWR | os.O_APPEND | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise JournalError("cannot safely open mutation journal") from error
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+            or info.st_size > 8 * 1024 * 1024
+        ):
+            raise JournalError("mutation journal ownership, mode, or size is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        records = _load_records(descriptor, repair=True)
+        if len(records) > 4096:
+            raise JournalError("mutation journal has too many records")
+        return records
     finally:
         os.close(descriptor)

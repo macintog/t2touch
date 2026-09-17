@@ -483,6 +483,16 @@ class EnrollmentJournalTests(unittest.TestCase):
         self.assertEqual(result.phase, enrollment.EnrollmentPhase.TERMINAL_IDENTITY)
         self.assertEqual(result.terminal_identity_uuid, str(uuid.UUID(int=8)))
 
+    def test_torn_tail_repair_does_not_block_enrollment_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, operation_id = self.create(directory)
+            path.write_bytes(path.read_bytes() + b'{"milestone":"TORN')
+            history = enrollment.read(path)
+            self.assertEqual(history.operation_id, operation_id)
+            self.assertEqual(history.phase, enrollment.EnrollmentPhase.BASELINE)
+            records = journal.read(path)
+            self.assertEqual(records[-1]["milestone"], journal.REPAIR_MILESTONE)
+
 
 if __name__ == "__main__":
     unittest.main()

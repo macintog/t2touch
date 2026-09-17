@@ -507,6 +507,88 @@ class NativeMatchSafetyTests(unittest.TestCase):
         self.assertFalse(short_summary["result_structure_valid"])
         self.assertFalse(short_summary["result_valid"])
 
+    def test_sleep_inhibitor_setup_does_not_spawn_systemd_inhibit_list(self):
+        list_calls = []
+
+        def capture(argv, **_kwargs):
+            list_calls.append(list(argv))
+            raise AssertionError("systemd-inhibit must not be spawned")
+
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        with (
+            patch.object(NATIVE_MATCH, "_open_sleep_inhibitor_fd", return_value=read_fd),
+            patch.object(NATIVE_MATCH.subprocess, "run", side_effect=capture),
+            patch.object(NATIVE_MATCH.subprocess, "Popen", side_effect=capture),
+        ):
+            with NATIVE_MATCH._sleep_inhibitor() as held:
+                self.assertEqual(held, read_fd)
+        self.assertEqual(list_calls, [])
+        self.assertFalse(any("--list" in call for call in list_calls))
+        source = (ROOT / "src/t2-native-match.py").read_text(encoding="utf-8")
+        self.assertNotIn("for _attempt in range(20):", source)
+        self.assertNotIn("systemd-inhibit --list", source)
+        self.assertIn('member="Inhibit"', source)
+        self.assertIn("negotiate_unix_fd=True", source)
+
+    def test_sleep_inhibitor_requires_negotiated_descriptor(self):
+        from dbus_next import BusType, Message, MessageType
+        import dbus_next.aio
+
+        class FakeInhibitBus:
+            def __init__(self, *, bus_type, negotiate_unix_fd=False):
+                self.bus_type = bus_type
+                self.negotiate_unix_fd = negotiate_unix_fd
+                self.held = None
+
+            async def connect(self):
+                return None
+
+            async def call(self, message):
+                self.assert_inhibit = message.member == "Inhibit"
+                reply = Message(
+                    message_type=MessageType.METHOD_RETURN,
+                    signature="h",
+                    body=[0],
+                    reply_serial=1,
+                )
+                if self.negotiate_unix_fd:
+                    read_fd, write_fd = os.pipe()
+                    os.close(write_fd)
+                    self.held = read_fd
+                    reply.unix_fds = [read_fd]
+                else:
+                    reply.unix_fds = []
+                return reply
+
+            def disconnect(self):
+                return None
+
+        def factory(**kwargs):
+            return FakeInhibitBus(**kwargs)
+
+        with patch.object(dbus_next.aio, "MessageBus", factory):
+            descriptor = NATIVE_MATCH._open_sleep_inhibitor_fd()
+        try:
+            self.assertGreaterEqual(descriptor, 0)
+        finally:
+            os.close(descriptor)
+
+    def test_sleep_inhibitor_liveness_uses_the_negotiated_descriptor(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            self.assertTrue(NATIVE_MATCH._sleep_inhibitor_is_active(read_fd))
+            os.close(write_fd)
+            write_fd = -1
+            self.assertFalse(NATIVE_MATCH._sleep_inhibitor_is_active(read_fd))
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+        source = (ROOT / "src/t2-native-match.py").read_text(encoding="utf-8")
+        self.assertNotIn("inhibitor.poll()", source)
+
 
 if __name__ == "__main__":
     unittest.main()

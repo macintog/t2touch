@@ -51,5 +51,126 @@ class IntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ui.transform(service, VIEW)
 
+    def test_restore_rewrites_from_receipt(self):
+        import hashlib
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'LockView.qml'
+            patched = b'patched\n'
+            target.write_bytes(patched)
+            backup = Path(directory) / 'backup'
+            backup.mkdir()
+            original = backup / 'LockView.qml'
+            original.write_text('original\n', encoding='utf-8')
+            (backup / 'receipt.json').write_text(
+                json.dumps({
+                    'paths': [str(target)],
+                    'installed_sha256': [hashlib.sha256(patched).hexdigest()],
+                }) + '\n',
+                encoding='utf-8',
+            )
+            ui.restore_from_receipt(backup)
+            self.assertEqual(target.read_text(encoding='utf-8'), 'original\n')
+
+    def test_restore_validates_all_backups_before_first_write(self):
+        import hashlib
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = Path(directory) / 'Service.qml'
+            view = Path(directory) / 'LockView.qml'
+            service.write_text('service-patched\n', encoding='utf-8')
+            view.write_text('view-patched\n', encoding='utf-8')
+            backup = Path(directory) / 'backup'
+            backup.mkdir()
+            (backup / 'Service.qml').write_text('service-original\n', encoding='utf-8')
+            (backup / 'receipt.json').write_text(
+                json.dumps({
+                    'paths': [str(service), str(view)],
+                    'installed_sha256': [
+                        hashlib.sha256(b'service-patched\n').hexdigest(),
+                        hashlib.sha256(b'view-patched\n').hexdigest(),
+                    ],
+                }) + '\n',
+                encoding='utf-8',
+            )
+            with self.assertRaises(SystemExit):
+                ui.restore_from_receipt(backup)
+            self.assertEqual(service.read_text(encoding='utf-8'), 'service-patched\n')
+            self.assertEqual(view.read_text(encoding='utf-8'), 'view-patched\n')
+
+    def test_restore_refuses_when_current_hashes_differ(self):
+        import hashlib
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'LockView.qml'
+            target.write_text('later-omarchy-update\n', encoding='utf-8')
+            backup = Path(directory) / 'backup'
+            backup.mkdir()
+            (backup / 'LockView.qml').write_text('original\n', encoding='utf-8')
+            (backup / 'receipt.json').write_text(
+                json.dumps({
+                    'paths': [str(target)],
+                    'installed_sha256': [
+                        hashlib.sha256(b'patched\n').hexdigest()
+                    ],
+                }) + '\n',
+                encoding='utf-8',
+            )
+            with self.assertRaises(SystemExit):
+                ui.restore_from_receipt(backup)
+            self.assertEqual(
+                target.read_text(encoding='utf-8'), 'later-omarchy-update\n'
+            )
+
+    def test_restore_rolls_back_if_a_later_write_fails(self):
+        import hashlib
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = Path(directory) / 'Service.qml'
+            view = Path(directory) / 'LockView.qml'
+            service.write_text('service-patched\n', encoding='utf-8')
+            view.write_text('view-patched\n', encoding='utf-8')
+            backup = Path(directory) / 'backup'
+            backup.mkdir()
+            (backup / 'Service.qml').write_text('service-original\n', encoding='utf-8')
+            (backup / 'LockView.qml').write_text('view-original\n', encoding='utf-8')
+            (backup / 'receipt.json').write_text(
+                json.dumps({
+                    'paths': [str(service), str(view)],
+                    'installed_sha256': [
+                        hashlib.sha256(b'service-patched\n').hexdigest(),
+                        hashlib.sha256(b'view-patched\n').hexdigest(),
+                    ],
+                }) + '\n',
+                encoding='utf-8',
+            )
+            real_write = ui.atomic_write
+            calls = {'count': 0}
+
+            def flaky(path, data, mode, owner=None):
+                calls['count'] += 1
+                if path == view and calls['count'] == 2:
+                    raise OSError('simulated write failure')
+                return real_write(path, data, mode, owner)
+
+            with patch.object(ui, 'atomic_write', side_effect=flaky):
+                with self.assertRaises(OSError):
+                    ui.restore_from_receipt(backup)
+            self.assertEqual(service.read_text(encoding='utf-8'), 'service-patched\n')
+            self.assertEqual(view.read_text(encoding='utf-8'), 'view-patched\n')
+
 if __name__ == '__main__':
     unittest.main()

@@ -169,6 +169,8 @@ def validate_history(
                 "operation ID changed in replacement activation journal"
             )
         milestone = record.get("milestone")
+        if journal.is_repair_milestone(milestone):
+            continue
         evidence = record.get("evidence")
         if milestone == "REPLACEMENT_ACTIVATION_BASELINE":
             if phase != "new":

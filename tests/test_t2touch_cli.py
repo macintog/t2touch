@@ -52,6 +52,10 @@ class T2TouchCLITests(unittest.TestCase):
             )
             with self.assertRaisesRegex(t2touch.T2TouchError, "Finger N"):
                 t2touch.delete("mapped", "right-index-finger")
+            self.assertEqual(t2touch.delete("mapped", "2"), 0)
+            self.assertEqual(t2touch.delete("mapped", "Finger 5"), 0)
+            self.assertEqual(run.call_args_list[-2].args[0][2], "finger-2")
+            self.assertEqual(run.call_args_list[-1].args[0][2], "finger-5")
 
     def test_cancelled_authorization_returns_without_a_deletion_fallback(self):
         with (
@@ -253,7 +257,7 @@ class T2TouchCLITests(unittest.TestCase):
                     input_stream=TerminalInput("no\n"),
                     output_stream=io.StringIO(),
                 ),
-                0,
+                2,
             )
             with self.assertRaisesRegex(t2touch.T2TouchError, "--yes"):
                 t2touch.purge("mapped", input_stream=io.StringIO("yes\n"))

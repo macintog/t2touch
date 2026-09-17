@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import sys
 import threading
 import time
@@ -59,6 +60,8 @@ NS = dict(
     NATIVE_AUTHORITY="linux-native-e4", COMPATIBILITY_AUTHORITY="macos-control-oracle-v1",
     UNSET_ENROLLMENT_PROGRESS=object(), COMPLETED_CLAIM_SECONDS=0,
     UNSTARTED_CLAIM_SECONDS=0, NATIVE_CANCEL_SECONDS=0.1,
+    MAX_MATCH_SECONDS=120.0, METHOD_RATE_LIMIT=8,
+    METHOD_RATE_WINDOW_SECONDS=10.0, METHOD_RATE_MAX_SENDERS=64,
     ServiceInterface=object, method=decorator,
     INVENTORY_CACHE_SECONDS=0.0,
     signal_decorator=decorator, dbus_property=decorator,
@@ -74,13 +77,25 @@ NS = dict(
     t2_fprint_claim=SimpleNamespace(collect=None),
     t2_performance=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
     t2_fprint_result=t2_fprint_result,
+    t2_user_authority=SimpleNamespace(
+        MAPPING_PATH=Path("/var/lib/t2-touchid/users.json"),
+        USERS_ROOT=Path("/var/lib/t2-touchid/users"),
+        load_runtime=lambda *_args, **_kwargs: None,
+        UserAuthorityError=RuntimeError,
+    ),
     time=time,
+    stat=stat,
+    Variant=object,
+    DBusSenderError=RuntimeError,
+    current_dbus_sender=lambda: ":1.100",
+    LINUX_USER="test",
+    ALLOWED_PAM_USERS=("test", ""),
 )
 # The production name `signal` is the D-Bus decorator, not the stdlib module.
 NS["signal"] = decorator
 FPRINT = definitions("t2-fprintd.py", {
     "verdict_from_result", "resolved_any_finger_from_result", "T2Backend",
-    "FprintDevice", "main_async",
+    "FprintDevice", "main_async", "cancelled_method_error",
 }, NS)
 WORKER_NS = dict(asyncio=asyncio, inspect=inspect, threading=threading,
                  t2_fprint_worker_launcher=SimpleNamespace(launch=lambda: None))
@@ -353,7 +368,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 interrupted.append(True)
                 raise
-        device._require_claim_owner = mock.Mock()
+        device._require_claim_owner = mock.AsyncMock()
         device._arm_unstarted_claim_expiry = mock.Mock()
         device.backend = SimpleNamespace(operation_lock=asyncio.Lock(),
             runtime_projection=mock.AsyncMock(return_value=Projection()),
@@ -373,12 +388,18 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)
-        self.assertTrue(task.cancelled())
+        self.assertFalse(task.cancelled())
+        with self.assertRaises(FPRINT.DBusError) as raised:
+            task.result()
+        self.assertEqual(
+            raised.exception.args[0],
+            f"{FPRINT.FPRINT_ERROR}.PrintsNotDeleted",
+        )
         self.assertIsNone(device.delete_task)
 
     async def test_verification_revalidates_claim_before_publication(self):
         device = self.device()
-        device._require_claim_owner = mock.Mock(side_effect=RuntimeError("claim revoked"))
+        device._require_claim_owner = mock.AsyncMock(side_effect=RuntimeError("claim revoked"))
         device._live_verify_event = mock.Mock()
         device.backend = SimpleNamespace(
             verify_fprint=mock.AsyncMock(return_value=("verify-match", match_result())),
@@ -395,7 +416,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_live_claim_still_publishes_valid_match(self):
         device = self.device()
-        device._require_claim_owner = mock.Mock()
+        device._require_claim_owner = mock.AsyncMock()
         device._live_verify_event = mock.Mock()
         device.backend = SimpleNamespace(
             verify_fprint=mock.AsyncMock(return_value=("verify-match", match_result())),

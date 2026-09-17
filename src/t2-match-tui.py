@@ -543,7 +543,7 @@ def run_observation(args: argparse.Namespace, ui: TerminalUI) -> int:
         mode="starting",
         title="OPENING SENSOR",
         detail="Preparing one bounded observation…",
-        hint="The duration is a safety ceiling, not a capture timer.",
+        hint="Press q, Esc, or Ctrl-C to cancel. The duration is a safety ceiling, not a capture timer.",
         color="amber",
         phase=0,
         started_at=time.monotonic(),
@@ -572,7 +572,7 @@ def run_observation(args: argparse.Namespace, ui: TerminalUI) -> int:
         # Keep terminal interrupts from bypassing the probe's bounded cleanup.
         # The child has its own process group, so an operator Ctrl-C cannot
         # interrupt its sensor cancel/finalization path either.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, request_clean_termination)
         signal.signal(signal.SIGHUP, request_clean_termination)
         signal.signal(signal.SIGTERM, request_clean_termination)
         with open(public_path, "xb") as public_output, open(

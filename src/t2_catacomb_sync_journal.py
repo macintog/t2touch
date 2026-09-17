@@ -74,6 +74,8 @@ def validate_history(records: list[dict[str, Any]]) -> CatacombSyncHistory:
     for index, record in enumerate(records[1:], 1):
         item = record.get("evidence")
         milestone = record.get("milestone")
+        if t2_mutation_journal.is_repair_milestone(milestone):
+            continue
         if not isinstance(item, dict):
             raise CatacombSyncJournalError("Catacomb sync evidence is invalid")
         if milestone == "CATACOMB_SYNC_INTENT" and phase is CatacombSyncPhase.BASELINE:

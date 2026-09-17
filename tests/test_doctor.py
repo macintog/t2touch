@@ -215,6 +215,33 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(check.status, "pass")
         self.assertIn("disabled", check.detail)
 
+    def test_polkit_yes_grant_warns_without_naming_the_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rules = Path(directory) / "49-t2-touchid-reference-user.rules"
+            rules.write_text(
+                'if (action.id == "org.t2linux.touchid.enroll") '
+                "return polkit.Result.YES;\n"
+            )
+            with mock.patch.object(
+                doctor, "POLKIT_RULES_DIRS", (Path(directory),)
+            ):
+                check = doctor.polkit_yes_grant_check()
+        self.assertEqual(check.status, "warn")
+        self.assertIn("YES", check.detail)
+        self.assertIn("enroll/identity-management", check.detail)
+        self.assertNotIn("replace-with-desktop-user", check.detail)
+
+    def test_reference_polkit_rule_is_an_example_not_installed(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue(
+            (root / "tools/49-t2-touchid-reference-user.rules.example").is_file()
+        )
+        self.assertFalse(
+            (root / "tools/49-t2-touchid-reference-user.rules").exists()
+        )
+        install = (root / "install.sh").read_text()
+        self.assertNotIn("49-t2-touchid-reference-user.rules", install)
+
 
 if __name__ == "__main__":
     unittest.main()

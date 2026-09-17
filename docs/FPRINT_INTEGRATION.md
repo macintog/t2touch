@@ -467,6 +467,15 @@ satisfy the verification transaction. The facade reports the actual matched
 neutral handle without treating the requested label as an anatomical or
 origin-specific restriction.
 
+`--match-seconds 0` still means "until a verdict or explicit cancellation",
+but the daemon now caps observation at 120 seconds so one claimed client cannot
+arm the reader forever. `Claim` and `ListEnrolledFingers` also apply a
+per-sender rate limit (`AlreadyInUse` when exceeded) so a same-user flood
+cannot keep hardware inventory running; PAM password fallback remains
+available. Verify signals are unicast to the claimed unique name when dbus-next
+can set `Message.destination`; that is an extra privacy bound and is not
+required for PAM delivery.
+
 ## Support limits
 
 The installed native lifecycle is proven on the reference machine. Batch

@@ -9,7 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -107,10 +109,21 @@ int main(int argc, char **argv)
 		fprintf(stderr, "invalid observation interval\n");
 		return 2;
 	}
-	log = fopen(argv[2], "ae");
-	if (!log) {
-		perror("open log");
-		return 1;
+	{
+		int log_fd = open(argv[2],
+			O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
+			0600);
+
+		if (log_fd < 0) {
+			perror("open log");
+			return 1;
+		}
+		log = fdopen(log_fd, "a");
+		if (!log) {
+			perror("fdopen log");
+			close(log_fd);
+			return 1;
+		}
 	}
 	setvbuf(log, NULL, _IOLBF, 0);
 	setvbuf(stdout, NULL, _IOLBF, 0);

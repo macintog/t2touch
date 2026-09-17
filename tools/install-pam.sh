@@ -8,6 +8,45 @@ flock -x 9
 source_dir=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 backup_dir=/var/lib/t2-touchid/pam-backups
 install -d -o root -g root -m 0700 "$backup_dir"
+force_pam=0
+[[ ${T2TOUCH_FORCE_PAM:-0} == 1 ]] && force_pam=1
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --force) force_pam=1 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+matches_known_upstream() {
+  local target=$1 name=$2 candidate
+  local previous_nullglob
+  previous_nullglob=$(shopt -p nullglob)
+  shopt -s nullglob
+  for candidate in "$source_dir/pam/upstream/${name}".*; do
+    [[ -f $candidate ]] || continue
+    if cmp -s -- "$target" "$candidate"; then
+      eval "$previous_nullglob"
+      return 0
+    fi
+  done
+  eval "$previous_nullglob"
+  return 1
+}
+
+refuse_unfamiliar_first_install() {
+  local name=$1 source=$2 target=/etc/pam.d/$1
+  [[ $force_pam == 1 ]] && return 0
+  [[ -e $target ]] || return 0
+  matches_known_upstream "$target" "$name" && return 0
+  cmp -s -- "$target" "$source" && return 0
+  echo "Refusing to overwrite non-upstream PAM stack: $target" >&2
+  echo "Review the diff, then rerun with --force or T2TOUCH_FORCE_PAM=1." >&2
+  if command -v diff >/dev/null; then
+    diff -u -- "$target" "$source" >&2 || true
+  fi
+  exit 1
+}
 
 install_one() {
   local source=$2 target=/etc/pam.d/$1 backup=$backup_dir/$1.original
@@ -15,6 +54,9 @@ install_one() {
   local mode=${3:-apply} managed_before=0
   [[ -f $source ]] || { echo "Missing template: $source" >&2; exit 1; }
   [[ -e $backup || -e $absent ]] && managed_before=1
+  if [[ $managed_before == 0 ]]; then
+    refuse_unfamiliar_first_install "$1" "$source"
+  fi
   if [[ $managed_before == 1 && -e $target && ! -e $installed ]]; then
     cmp -s -- "$target" "$source" || {
       echo "Refusing to overwrite changed PAM stack: $target" >&2

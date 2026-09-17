@@ -28,6 +28,15 @@ protected mapping capabilities, current identity state, and the operation journa
 before dispatch. A privileged PAM verification claim cannot become self-service
 mutation authority. Bulk deletion remains disabled.
 
+An enrolled fingerprint can still authorize enrollment and named deletion
+because those PolicyKit actions default to `auth_self` and the `polkit-1` PAM
+stack treats `pam_fprintd` as sufficient. That is an explicit trade-off: a
+momentary sensor match can become a durable credential change. macOS requires
+the account password for Touch ID settings changes to prevent that path.
+Password fallback remains available. Changing the trade-off would need a
+dedicated PolicyKit PAM path or mutation actions whose implicit authorization
+excludes fingerprint.
+
 The product command `t2touch delete finger-N` obtains fresh PolicyKit
 authorization before claiming the reader or taking its operation lock. Its root
 helper validates the original caller and configured account, then uses the same
@@ -61,10 +70,18 @@ state for reinstall; it does not erase fingerprints from SEP.
 ## PAM and desktop recovery
 
 The installer preserves password fallback and original managed PAM files in
-`/var/lib/t2-touchid/pam-backups`. Sudo and PolicyKit can continue to password
-authentication. Omarchy's lock screen has separate fingerprint and password PAM
-paths; the fingerprint-only service is not a substitute for the password path.
-Use `sudo tools/rollback-pam.sh` to restore managed PAM originals.
+`/var/lib/t2-touchid/pam-backups`. On first install it compares each target
+against the stock Arch/Omarchy fingerprints in `pam/upstream/` and refuses a
+divergent stack unless `--force` or `T2TOUCH_FORCE_PAM=1` is set. Sudo and
+PolicyKit can continue to password authentication. Omarchy's lock screen has
+separate fingerprint and password PAM paths; the fingerprint-only service is
+not a substitute for the password path. Use `sudo tools/rollback-pam.sh` to
+restore managed PAM originals.
+
+`pam_t2touch_action_prompt.so` wraps `PAM_CONV` only to mark the live
+fingerprint prompt. The original conversation is restored when the PAM handle
+is closed (`pam_end`); a later `pam_authenticate` on the same handle after the
+application replaces `PAM_CONV` is outside that restore.
 
 Validate successful and unsuccessful fingerprint attempts, password fallback,
 and return to a usable desktop. A successful biometric result alone does not

@@ -18,6 +18,8 @@ HEADER = struct.Struct("<HHIQ")
 BIOMETRIC_COMMAND_HEADER = struct.Struct("<HHHH")
 BIOMETRIC_COMMAND_MAGIC = 0x4D42
 MAX_FRAME_BODY = 16 * 1024 * 1024
+MAX_SERVICE_CALLBACKS = 256
+MAX_SERVICE_CALLBACK_BYTES = 1024 * 1024
 
 # BiometricKit and bkremoted share this fixed CFString for two related nil
 # cases: a nil Objective-C command output and a no-reply Bridge envelope ID.
@@ -96,14 +98,23 @@ def receive_envelope(sock: socket.socket) -> list[object]:
     return envelope
 
 
+MAX_CALLBACK_EVENTS = MAX_SERVICE_CALLBACKS
+
+
 def request_with_events(
     sock: socket.socket, payload: object
 ) -> tuple[object, list[object]]:
     reply_id = str(uuid.uuid4()).upper()
     send_message(sock, [1, False, reply_id, payload])
     events: list[object] = []
+    event_bytes = 0
     while True:
-        envelope = receive_envelope(sock)
+        frame_type, frame_body = receive_frame(sock)
+        envelope = describe(frame_type, frame_body)
+        if frame_type != TYPE_MESSAGE:
+            raise ValueError(f"expected message frame, received type {frame_type}")
+        if type(envelope) is not list or len(envelope) != 4:
+            raise ValueError("malformed BiometricKit bridge envelope")
         if envelope[0] != 1:
             raise ValueError("unsupported BiometricKit envelope version")
         if envelope[1] is True:
@@ -112,6 +123,12 @@ def request_with_events(
             return envelope[3], events
         if envelope[1] is not False or not isinstance(envelope[2], str):
             raise ValueError("malformed BiometricKit service callback")
+        event_bytes += len(frame_body)
+        if (
+            len(events) >= MAX_SERVICE_CALLBACKS
+            or event_bytes > MAX_SERVICE_CALLBACK_BYTES
+        ):
+            raise ValueError("BiometricKit service callback flood")
         events.append(envelope[3])
         send_message(sock, [1, True, envelope[2], [0]])
 

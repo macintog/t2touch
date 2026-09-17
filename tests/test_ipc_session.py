@@ -14,6 +14,10 @@ from unittest import mock
 
 SOURCE = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
+
+if sys.platform != "linux":
+    raise unittest.SkipTest("Linux-only pidfd and SO_DOMAIN session checks")
+
 import t2_ipc_session as ipc
 import t2_linux_account as linux_account
 import t2_polkit_grant

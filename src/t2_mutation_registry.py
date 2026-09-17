@@ -12,6 +12,7 @@ from pathlib import Path
 import t2_catacomb_sync_journal
 import t2_enrollment_journal
 import t2_external_delete_reconcile
+import t2_external_inventory_sync
 import t2_identity_delete_journal
 import t2_identity_delete_batch_journal
 import t2_identity_rename_journal
@@ -186,6 +187,12 @@ def scan(root: Path) -> tuple[MutationEntry, ...]:
             result.append(_catacomb_sync_entry(records))
         elif kind == "reconcile-external-delete":
             result.append(_external_delete_entry(records))
+        elif kind == t2_external_inventory_sync.KIND:
+            try:
+                phase = t2_external_inventory_sync.validate_history(records)
+            except (t2_external_inventory_sync.ExternalInventoryError, t2_mutation_journal.JournalError) as error:
+                raise MutationRegistryError("external inventory journal is invalid") from error
+            result.append(MutationEntry(kind, phase, phase != "complete", False))
         elif kind == "recovery":
             # No typed completion state exists yet, so these are conservatively
             # owned by their future broker and always block another mutation.

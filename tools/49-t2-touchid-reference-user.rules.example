@@ -1,5 +1,8 @@
 /*
- * Reference-machine-only authorization override.
+ * Reference-machine-only authorization override.  Do not install this file
+ * into rules.d as-is. Copy it, replace the placeholder username, and keep it
+ * off production machines: Result.YES removes the password prompt for enroll
+ * and identity-management.
  *
  * The product policy remains auth_self for biometric mutation.  This isolated
  * integration host instead grants its one active local test account the two

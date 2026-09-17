@@ -29,7 +29,7 @@ import t2_fprint_identity
 
 
 LOCAL_BROKER = Path(__file__).resolve().with_name("t2-touchid-enroll-test.py")
-INSTALLED_BROKER = Path("/usr/local/sbin/t2-touchid-enroll-test")
+INSTALLED_BROKER = Path("/opt/t2-touchid/bin/t2-touchid-enroll-test")
 LOCAL_IDENTITIES = Path(__file__).resolve().with_name("t2-touchid-identities.py")
 INSTALLED_IDENTITIES = Path("/usr/local/sbin/t2-touchid-identities")
 LOCAL_NATIVE = Path(__file__).resolve().with_name("t2-native-enroll.py")

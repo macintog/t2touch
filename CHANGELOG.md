@@ -6,6 +6,72 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.0.7 - 2026-09-16
+
+This release focuses on reliable fingerprint authentication, recoverable
+upgrades, and tighter handling of privileged operations.
+
+### Fixed
+
+- Restore fingerprint authentication for authorized desktop clients, including
+  lock-screen and PolicyKit prompts, after service hardening restricted caller
+  inspection. Validate the login1 sleep-inhibitor descriptor before matching.
+- Keep sleep/resume races from cancelling a newly warmed matcher. Move slow
+  account and journal checks off the D-Bus event loop, revalidate claims after
+  those checks, and return a D-Bus error when a method is cancelled.
+- Reconcile fingerprints added or replaced by another operating system within
+  the already-authorized account. Preserve surviving neutral handles and live
+  templates; retain backups and block interrupted or racing state saves.
+- Repair completed Linux-native installations whose older userspace leaves the
+  service chain unhealthy. Recovery still requires an intact installed product,
+  matching transport identities, and validated private provisioning authority.
+- Preserve verified transport-update authority across preparation and reboot,
+  including recovery from earlier updates that removed their own readiness
+  evidence. Make interrupted preparation and PAM rollback safely retryable.
+  Fresh, partial, or unidentified installations remain blocked.
+- Check T2 hardware before staging applesmc or changing boot configuration.
+  Build DKMS modules before enabling dependent services, and preserve an
+  existing installation when a replacement build fails.
+- Refuse unfamiliar PAM stacks on first installation unless explicitly forced;
+  recognize current stock Arch sudo and Omarchy lock-password variants.
+  Preflight Omarchy UI restoration and roll back partial writes.
+- Repair torn journal tails consistently across typed readers. Persist mutation
+  intent before dispatch and prune only old, fully resolved activation journals;
+  retain incomplete, blocked, and malformed recovery records.
+- Reject unvalidated biometric endpoint discovery instead of saving a bad port.
+  Fail closed on ambiguous transport replies and device removal, and preserve
+  DMA buffers when firmware may still own them.
+- Reject overlong AKS secrets instead of silently truncating them; protect and
+  clear secret buffers, tighten helper file handling, and keep account-binding
+  secrets out of PolicyKit command-line details.
+- Explain a full fingerprint inventory and required first-install logout.
+  Accept `N`, `finger-N`, and `Finger N` deletion arguments; return exit status
+  `2` when purge confirmation is declined. Improve narrow-terminal, `NO_COLOR`,
+  and Ctrl-C handling, and add doctor `--no-sudo` for unelevated diagnostics.
+
+### Changed
+
+- Restrict daemon and prerequisite service privileges while retaining the
+  capabilities needed for caller authorization, AKS access, and module loading.
+  Bound reader claims and direct verification results to their requesting client.
+- Install research launchers under `/opt/t2-touchid/bin` instead of placing them
+  on PATH. Remove their legacy PATH copies during upgrade and clean up remaining
+  product helpers and generated configuration during uninstall.
+- Require Linux 6.12 or newer headers for the DKMS transport. Installer exit
+  status `3` identifies a required reboot, with the next step printed on stdout.
+- Pin runtime and Python build-backend dependencies with SHA-256 locks, including
+  interpreter-specific dependencies for Linux Python 3.12 and 3.14. Install
+  pymobiledevice3 from the bundled wheel. See
+  [dependency provenance](docs/PROVENANCE.md).
+
+### Limitations
+
+- This remains experimental authentication software. Keep password fallback and
+  a recovery terminal available; these changes do not qualify additional models.
+- An enrolled fingerprint can authorize enrollment and deletion through the
+  configured PolicyKit PAM stack. That existing trade-off is unchanged; see
+  [the security model](SECURITY.md).
+
 ## 0.0.6 - 2026-09-16
 
 This release improves enrollment recovery, upgrades on running T2 systems,
@@ -29,7 +95,7 @@ and fingerprint authentication prompts.
 - Permit a userspace upgrade when T2 reports `BootPolicyReboot` and the
   existing installation has a matching resident transport, an intact private
   configuration, and every prerequisite service active. Fresh setup and
-  transport replacement still require a ready boot-policy result.
+  unprepared transport replacement still require a ready boot-policy result.
 - Allow enrollment recovery to proceed past earlier attempts that stopped
   before starting or completed rollback. Journals that still need identity
   reconciliation continue to block new enrollment.

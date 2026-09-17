@@ -734,15 +734,17 @@ static int read_password_input(char secret[129], size_t *length_out,
 			goto out;
 		}
 	}
-	/* Keep the final byte zero so strcspn never reads past the buffer. */
-	got = read(input, secret, 128);
+	got = read_secret_line(input, secret, 129);
 	if (!password_stdin) {
 		(void)tcsetattr(input, TCSAFLUSH, &old_term);
 		if (write(input, "\n", 1) != 1)
 			perror("write newline");
 	}
-	if (got <= 0) {
-		fprintf(stderr, "failed to read password\n");
+	if (got < 0) {
+		if (errno == EOVERFLOW)
+			fprintf(stderr, "password exceeds 128 bytes\n");
+		else
+			fprintf(stderr, "failed to read password\n");
 		goto out;
 	}
 	*length_out = strcspn(secret, "\r\n");
@@ -803,6 +805,10 @@ static int exchange_verify_password_acm(int fd, uint64_t session,
 		fprintf(stderr, "%s: failed to allocate verify request\n", label);
 		goto out;
 	}
+	if (mlock(request, exchange.request_length) < 0) {
+		perror("protect password memory");
+		goto out;
+	}
 	exchange.request = (uintptr_t)request;
 	if (ioctl(fd, T2_AKS_IOC_EXCHANGE, &exchange) < 0) {
 		if (exchange.sep_status)
@@ -822,10 +828,11 @@ static int exchange_verify_password_acm(int fd, uint64_t session,
 	ret = 0;
 out:
 	if (request) {
-		memset(request, 0, exchange.request_length);
+		explicit_bzero(request, exchange.request_length);
+		munlock(request, exchange.request_length);
 		free(request);
 	}
-	memset(response, 0, sizeof(response));
+	explicit_bzero(response, sizeof(response));
 	return ret;
 }
 
@@ -851,6 +858,8 @@ static int verify_password_acm(int fd, const char *session_text,
 		fprintf(stderr, "invalid keybag handle\n");
 		return 2;
 	}
+	if (protect_secret_buffer(secret, sizeof(secret)))
+		return 1;
 	if (read_verify_password_inputs(context, secret, &length,
 					password_stdin))
 		goto out;
@@ -858,8 +867,9 @@ static int verify_password_acm(int fd, const char *session_text,
 					   (unsigned char *)secret, length,
 					   context, "verify-password-acm");
 out:
-	memset(secret, 0, sizeof(secret));
-	memset(context, 0, sizeof(context));
+	explicit_bzero(secret, sizeof(secret));
+	munlock(secret, sizeof(secret));
+	explicit_bzero(context, sizeof(context));
 	return ret;
 }
 
@@ -884,13 +894,16 @@ static int verify_password_only(int fd, const char *session_text,
 		fprintf(stderr, "invalid keybag handle\n");
 		return 2;
 	}
+	if (protect_secret_buffer(secret, sizeof(secret)))
+		return 1;
 	if (read_password_input(secret, &length, password_stdin))
 		goto out;
 	ret = exchange_verify_password_acm(fd, session, (int32_t)handle,
 					   (unsigned char *)secret, length,
 					   NULL, "verify-password-only");
 out:
-	memset(secret, 0, sizeof(secret));
+	explicit_bzero(secret, sizeof(secret));
+	munlock(secret, sizeof(secret));
 	return ret;
 }
 
@@ -924,6 +937,8 @@ static int verify_password_acm_matrix(int fd, const char *session_text,
 		fprintf(stderr, "invalid positive runtime handle\n");
 		return 2;
 	}
+	if (protect_secret_buffer(secret, sizeof(secret)))
+		return 1;
 	if (read_verify_password_inputs(context, secret, &length, 0))
 		goto out;
 	current_ret = exchange_verify_password_acm(
@@ -945,8 +960,9 @@ static int verify_password_acm_matrix(int fd, const char *session_text,
 		context, "positive-handle/canonical-v1");
 	ret = positive_ret;
 out:
-	memset(secret, 0, sizeof(secret));
-	memset(context, 0, sizeof(context));
+	explicit_bzero(secret, sizeof(secret));
+	munlock(secret, sizeof(secret));
+	explicit_bzero(context, sizeof(context));
 	return ret;
 }
 
@@ -1034,65 +1050,10 @@ static int get_device_state_v1(int fd, const char *session_text,
 	return 0;
 }
 
-static int get_device_state(int fd, const char *handle_text,
-			    const char *selector_text, const char *output_path)
-{
-	unsigned char request[20] = { 0 };
-	unsigned char response[16300] = { 0 };
-	struct t2_aks_ioc_exchange exchange = {
-		.operation = 0x19,
-		.request_length = sizeof(request),
-		.response_capacity = sizeof(response),
-		.request = (uintptr_t)request,
-		.response = (uintptr_t)response,
-	};
-	char *end;
-	long long handle;
-	unsigned long selector;
-	uint32_t status;
-	uint32_t blob_length;
-
-	errno = 0;
-	handle = strtoll(handle_text, &end, 0);
-	if (errno || *end) {
-		fprintf(stderr, "invalid handle: %s\n", handle_text);
-		return 2;
-	}
-	errno = 0;
-	selector = strtoul(selector_text, &end, 0);
-	if (errno || *end || selector > UINT32_MAX) {
-		fprintf(stderr, "invalid selector: %s\n", selector_text);
-		return 2;
-	}
-	put_le64(request + 4, (uint64_t)handle);
-	put_le32(request + 12, selector);
-	if (ioctl(fd, T2_AKS_IOC_EXCHANGE, &exchange) < 0) {
-		perror("T2_AKS_IOC_EXCHANGE");
-		return 1;
-	}
-	if (exchange.response_length < 8) {
-		fprintf(stderr, "short device-state response: %u bytes\n",
-			exchange.response_length);
-		return 1;
-	}
-	status = get_le32(response);
-	blob_length = get_le32(response + 4);
-	if (status || blob_length > exchange.response_length - 8) {
-		fprintf(stderr, "AppleKeyStore status=%#x blob_length=%u response_length=%u\n",
-			status, blob_length, exchange.response_length);
-		return 1;
-	}
-	if (write_private_output(output_path, response + 8, blob_length))
-		return 1;
-	printf("status=0 blob_length=%u response_length=%u\n", blob_length,
-	       exchange.response_length);
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
 	int fd;
-	int ret;
+	int ret = 2;
 
 	if (!((argc == 2 && !strcmp(argv[1], "capabilities")) ||
 	      ((argc == 3 || argc == 4) && !strcmp(argv[1], "load-keybag")) ||
@@ -1109,7 +1070,6 @@ int main(int argc, char **argv)
 	      (argc == 5 && !strcmp(argv[1], "verify-password-acm-matrix")) ||
 	      (argc == 5 && !strcmp(argv[1], "copy-keybag-uuid")) ||
 	      (argc == 4 && !strcmp(argv[1], "get-primary-identity")) ||
-	      (argc == 5 && !strcmp(argv[1], "get-device-state")) ||
 	      (argc == 6 && !strcmp(argv[1], "get-device-state-v1")))) {
 		fprintf(stderr,
 			"Usage: %s capabilities\n"
@@ -1127,11 +1087,10 @@ int main(int argc, char **argv)
 			"       %s verify-password-acm-matrix SESSION SPECIAL POSITIVE < CONTEXT_16_BYTES\n"
 			"       %s copy-keybag-uuid SESSION HANDLE OUTPUT\n"
 			"       %s get-primary-identity SESSION OUTPUT_DER\n"
-			"       %s get-device-state HANDLE SELECTOR OUTPUT\n"
 			"       %s get-device-state-v1 SESSION HANDLE SELECTOR OUTPUT\n",
 			argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
 			argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
-			argv[0], argv[0], argv[0]);
+			argv[0], argv[0]);
 		return 2;
 	}
 	fd = open("/dev/t2-aks", O_RDWR | O_CLOEXEC);
@@ -1173,7 +1132,7 @@ int main(int argc, char **argv)
 	else if (!strcmp(argv[1], "get-device-state-v1"))
 		ret = get_device_state_v1(fd, argv[2], argv[3], argv[4], argv[5]);
 	else
-		ret = get_device_state(fd, argv[2], argv[3], argv[4]);
+		ret = 2;
 	close(fd);
 	return ret;
 }

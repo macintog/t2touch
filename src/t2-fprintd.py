@@ -62,8 +62,12 @@ AUTO_SYNC_ADAPTIVE_VALUE = os.environ.get(
 )
 ALLOWED_PAM_USERS = (LINUX_USER,)
 UNSTARTED_CLAIM_SECONDS = 5.0
-COMPLETED_CLAIM_SECONDS = 0.5
+COMPLETED_CLAIM_SECONDS = 2.0
 NATIVE_CANCEL_SECONDS = 5.0
+MAX_MATCH_SECONDS = 120.0
+METHOD_RATE_LIMIT = 8
+METHOD_RATE_WINDOW_SECONDS = 10.0
+METHOD_RATE_MAX_SENDERS = 64
 DESKTOP_FEEDBACK_UNITS = frozenset(
     {
         "t2-touchid-alert.service",
@@ -77,6 +81,15 @@ if AUTO_SYNC_ADAPTIVE_VALUE not in {"0", "1"}:
 AUTO_SYNC_ADAPTIVE = AUTO_SYNC_ADAPTIVE_VALUE == "1"
 NATIVE_AUTHORITY = "linux-native-e4"
 COMPATIBILITY_AUTHORITY = "macos-control-oracle-v1"
+
+
+def cancelled_method_error(name: str, message: str) -> DBusError:
+    """Turn a method-task cancel into a typed D-Bus error reply."""
+
+    task = asyncio.current_task()
+    if task is not None:
+        task.uncancel()
+    return DBusError(f"{FPRINT_ERROR}.{name}", message)
 
 
 def public_verification_failure(error: BaseException) -> str:
@@ -293,7 +306,18 @@ class T2Backend:
             raise RuntimeError("configured Linux user must be non-root")
         self.linux_uid = account.pw_uid
         self.project_dir = project_dir
-        self.match_seconds = match_seconds
+        if (
+            type(match_seconds) is bool
+            or type(match_seconds) not in (int, float)
+            or match_seconds != match_seconds
+            or match_seconds < 0
+            or match_seconds == float("inf")
+        ):
+            raise RuntimeError("match observation deadline is invalid")
+        self.match_seconds = float(match_seconds)
+        self.sleep_generation = 0
+        self._cached_runtime_authority = None
+        self._cached_runtime_authority_token = None
         self.biolockout_state_dir = Path(
             os.environ.get(
                 "T2_TOUCHID_BIOLOCKOUT_STATE_DIR",
@@ -427,11 +451,77 @@ class T2Backend:
             communication.result()
             raise
 
-    def runtime_authority(self) -> t2_user_authority.RuntimeUserAuthority:
+    @staticmethod
+    def _protected_file_token(path: Path) -> tuple[object, ...] | None:
         try:
-            return t2_user_authority.load_runtime(self.linux_uid)
+            info = path.stat(follow_symlinks=False)
+        except OSError:
+            return None
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_mode & 0o077
+        ):
+            return None
+        return (
+            path.as_posix(),
+            info.st_dev,
+            info.st_ino,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    def _authority_cache_token(self, authority) -> tuple[object, ...] | None:
+        if getattr(authority, "origin", None) != NATIVE_AUTHORITY:
+            return None
+        mapping = self._protected_file_token(t2_user_authority.MAPPING_PATH)
+        manifest = self._protected_file_token(
+            t2_user_authority.USERS_ROOT / str(self.linux_uid) / "authority.json"
+        )
+        journal = self._protected_file_token(authority.enrollment_journal)
+        if mapping is None or manifest is None or journal is None:
+            return None
+        return (
+            os.environ.get("T2_TOUCHID_AUTHORITY_MODE", "linux-native"),
+            mapping,
+            manifest,
+            journal,
+        )
+
+    def runtime_authority(self) -> t2_user_authority.RuntimeUserAuthority:
+        cached = getattr(self, "_cached_runtime_authority", None)
+        cached_token = getattr(self, "_cached_runtime_authority_token", None)
+        if cached is not None and cached_token is not None:
+            current = self._authority_cache_token(cached)
+            if current is not None and current == cached_token:
+                return cached
+        try:
+            authority = t2_user_authority.load_runtime(self.linux_uid)
         except t2_user_authority.UserAuthorityError as error:
+            self._cached_runtime_authority = None
+            self._cached_runtime_authority_token = None
             raise RuntimeError("runtime authority is unavailable") from error
+        self._cached_runtime_authority = authority
+        self._cached_runtime_authority_token = self._authority_cache_token(
+            authority
+        )
+        return authority
+
+    def _observation_seconds(self) -> float:
+        seconds = getattr(self, "match_seconds", 0)
+        if (
+            type(seconds) is bool
+            or type(seconds) not in (int, float)
+            or seconds != seconds
+            or seconds < 0
+            or seconds == float("inf")
+        ):
+            raise RuntimeError("match observation deadline is invalid")
+        if seconds == 0:
+            return MAX_MATCH_SECONDS
+        return min(float(seconds), MAX_MATCH_SECONDS)
 
     @staticmethod
     def _authority_token(authority) -> tuple[object, ...]:
@@ -677,7 +767,7 @@ class T2Backend:
             command.extend(
                 [
                     "--match-seconds",
-                    str(self.match_seconds),
+                    str(self._observation_seconds()),
                     "--stop-on-match-result",
                     "--retry-image-quality-no-match",
                     "--live-match-feedback",
@@ -938,9 +1028,11 @@ class T2Backend:
         if getattr(self, "system_sleeping", False):
             return None
         task = getattr(self, "runtime_warm_task", None)
-        if task is not None and not task.done():
+        sleep_task = getattr(self, "native_worker_sleep_task", None)
+        sleep_pending = isinstance(sleep_task, asyncio.Task) and not sleep_task.done()
+        if task is not None and not task.done() and not sleep_pending:
             return task
-        task = asyncio.create_task(self.warm_runtime())
+        task = asyncio.create_task(self._warm_runtime_after_sleep())
         self.runtime_warm_task = task
 
         def completed(done: asyncio.Task) -> None:
@@ -960,10 +1052,39 @@ class T2Backend:
         task.add_done_callback(completed)
         return task
 
-    async def _quiesce_hardware_for_sleep(self) -> None:
+    async def _warm_runtime_after_sleep(self) -> None:
+        """Drain an in-flight sleep quiesce before importing state again."""
+
+        sleep_task = getattr(self, "native_worker_sleep_task", None)
+        current = asyncio.current_task()
+        if (
+            isinstance(sleep_task, asyncio.Task)
+            and not sleep_task.done()
+            and sleep_task is not current
+        ):
+            await asyncio.gather(sleep_task, return_exceptions=True)
+        if getattr(self, "system_sleeping", False):
+            return
+        await self.warm_runtime()
+
+    async def _quiesce_hardware_for_sleep(
+        self, generation: int | None = None
+    ) -> None:
         """Cancel and drain every owned hardware path before suspend."""
 
         current = asyncio.current_task()
+        if generation is None:
+            generation = getattr(self, "sleep_generation", 0)
+
+        def still_this_sleep() -> bool:
+            return (
+                getattr(self, "system_sleeping", False)
+                and getattr(self, "sleep_generation", 0) == generation
+            )
+
+        if not still_this_sleep():
+            return
+
         active: list[asyncio.Task] = []
         for task in (
             getattr(self, "runtime_warm_task", None),
@@ -987,10 +1108,16 @@ class T2Backend:
         if lock is None:
             lock = asyncio.Lock()
             self.native_worker_start_lock = lock
+        if not still_this_sleep():
+            return
         async with lock:
+            if not still_this_sleep():
+                return
             process = getattr(self, "native_worker", None)
             if process is not None:
                 await self._discard_native_worker(process)
+        if not still_this_sleep():
+            return
         # A collector can own the operation lock before publishing itself as
         # process_owner. This barrier covers that interleaving and cannot admit
         # new work while system_sleeping remains true.
@@ -1004,21 +1131,41 @@ class T2Backend:
 
         if type(sleeping) is not bool:
             raise RuntimeError("system sleep state is invalid")
+        self.sleep_generation = getattr(self, "sleep_generation", 0) + 1
+        generation = self.sleep_generation
         self.system_sleeping = sleeping
         self.invalidate_inventory("system_sleep")
         if sleeping:
-            task = getattr(self, "native_worker_sleep_task", None)
-            if task is None or task.done():
-                task = asyncio.create_task(self._quiesce_hardware_for_sleep())
-                self.native_worker_sleep_task = task
+            previous = getattr(self, "native_worker_sleep_task", None)
 
-                def quiesced(done: asyncio.Task) -> None:
-                    if self.native_worker_sleep_task is done:
-                        self.native_worker_sleep_task = None
-                    if not done.cancelled():
-                        done.exception()
+            async def run() -> None:
+                if (
+                    isinstance(previous, asyncio.Task)
+                    and not previous.done()
+                    and previous is not asyncio.current_task()
+                ):
+                    await asyncio.gather(previous, return_exceptions=True)
+                if (
+                    getattr(self, "system_sleeping", False)
+                    and getattr(self, "sleep_generation", 0) == generation
+                ):
+                    await self._quiesce_hardware_for_sleep(generation)
 
-                task.add_done_callback(quiesced)
+            if previous is None or previous.done():
+                task = asyncio.create_task(
+                    self._quiesce_hardware_for_sleep(generation)
+                )
+            else:
+                task = asyncio.create_task(run())
+            self.native_worker_sleep_task = task
+
+            def quiesced(done: asyncio.Task) -> None:
+                if self.native_worker_sleep_task is done:
+                    self.native_worker_sleep_task = None
+                if not done.cancelled():
+                    done.exception()
+
+            task.add_done_callback(quiesced)
             return
         self._schedule_runtime_warm()
 
@@ -1075,7 +1222,7 @@ class T2Backend:
                 getattr(self, "native_worker_request_id", 0) % (2**63 - 1)
             )
             + 1,
-            "observation_seconds": self.match_seconds,
+            "observation_seconds": self._observation_seconds(),
             "match_finger_name": target_finger,
             "resolve_any_finger_name": resolve_any_finger,
         }
@@ -1244,6 +1391,9 @@ class T2Backend:
         Standalone callers collect their own fresh projection.
         """
         async with self.operation_lock:
+            # Pin authority once for this verification; later loads reuse the
+            # stat-token cache without skipping a fail-closed rebuild on change.
+            self.runtime_authority()
             view = (
                 projection if projection is not None
                 else await self.runtime_projection()
@@ -1418,6 +1568,7 @@ class FprintDevice(ServiceInterface):
         self.claimed_sender: str | None = None
         self.claimed_caller: t2_dbus_identity.PinnedDBusCaller | None = None
         self.claimed_evidence: t2_fprint_claim.ClaimEvidence | None = None
+        self.claim_generation = 0
         self.verify_task: asyncio.Task | None = None
         self.verify_selection_sent = False
         self.listed_presentation = None
@@ -1427,6 +1578,58 @@ class FprintDevice(ServiceInterface):
         self.finger_present = False
         self.finger_needed = False
         self.enrollment_progress: int | None = None
+        self.sender_departed_tasks: set[asyncio.Task] = set()
+        self._method_rate: dict[str, list[float]] = {}
+
+    def _rate_limit_sender(self, sender: str) -> None:
+        now = time.monotonic()
+        window = METHOD_RATE_WINDOW_SECONDS
+        rates = getattr(self, "_method_rate", None)
+        if rates is None:
+            rates = {}
+            self._method_rate = rates
+        stamps = [stamp for stamp in rates.get(sender, []) if now - stamp < window]
+        if len(stamps) >= METHOD_RATE_LIMIT:
+            raise DBusError(
+                f"{FPRINT_ERROR}.AlreadyInUse",
+                "device is busy",
+            )
+        stamps.append(now)
+        rates[sender] = stamps
+        if len(rates) > METHOD_RATE_MAX_SENDERS:
+            expired = [
+                name
+                for name, seen in rates.items()
+                if name != sender and not any(now - stamp < window for stamp in seen)
+            ]
+            for name in expired:
+                rates.pop(name, None)
+
+    def _emit_claimed(self, member: str, signature: str, body: list) -> None:
+        hook = self.__dict__.get(member)
+        if callable(hook):
+            hook(*body)
+            return
+        dest = self.claimed_sender
+        bus = self.identity_bus
+        if dest is None or bus is None or not callable(getattr(bus, "send", None)):
+            hook = getattr(type(self), member, None)
+            if callable(hook):
+                hook(self, *body)
+            return
+        self._consume_signal_send(
+            bus.send(
+                Message(
+                    destination=dest,
+                    path=DEVICE_PATH,
+                    interface="net.reactivated.Fprint.Device",
+                    member=member,
+                    message_type=MessageType.SIGNAL,
+                    signature=signature,
+                    body=body,
+                )
+            )
+        )
 
     @staticmethod
     def _consume_signal_send(result: object) -> None:
@@ -1484,19 +1687,21 @@ class FprintDevice(ServiceInterface):
         if not callable(send):
             return
         try:
-            result = send(
-                Message.new_signal(
-                    path=DEVICE_PATH,
-                    interface="org.freedesktop.DBus.Properties",
-                    member="PropertiesChanged",
-                    signature="sa{sv}as",
-                    body=[
-                        "net.reactivated.Fprint.Device",
-                        changed,
-                        [],
-                    ],
-                )
+            message = Message.new_signal(
+                path=DEVICE_PATH,
+                interface="org.freedesktop.DBus.Properties",
+                member="PropertiesChanged",
+                signature="sa{sv}as",
+                body=[
+                    "net.reactivated.Fprint.Device",
+                    changed,
+                    [],
+                ],
             )
+            destination = self.claimed_sender
+            if type(destination) is str and destination.startswith(":"):
+                message.destination = destination
+            result = send(message)
         except Exception:
             # The D-Bus connection itself owns delivery failure. Never turn a
             # best-effort UI property notification into a biometric replay.
@@ -1518,6 +1723,7 @@ class FprintDevice(ServiceInterface):
             raise DBusError(
                 f"{FPRINT_ERROR}.PermissionDenied", "caller identity unavailable"
             ) from error
+        self._rate_limit_sender(sender)
         async with self.claim_lock:
             if self.claimed_user is not None:
                 # NameOwnerChanged delivery can trail a short-lived PAM
@@ -1542,26 +1748,33 @@ class FprintDevice(ServiceInterface):
                         f"{FPRINT_ERROR}.AlreadyInUse", "device is claimed"
                     )
             caller = None
+            claim_phase = "identity-collection"
             try:
                 caller = await self.caller_collector(
                     self.identity_bus, sender
                 )
+                claim_phase = "sender-recheck"
                 if current_dbus_sender() != sender or caller.sender != sender:
                     raise t2_dbus_identity.DBusIdentityError(
                         "D-Bus caller changed during claim"
                     )
+                claim_phase = "identity-recheck"
                 caller.verify()
+                claim_phase = "claim-evidence"
                 evidence = await asyncio.to_thread(
                     self.claim_evidence_collector, caller, requested
                 )
+                claim_phase = "evidence-type"
                 if not isinstance(evidence, t2_fprint_claim.ClaimEvidence):
                     raise t2_fprint_claim.FprintClaimError(
                         "claim evidence collector returned an invalid result"
                     )
+                claim_phase = "sender-final-recheck"
                 if current_dbus_sender() != sender or caller.sender != sender:
                     raise t2_dbus_identity.DBusIdentityError(
                         "D-Bus caller changed during claim evidence collection"
                     )
+                claim_phase = "identity-final-recheck"
                 caller.verify()
             except (
                 DBusSenderError,
@@ -1570,6 +1783,11 @@ class FprintDevice(ServiceInterface):
             ) as error:
                 if caller is not None:
                     caller.close()
+                print(
+                    f"T2 fprint claim rejected during {claim_phase}: "
+                    f"{public_verification_failure(error)}",
+                    flush=True,
+                )
                 raise DBusError(
                     f"{FPRINT_ERROR}.PermissionDenied",
                     "caller process identity unavailable",
@@ -1578,6 +1796,7 @@ class FprintDevice(ServiceInterface):
             self.claimed_sender = sender
             self.claimed_caller = caller
             self.claimed_evidence = evidence
+            self.claim_generation += 1
             self.claim_expiry_task = asyncio.create_task(
                 self._expire_unstarted_claim()
             )
@@ -1589,10 +1808,11 @@ class FprintDevice(ServiceInterface):
         self.claimed_sender = None
         self.claimed_caller = None
         self.claimed_evidence = None
+        self.claim_generation += 1
         if caller is not None:
             caller.close()
 
-    def _require_claim_owner(self) -> None:
+    async def _require_claim_owner(self) -> None:
         if (
             self.claimed_user is None
             or self.claimed_sender is None
@@ -1608,18 +1828,22 @@ class FprintDevice(ServiceInterface):
             raise DBusError(
                 f"{FPRINT_ERROR}.PermissionDenied", "caller identity unavailable"
             ) from error
-        if sender != self.claimed_sender:
+        owner_sender = self.claimed_sender
+        owner_caller = self.claimed_caller
+        owner_evidence = self.claimed_evidence
+        owner_generation = self.claim_generation
+        if sender != owner_sender:
             raise DBusError(
                 f"{FPRINT_ERROR}.PermissionDenied",
                 "device is claimed by another D-Bus connection",
             )
         try:
-            if self.claimed_caller.sender != sender:
+            if owner_caller.sender != sender:
                 raise t2_dbus_identity.DBusIdentityError(
                     "pinned sender does not match the claim"
                 )
-            self.claimed_caller.verify()
-            self.claimed_evidence.revalidate(self.claimed_caller)
+            owner_caller.verify()
+            await asyncio.to_thread(owner_evidence.revalidate, owner_caller)
         except (
             t2_dbus_identity.DBusIdentityError,
             t2_fprint_claim.FprintClaimError,
@@ -1628,10 +1852,36 @@ class FprintDevice(ServiceInterface):
                 f"{FPRINT_ERROR}.PermissionDenied",
                 "caller process identity is no longer valid",
             ) from error
+        if (
+            self.claimed_sender is not owner_sender
+            or self.claimed_caller is not owner_caller
+            or self.claimed_evidence is not owner_evidence
+            or self.claim_generation != owner_generation
+        ):
+            raise DBusError(
+                f"{FPRINT_ERROR}.PermissionDenied",
+                "device is claimed by another D-Bus connection",
+            )
+        try:
+            if current_dbus_sender() != owner_sender:
+                raise DBusError(
+                    f"{FPRINT_ERROR}.PermissionDenied",
+                    "device is claimed by another D-Bus connection",
+                )
+            owner_caller.verify()
+        except DBusSenderError as error:
+            raise DBusError(
+                f"{FPRINT_ERROR}.PermissionDenied", "caller identity unavailable"
+            ) from error
+        except t2_dbus_identity.DBusIdentityError as error:
+            raise DBusError(
+                f"{FPRINT_ERROR}.PermissionDenied",
+                "caller process identity is no longer valid",
+            ) from error
 
     @method()
     async def Release(self):
-        self._require_claim_owner()
+        await self._require_claim_owner()
         await self._stop_verification(require_running=False)
         await self._stop_enrollment(require_running=False)
         await self._wait_deletion(require_running=False)
@@ -1640,11 +1890,21 @@ class FprintDevice(ServiceInterface):
     @method()
     async def ListEnrolledFingers(self, username: "s") -> "as":
         self.listed_presentation = None
+        try:
+            self._rate_limit_sender(current_dbus_sender())
+        except DBusSenderError as error:
+            raise DBusError(
+                f"{FPRINT_ERROR}.PermissionDenied", "caller identity unavailable"
+            ) from error
         requested = username or LINUX_USER
         if requested not in ALLOWED_PAM_USERS:
             raise DBusError(f"{FPRINT_ERROR}.PermissionDenied", "unknown user")
         try:
             self.enrolled_fingers = await self.backend.list_fingers()
+        except asyncio.CancelledError:
+            raise cancelled_method_error(
+                "Internal", "fingerprint inventory unavailable"
+            ) from None
         except Exception as error:
             raise DBusError(
                 f"{FPRINT_ERROR}.Internal", "fingerprint inventory unavailable"
@@ -1661,7 +1921,7 @@ class FprintDevice(ServiceInterface):
 
     @method()
     async def VerifyStart(self, finger_name: "s"):
-        self._require_claim_owner()
+        await self._require_claim_owner()
         if (
             self.verify_task is not None
             or (
@@ -1699,7 +1959,7 @@ class FprintDevice(ServiceInterface):
             else:
                 async with self.backend.operation_lock:
                     view = await self.backend.runtime_projection()
-            self._require_claim_owner()
+            await self._require_claim_owner()
             if self.verify_task is not current_task:
                 raise RuntimeError("verification task binding changed")
             if (
@@ -1738,6 +1998,10 @@ class FprintDevice(ServiceInterface):
             started = True
         except DBusError:
             raise
+        except asyncio.CancelledError:
+            raise cancelled_method_error(
+                "NoActionInProgress", "verification was cancelled"
+            ) from None
         except Exception as error:
             raise DBusError(
                 f"{FPRINT_ERROR}.Internal",
@@ -1750,7 +2014,7 @@ class FprintDevice(ServiceInterface):
 
     @method()
     async def VerifyStop(self):
-        self._require_claim_owner()
+        await self._require_claim_owner()
         try:
             await self._stop_verification(require_running=True)
         finally:
@@ -1775,13 +2039,13 @@ class FprintDevice(ServiceInterface):
             )
             # The touch wait can be unbounded. Account/session/process
             # evidence collected before it is not authority to publish now.
-            self._require_claim_owner()
+            await self._require_claim_owner()
             if verdict == "verify-match":
                 selected = resolved_any_finger_from_result(result)
                 if selected is None:
                     raise RuntimeError("matched any-finger result has no identity")
-                self.VerifyFingerMatched(selected)
-            self.VerifyStatus(verdict, True)
+                self._emit_claimed("VerifyFingerMatched", "s", [selected])
+            self._emit_claimed("VerifyStatus", "sb", [verdict, True])
             if verdict == "verify-match":
                 # Authentication is already terminal. Persistence is a
                 # separately journaled best-effort operation and can neither
@@ -1802,7 +2066,7 @@ class FprintDevice(ServiceInterface):
                 flush=True,
             )
             self.backend.schedule_feedback("verify-unknown-error")
-            self.VerifyStatus("verify-unknown-error", True)
+            self._emit_claimed("VerifyStatus", "sb", ["verify-unknown-error", True])
         finally:
             self._set_finger_state(False, False)
         # Keep the completed task as the active transaction until the client
@@ -1820,7 +2084,7 @@ class FprintDevice(ServiceInterface):
             # not merely scheduling activation and transport setup.
             if not self.verify_selection_sent:
                 self.verify_selection_sent = True
-                self.VerifyFingerSelected("any")
+                self._emit_claimed("VerifyFingerSelected", "s", ["any"])
             self._set_finger_state(False, True)
             return
         semantics = event.get("status_semantics")
@@ -1837,7 +2101,7 @@ class FprintDevice(ServiceInterface):
             and event.get("no_match_image_quality") is True
         ):
             self._set_finger_state(False, True)
-            self.VerifyStatus("verify-retry-scan", False)
+            self._emit_claimed("VerifyStatus", "sb", ["verify-retry-scan", False])
 
     async def _expire_stale_claim(self, completed_task: asyncio.Task) -> None:
         await asyncio.sleep(COMPLETED_CLAIM_SECONDS)
@@ -1915,7 +2179,7 @@ class FprintDevice(ServiceInterface):
     @method()
     async def EnrollStart(self, finger_name: "s"):
         self.listed_presentation = None
-        self._require_claim_owner()
+        await self._require_claim_owner()
         self.backend.invalidate_inventory("enrollment_start")
         client = self.enrollment_client
         if client is None:
@@ -1945,7 +2209,7 @@ class FprintDevice(ServiceInterface):
             # current identity inventory. Retained slots are never renumbered.
             async with self.backend.operation_lock:
                 view = await self.backend.enrollment_projection(fresh=True)
-            self._require_claim_owner()
+            await self._require_claim_owner()
             if (
                 self.verify_task is not None
                 or getattr(client, "task", None) is not None
@@ -1977,6 +2241,11 @@ class FprintDevice(ServiceInterface):
             )
         except DBusError:
             raise
+        except asyncio.CancelledError:
+            self._set_finger_state(False, False)
+            raise cancelled_method_error(
+                "NoActionInProgress", "enrollment was cancelled"
+            ) from None
         except Exception as error:
             self._set_finger_state(False, False)
             raise DBusError(
@@ -1990,7 +2259,7 @@ class FprintDevice(ServiceInterface):
 
     @method()
     async def EnrollStop(self):
-        self._require_claim_owner()
+        await self._require_claim_owner()
         try:
             await self._stop_enrollment(require_running=True)
         finally:
@@ -2088,14 +2357,14 @@ class FprintDevice(ServiceInterface):
         raise DBusError(f"{FPRINT_ERROR}.PermissionDenied", "delete in macOS")
 
     @method()
-    def DeleteEnrolledFingers2(self):
-        self._require_claim_owner()
+    async def DeleteEnrolledFingers2(self):
+        await self._require_claim_owner()
         raise DBusError(f"{FPRINT_ERROR}.PermissionDenied", "delete in macOS")
 
     @method()
     async def DeleteEnrolledFinger(self, finger_name: "s"):
         self.listed_presentation = None
-        self._require_claim_owner()
+        await self._require_claim_owner()
         self.backend.invalidate_inventory("deletion_start")
         client = self.deletion_client
         if client is None:
@@ -2133,7 +2402,7 @@ class FprintDevice(ServiceInterface):
         try:
             async with self.backend.operation_lock:
                 view = await self.backend.runtime_projection(fresh=True)
-            self._require_claim_owner()
+            await self._require_claim_owner()
             if self.delete_task is not current_task:
                 raise RuntimeError("deletion task binding changed")
             if self.verify_task is not None or (
@@ -2186,6 +2455,10 @@ class FprintDevice(ServiceInterface):
                 raise RuntimeError("deletion client returned an invalid result")
         except DBusError:
             raise
+        except asyncio.CancelledError:
+            raise cancelled_method_error(
+                "PrintsNotDeleted", "deletion was cancelled"
+            ) from None
         except Exception as error:
             raise DBusError(
                 f"{FPRINT_ERROR}.PrintsNotDeleted",
@@ -2505,7 +2778,27 @@ async def main_async(args: argparse.Namespace) -> None:
                 if login1_owner is not None:
                     schedule_login1_reconciliation()
             if name == old_owner and not new_owner:
-                asyncio.create_task(device.sender_departed(name))
+                departed = asyncio.create_task(device.sender_departed(name))
+                tracked = getattr(device, "sender_departed_tasks", None)
+                if tracked is None:
+                    tracked = set()
+                    device.sender_departed_tasks = tracked
+                tracked.add(departed)
+
+                def completed(done: asyncio.Task) -> None:
+                    tracked.discard(done)
+                    try:
+                        done.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as error:
+                        print(
+                            "Touch ID sender-departure handling failed: "
+                            f"{public_verification_failure(error)}",
+                            flush=True,
+                        )
+
+                departed.add_done_callback(completed)
         return False
 
     def system_sleep_handler(message: Message):
@@ -2589,8 +2882,8 @@ def main() -> None:
         type=float,
         default=0.0,
         help=(
-            "biometric observation deadline; 0 keeps the initial prompt "
-            "armed until a verdict or explicit client cancellation"
+            "biometric observation deadline in seconds; 0 waits for a "
+            f"verdict up to {int(MAX_MATCH_SECONDS)} seconds"
         ),
     )
     parser.add_argument(

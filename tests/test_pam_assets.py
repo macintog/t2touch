@@ -29,7 +29,10 @@ class PamAssetTests(unittest.TestCase):
         self.assertIn("authfail_line != unix_line + 1", installer)
         self.assertIn("$1.installed", installer)
         self.assertIn("mv -f -- \"$tmp\" \"$target\"", installer)
-        self.assertIn("$backup_dir/$1.absent", installer)
+        self.assertIn("T2TOUCH_FORCE_PAM", installer)
+        self.assertIn("--force", installer)
+        self.assertIn("refuse_unfamiliar_first_install", installer)
+        self.assertIn("pam/upstream/", installer)
 
     def test_rollback_restores_or_removes_every_managed_stack(self):
         rollback = (ROOT / "tools/rollback-pam.sh").read_text()
@@ -44,14 +47,36 @@ class PamAssetTests(unittest.TestCase):
         self.assertIn("$backup_dir/$name.absent", rollback)
         self.assertIn('rm -f -- "$target"', rollback)
         self.assertIn('rm -f -- "$backup" "$absent" "$installed"', rollback)
-        self.assertIn('rm -f -- "$absent" "$installed"', rollback)
         self.assertIn("Refusing to overwrite changed PAM stack", rollback)
 
-    def test_unprivileged_omarchy_password_stack_has_no_root_helper(self):
+    def test_unprivileged_omarchy_password_stack_includes_system_auth(self):
         password_stack = (ROOT / "pam/omarchy-lock-password").read_text()
 
         self.assertNotIn("t2-pam-unlock", password_stack)
-        self.assertIn("pam_unix.so try_first_pass", password_stack)
+        self.assertNotIn("pam_fprintd.so", password_stack)
+        self.assertIn("include                     system-auth", password_stack)
+        self.assertIn("omarchy-lock-fingerprint", password_stack.splitlines()[2])
+
+    def test_first_install_fingerprints_cover_stock_arch_and_omarchy(self):
+        upstream = ROOT / "pam/upstream"
+        for name in (
+            "sudo.arch",
+            "sudo.arch-systemd-session",
+            "polkit-1.arch",
+            "omarchy-lock-password.omarchy",
+            "omarchy-lock-password.omarchy-no-spdx",
+            "omarchy-lock-fingerprint.omarchy",
+        ):
+            self.assertTrue((upstream / name).is_file(), name)
+        current_sudo = (upstream / "sudo.arch-systemd-session").read_text()
+        self.assertIn("pam_systemd.so class=none", current_sudo)
+        current_lock = (
+            upstream / "omarchy-lock-password.omarchy-no-spdx"
+        ).read_text()
+        self.assertIn("pam_faillock.so authsucc", current_lock)
+        fingerprint = (ROOT / "pam/omarchy-lock-fingerprint").read_text()
+        self.assertIn("pam_fprintd.so", fingerprint)
+        self.assertNotIn("sufficient", fingerprint)
 
     def test_sudo_skips_fingerprint_until_keybags_are_ready(self):
         sudo_stack = (ROOT / "pam/sudo").read_text()
@@ -113,6 +138,8 @@ class PamAssetTests(unittest.TestCase):
 
         self.assertIn("◎ Place your finger on the fingerprint reader", source)
         self.assertIn('strcmp(rewritten[index].msg, action_prompt) == 0', source)
+        self.assertIn("pam_set_item(pamh, PAM_CONV, &context->upstream)", source)
+        self.assertIn("live->conv == marked_conversation", source)
         for name in ("sudo", "polkit-1", "omarchy-lock-fingerprint"):
             stack = (ROOT / "pam" / name).read_text()
             marker = stack.index("pam_t2touch_action_prompt.so")
@@ -161,6 +188,29 @@ class PamAssetTests(unittest.TestCase):
         self.assertNotIn("enable t2-interactive-unlock.service", install)
         self.assertIn("disable --now t2-interactive-unlock.service", install)
         self.assertIn("t2-interactive-unlock", (ROOT / "uninstall.sh").read_text())
+
+    def test_first_install_requires_force_for_unfamiliar_stacks(self):
+        installer = (ROOT / "tools/install-pam.sh").read_text()
+        self.assertIn("refuse_unfamiliar_first_install", installer)
+        self.assertIn("T2TOUCH_FORCE_PAM", installer)
+        self.assertIn("--force", installer)
+        self.assertTrue((ROOT / "pam/upstream/sudo.arch").is_file())
+        self.assertIn("include                     system-auth", (ROOT / "pam/omarchy-lock-password").read_text())
+
+    def test_reference_polkit_rule_is_an_example(self):
+        self.assertFalse((ROOT / "tools/49-t2-touchid-reference-user.rules").exists())
+        example = ROOT / "tools/49-t2-touchid-reference-user.rules.example"
+        self.assertTrue(example.is_file())
+        self.assertIn("polkit.Result.YES", example.read_text())
+
+    def test_doctor_warns_about_yes_mutation_rules(self):
+        doctor = (ROOT / "src/t2-touchid-doctor.py").read_text()
+        self.assertIn("polkit.Result.YES", doctor)
+        self.assertIn("enroll/identity-management", doctor)
+
+    def test_pam_prompt_restores_the_original_conversation(self):
+        source = (ROOT / "src/pam_t2touch_action_prompt.c").read_text()
+        self.assertIn("pam_set_item(pamh, PAM_CONV, &context->upstream)", source)
 
 
 if __name__ == "__main__":

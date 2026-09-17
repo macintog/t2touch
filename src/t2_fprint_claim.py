@@ -25,10 +25,11 @@ NameResolver = Callable[[str], object]
 AccountCollector = Callable[[int], t2_linux_account.AccountEvidence]
 
 POLKIT_AGENT_HELPER = Path("/usr/lib/polkit-1/polkit-agent-helper-1")
+# systemd Accept=yes instance names vary. Bind only the trailing -<uid> of a
+# polkit-agent-helper@ unit under the helper slice; unknown shapes fail closed.
 POLKIT_AGENT_CGROUP = re.compile(
     rb"0::/system\.slice/system-polkit\\x2dagent\\x2dhelper\.slice/"
-    rb"polkit-agent-helper@[0-9]{1,20}-[0-9]{1,20}-"
-    rb"[0-9]{1,20}_[0-9]{1,20}-([0-9]{1,10})\.service\n?"
+    rb"polkit-agent-helper@(?:[0-9]{1,20}[-_])+([0-9]{1,10})\.service\n?"
 )
 
 
@@ -74,7 +75,11 @@ def _is_polkit_agent_helper(
     caller: t2_dbus_identity.PinnedDBusCaller,
     target_uid: int,
 ) -> bool:
-    """Bind one root PAM caller to Polkit's exact socket helper instance."""
+    """Bind one root PAM caller to Polkit's socket-activated helper unit."""
+
+    def reject(reason: str) -> bool:
+        print(f"T2 Polkit helper rejected during {reason}", flush=True)
+        return False
 
     subject = caller.subject
     if (
@@ -83,24 +88,29 @@ def _is_polkit_agent_helper(
         or type(target_uid) is not int
         or not 1 <= target_uid < t2_linux_account.UINT32_MAX
     ):
-        return False
+        return reject("subject-validation")
     process_root = caller.proc_root / str(subject.pid)
+    phase = "identity-recheck"
     try:
         caller.verify()
-        process = os.stat(process_root / "exe")
-        expected = os.stat(POLKIT_AGENT_HELPER)
-        cgroup = t2_polkit_grant._read_bounded(process_root / "cgroup")
-        matched = POLKIT_AGENT_CGROUP.fullmatch(cgroup)
+        phase = "installed-helper-stat"
+        expected = POLKIT_AGENT_HELPER.stat(follow_symlinks=False)
         if (
             not stat.S_ISREG(expected.st_mode)
             or expected.st_uid != t2_linux_account.ROOT_UID
             or expected.st_mode & 0o022
-            or (process.st_dev, process.st_ino)
-            != (expected.st_dev, expected.st_ino)
-            or matched is None
-            or int(matched.group(1), 10) != target_uid
         ):
-            return False
+            return reject("executable-validation")
+        phase = "cgroup-read"
+        cgroup = t2_polkit_grant._read_bounded(process_root / "cgroup")
+        matched = POLKIT_AGENT_CGROUP.fullmatch(cgroup)
+        phase = "target-binding"
+        if matched is None:
+            return reject("target-binding")
+        bound_uid = int(matched.group(1), 10)
+        if bound_uid != target_uid:
+            return reject("target-binding")
+        phase = "identity-final-recheck"
         caller.verify()
         return True
     except (
@@ -109,7 +119,7 @@ def _is_polkit_agent_helper(
         t2_dbus_identity.DBusIdentityError,
         t2_polkit_grant.PolkitGrantError,
     ):
-        return False
+        return reject(f"process-validation-{phase}")
 
 
 def _polkit_target_session(

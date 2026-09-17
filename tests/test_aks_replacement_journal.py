@@ -63,6 +63,17 @@ class AKSReplacementJournalTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_torn_reply_keeps_delete_intent_recoverable(self):
+        before = replacement.read(self.path)
+        with self.path.open("ab") as stream:
+            stream.write(b'{"milestone":"DELETE_SUCC')
+        recovered = replacement.read(self.path)
+        self.assertEqual(recovered.phase, before.phase)
+        self.assertEqual(recovered.record_count, before.record_count + 1)
+        self.assertEqual(replacement.read(self.path), recovered)
+        self.reconcile_delete()
+        self.assertEqual(replacement.read(self.path).phase, "delete-reconciled")
+
     def reconcile_delete(self) -> None:
         replacement.append_checked(
             self.path,

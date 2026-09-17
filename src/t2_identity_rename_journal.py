@@ -93,6 +93,8 @@ def validate_history(records: list[dict[str, Any]]) -> IdentityRenameHistory:
     )
 
     for record in records[1:]:
+        if journal.is_repair_milestone(record.get("milestone")):
+            continue
         if record.get("operation_id") != operation_id:
             raise IdentityRenameJournalError("operation ID changed inside rename journal")
         milestone = record.get("milestone")

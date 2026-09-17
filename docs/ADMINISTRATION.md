@@ -75,6 +75,23 @@ observed delta. The terminal reports a redacted completed count when available.
 Purge deletes fingerprint identities while preserving the mapped Linux account,
 Linux-owned keybag, activation authority, journals, and recovery material.
 
+## CLI JSON schemas
+
+Both `t2touch status --json` and `t2touch list --json` use `schema_version: 1`.
+`status` is the service-health view; `list` is inventory only. `service_ready`
+appears on `status` only.
+
+| Field | `status --json` | `list --json` |
+| --- | --- | --- |
+| `schema_version` | `1` | `1` |
+| `service_ready` | boolean | omitted |
+| `fingerprint_count` | integer, or `null` when the service is down | integer |
+| `fingerprints` | `{handle, label}` list, or `null` when the service is down | `{handle, label}` list |
+| `identifiers_redacted` | `true` | `true` |
+
+Answering `n` to `t2touch purge` returns exit status `2` so scripts can
+distinguish a declined confirmation from a helper failure.
+
 ## Deliberately excluded behavior
 
 | macOS behavior | t2touch decision |
@@ -90,3 +107,29 @@ Linux-owned keybag, activation authority, journals, and recovery material.
 Enrollment and interactive verification remain first-class t2touch extensions
 because they are useful Linux operations even though macOS `bioutil` does not
 provide them.
+
+## Installed commands
+
+Product, admin, pkexec, PAM, and systemd helpers install on PATH under
+`/usr/local/{bin,sbin}`. Research and test launchers install under
+`/opt/t2-touchid/bin` and are not on PATH. Systemd unit `ExecStart` paths are
+unchanged.
+
+| Command | Location | Role |
+| --- | --- | --- |
+| `t2touch` | `/usr/local/bin` | Everyday enroll, list, verify, delete, and purge |
+| `t2-touchid-doctor` | `/usr/local/sbin` | Privacy-safe stack report |
+| `t2-touchid-user-map` | `/usr/local/sbin` | Redacted Linux-native account mapping |
+| `t2-native-authority-rebind` | `/usr/local/sbin` | Explicit native authority rebind |
+| `t2-touchid-delete` | `/usr/local/sbin` | pkexec helper for one-slot deletion |
+| `t2-touchid-purge` | `/usr/local/sbin` | pkexec helper for batch deletion |
+| `t2-fprintd-enroll-tui-launch` | `/usr/local/sbin` | Product enrollment TUI used by `t2touch enroll` |
+| `t2-touchid-manage` | `/usr/local/sbin` | Admin mutations; adaptive-sync unit `ExecStart` |
+| `t2-fprint-enrollment-worker`, `t2-fprint-delete-worker` | `/usr/local/sbin` | Root workers launched by the daemon |
+| `t2-aks-tool` | `/usr/local/sbin` | AKS helper used by PAM and keybag units |
+| `t2-pam-unlock`, `t2-pam-fingerprint-ready`, `t2-pam-fingerprint-prompt` | `/usr/local/sbin` | PAM stack helpers |
+| `t2-sep-transport-load`, `t2-sep-transport-unload` | `/usr/local/sbin` | Transport unit `ExecStart`/`ExecStop` |
+| `t2-bridge-network-prepare`, `t2-bridge-network-ready` | `/usr/local/sbin` | Bridge network units |
+| `t2-biometric-ready`, `t2-biometric-port-refresh` | `/usr/local/sbin` | Readiness units |
+| `t2-keybag-load`, `t2-keybag-unlock`, `t2-credential-unlock` | `/usr/local/sbin` | Compatibility-authority units |
+| Research `*-test` helpers and negative/native TUI launchers | `/opt/t2-touchid/bin` | Contributor tools; invoke by absolute path |

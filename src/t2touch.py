@@ -19,6 +19,7 @@ ENROLL = Path("/usr/local/sbin/t2-fprintd-enroll-tui-launch")
 DELETE = Path("/usr/local/sbin/t2-touchid-delete")
 PURGE = Path("/usr/local/sbin/t2-touchid-purge")
 FINGER = re.compile(r"finger-[1-5]")
+FINGER_ARGUMENT = re.compile(r"(?i)^(?:finger[-\s])?([1-5])$")
 INVENTORY_PYTHON = Path("/opt/t2-touchid/.venv/bin/python")
 INVENTORY = Path("/opt/t2-touchid/src/t2-touchid-list.py")
 
@@ -198,14 +199,21 @@ def verify(user: str) -> int:
     ).returncode
 
 
+def parse_finger(finger: str) -> str:
+    match = FINGER_ARGUMENT.fullmatch(" ".join(finger.strip().split()))
+    if match is None:
+        raise T2TouchError(
+            "fingerprint must be N, finger-N, or Finger N, for example finger-2"
+        )
+    return f"finger-{match.group(1)}"
+
+
 def delete(user: str, finger: str) -> int:
     require_current_user(user)
     require_local_mutation_session()
     if not service_ready():
         raise T2TouchError("Touch ID is not ready; run sudo t2-touchid-doctor")
-    if FINGER.fullmatch(finger) is None:
-        raise T2TouchError("fingerprint must be named Finger N, for example finger-2")
-    return authorized_mutation(["/usr/bin/pkexec", str(DELETE), finger])
+    return authorized_mutation(["/usr/bin/pkexec", str(DELETE), parse_finger(finger)])
 
 
 def require_local_mutation_session() -> None:
@@ -262,7 +270,7 @@ def purge(
         )
         if input_stream.readline().strip().lower() not in {"y", "yes"}:
             print("Purge cancelled.", file=output_stream)
-            return 0
+            return 2
     command = ["/usr/bin/pkexec", str(PURGE)]
     if resume:
         command.append("--resume")
@@ -281,8 +289,10 @@ def main(argv: list[str] | None = None) -> int:
     list_parser.add_argument("--json", action="store_true")
     commands.add_parser("count", help="print the enrolled fingerprint count")
     commands.add_parser("verify", help="verify with any enrolled fingerprint")
-    delete_parser = commands.add_parser("delete", help="delete enrolled fingerprints")
-    delete_parser.add_argument("finger", help="a neutral slot such as finger-2")
+    delete_parser = commands.add_parser("delete", help="delete one enrolled fingerprint")
+    delete_parser.add_argument(
+        "finger", help="N, finger-N, or Finger N, for example finger-2"
+    )
     purge_parser = commands.add_parser("purge", help="delete every enrolled fingerprint")
     purge_parser.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     purge_parser.add_argument(

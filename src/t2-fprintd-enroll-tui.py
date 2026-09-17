@@ -114,7 +114,13 @@ class EnrollmentUI:
         self.assigned_finger: str | None = None
         self.presenting = False
         self.color = "NO_COLOR" not in os.environ
-        self.unicode = (sys.stdout.encoding or "ascii").lower() != "ascii"
+        encoding = sys.stdout.encoding or "ascii"
+        try:
+            "╭─●◉".encode(encoding)
+        except (LookupError, UnicodeEncodeError):
+            self.unicode = False
+        else:
+            self.unicode = True
 
     def paint(self, text: str, color: str) -> str:
         if not self.color:
@@ -380,10 +386,11 @@ class EnrollmentUI:
             self.presenting = True
         size = shutil.get_terminal_size((76, 28))
         message, message_color, detail = self._reference_view()
-        panel_width = 58
-        bar_width = 48
+        panel_width = min(58, max(24, size.columns))
+        bar_width = max(8, panel_width - 10)
+        compact = size.columns < 50
         # Keep the artwork's size and proportions stable across window heights.
-        mask = self.COMPACT_FINGERPRINT_MASK
+        mask = () if compact else self.COMPACT_FINGERPRINT_MASK
         # A terminal failure must never make an incomplete capture look like a
         # durable partly-filled fingerprint slot.  Keep the last percentage
         # internally for diagnostics, but clear it from the finished view.
@@ -411,13 +418,14 @@ class EnrollmentUI:
             self.paint(header.center(panel_width), "dim"),
             self.paint(self._finger_heading().center(panel_width), "blue"),
             "",
-            *(
+        ]
+        if mask:
+            lines.extend(
                 " " * ((panel_width - len(mask[0])) // 2) + row
                 for row in self._fingerprint(art_progress, mask)
-            ),
-            "",
-            self.paint(message.center(panel_width), message_color),
-        ]
+            )
+            lines.append("")
+        lines.append(self.paint(message.center(panel_width), message_color))
         if self.terminal is None or successful:
             bar = self.paint("━" * filled, "blue") + self.paint(
                 "━" * (bar_width - filled), "track"
@@ -429,7 +437,10 @@ class EnrollmentUI:
         available = max(1, size.lines - 1)
         top_padding = max(0, (available - len(lines)) // 2)
         left = max(0, (size.columns - panel_width) // 2)
-        output = [f"{CSI}2J{CSI}H{CSI}48;2;18;18;28m", *("" for _ in range(top_padding))]
+        clear = f"{CSI}2J{CSI}H"
+        if self.color:
+            clear += f"{CSI}48;2;18;18;28m"
+        output = [clear, *("" for _ in range(top_padding))]
         for text in lines:
             output.append(" " * left + text + f"{CSI}K")
         if bell:
@@ -718,9 +729,14 @@ class EnrollmentUI:
                 self.terminal_detail = (
                     "The incomplete capture was discarded; no fingerprint slot was created."
                 )
+            elif "data-full" in line:
+                self.terminal_detail = (
+                    "All five fingerprint slots are in use. "
+                    "Delete one with `t2touch delete finger-N`."
+                )
             else:
                 self.terminal_detail = (
-                    "Enrollment did not complete; reconcile state before retrying."
+                    "Enrollment did not complete; run `sudo t2-touchid-doctor`."
                 )
             changed = True
         return changed

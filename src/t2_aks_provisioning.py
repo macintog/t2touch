@@ -101,6 +101,8 @@ def validate_history(records: list[dict[str, Any]]) -> ProvisioningHistory:
         if record.get("operation_id") != operation_id:
             raise AKSProvisioningError("operation ID changed in provisioning journal")
         milestone = record.get("milestone")
+        if journal.is_repair_milestone(milestone):
+            continue
         evidence = record.get("evidence")
         if milestone == "AKS_CREATE_INTENT":
             if phase != "new":

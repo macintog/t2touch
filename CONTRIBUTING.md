@@ -4,6 +4,13 @@ This project handles authentication state and machine-specific Apple keybag
 material. Contributions should be small, reviewable, fail closed, and usable
 without access to another person's private captures.
 
+## Mandatory scope gate
+
+All changes must satisfy [PROJECT_SCOPE.md](docs/PROJECT_SCOPE.md). Unrelated
+findings require a separate disposition; they must not be bundled into T2Touch.
+Local workaround success does not establish product scope. Apply this gate
+before choosing an implementation or promising a release.
+
 ## Pick a work lane
 
 - **Hardware-free:** parsers, state machines, tests, documentation, packaging,
@@ -23,10 +30,17 @@ those use the product’s caller authorization and journaled workers.
 
 ## Development setup
 
+Unit tests and the userspace C build require Linux (CI uses ubuntu-latest).
+On macOS or other hosts, run `py_compile`, `shellcheck` when it is available,
+`tools/privacy-check.sh`, and `enrollment_research/scripts/check-public-tree.sh`
+only. Dash-named files under `src/` are installed executables; underscore-named
+files are importable modules.
+
 ```sh
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install --require-hashes -r requirements-hashed.txt
 .venv/bin/python -m py_compile src/*.py tests/*.py
+# Linux only:
 .venv/bin/python -m unittest discover -s tests
 make -C src t2-aks-tool
 tools/privacy-check.sh

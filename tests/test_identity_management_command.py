@@ -60,7 +60,7 @@ class IdentityManagementCommandTests(unittest.TestCase):
                 )
 
     def test_automatic_external_check_restores_cold_state_before_comparison(self):
-        configuration = {"authority_mode": "linux-native", "apple_uid": 501}
+        configuration = {"authority_mode": "linux-native", "apple_uid": 501, "mapping_generation": "a" * 64}
         store = mock.Mock()
         store.read_committed_components.return_value = {}
         lease = mock.Mock()
@@ -70,6 +70,7 @@ class IdentityManagementCommandTests(unittest.TestCase):
         context = mock.MagicMock()
         context.__enter__.return_value = (None, store, {}, local, lease, cold)
         with (
+            mock.patch.object(MODULE.t2_external_inventory_sync, "abort_undispatched"),
             mock.patch.object(MODULE, "require_mapping_capability"),
             mock.patch.object(MODULE.t2_mutation_registry, "blocks_new_mutation", return_value=False),
             mock.patch.object(MODULE.os.path, "lexists", return_value=False),

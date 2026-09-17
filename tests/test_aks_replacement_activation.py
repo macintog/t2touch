@@ -101,6 +101,16 @@ class ReplacementActivationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_torn_reply_keeps_unlock_intent_recoverable(self):
+        self._append_crash_at_unlock_intent()
+        before = activation_journal.read(self.journal)
+        with self.journal.open("ab") as stream:
+            stream.write(b'{"milestone":"REPLACEMENT_ALIAS_UNLOCK')
+        recovered = activation_journal.read(self.journal)
+        self.assertEqual(recovered.phase, before.phase)
+        self.assertEqual(recovered.record_count, before.record_count + 1)
+        self.assertEqual(activation_journal.read(self.journal), recovered)
+
     @staticmethod
     def alias(state: int, bag_uuid: str | None = None):
         return t2_user_readiness.AliasEvidence(

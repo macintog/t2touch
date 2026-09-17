@@ -36,7 +36,7 @@ if ! pacman -Si "$headers_package" >/dev/null 2>&1 &&
 fi
 
 omarchy pkg add base-devel dkms fprintd python "$headers_package"
-sudo "$source_dir/install.sh" "$@"
+sudo env T2TOUCH_OMARCHY_WRAPPER=1 "$source_dir/install.sh" "$@"
 [[ ${1:-} != --prepare-native-recovery ]] || exit 0
 
 # UWSM reads this on the next graphical login. Resolve devices on that machine
@@ -47,3 +47,8 @@ install -m 0644 "$source_dir/src/t2-hyprland-drm-devices.sh" "$env_dir/20-t2touc
 echo "Omarchy display compatibility installed; it takes effect at your next login."
 
 sudo python3 "$source_dir/tools/install-omarchy-lock-ui.py" "${OMARCHY_PATH:-/usr/share/omarchy}"
+
+echo
+echo "NEXT STEP"
+echo "Log out and sign back in now, then run: t2touch enroll"
+echo "Enrolling in this session can skip the permission prompt."

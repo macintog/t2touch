@@ -6,6 +6,8 @@ fingerprint management.
 | Document | Purpose |
 | --- | --- |
 | [Troubleshooting](TROUBLESHOOTING.md) | Installer stops, deletion recovery, graphical prompts, and rollback. |
+| [First-run recovery](FIRST_RUN_RECOVERY.md) | What to do after an installer stop that requires reboot or relogin. |
+| [Delete recovery](DELETE_RECOVERY.md) | Resume or recover an interrupted fingerprint deletion. |
 | [Security](../SECURITY.md) | Authentication authority, credential storage, fallback, and private reporting. |
 | [Architecture](ARCHITECTURE.md) | Runtime ownership, persistent state, and security boundaries. |
 | [fprintd integration](FPRINT_INTEGRATION.md) | D-Bus clients, caller authorization, enrollment, matching, and deletion. |
@@ -18,3 +20,5 @@ fingerprint management.
 
 See [Contributing](../CONTRIBUTING.md) for development checks and hardware
 reports, and the [roadmap](../ROADMAP.md) for support gaps.
+
+Project governance: [mandatory scope requirements](PROJECT_SCOPE.md).

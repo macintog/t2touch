@@ -125,6 +125,8 @@ def validate_history(records: list[dict[str, Any]]) -> AKSReplacementHistory:
                 "operation ID changed in replacement journal"
             )
         milestone = record.get("milestone")
+        if journal.is_repair_milestone(milestone):
+            continue
         evidence = record.get("evidence")
         if milestone == "REPLACEMENT_PREPARED":
             if phase != "new":

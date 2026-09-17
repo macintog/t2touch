@@ -294,5 +294,43 @@ class BridgeConnectionTests(unittest.TestCase):
             right.close()
 
 
+class BridgeWireBoundTests(unittest.TestCase):
+    def test_request_with_events_caps_callback_flood(self):
+        client, peer = socket.socketpair()
+        client.settimeout(2)
+        peer.settimeout(2)
+        errors: list[BaseException] = []
+
+        def run_peer() -> None:
+            try:
+                request = receive_message(peer)
+                self.assertEqual(request[0], 1)
+                self.assertIs(request[1], False)
+                for index in range(wire.MAX_SERVICE_CALLBACKS + 1):
+                    send_frame(
+                        peer,
+                        wire.TYPE_MESSAGE,
+                        [1, False, f"cb-{index}", ["event", index]],
+                    )
+                    try:
+                        receive_message(peer)
+                    except (TimeoutError, OSError, EOFError):
+                        return
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                peer.close()
+
+        thread = threading.Thread(target=run_peer)
+        thread.start()
+        try:
+            with self.assertRaisesRegex(ValueError, "flood"):
+                wire.request_with_events(client, ["payload"])
+        finally:
+            client.close()
+            thread.join(timeout=2)
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()

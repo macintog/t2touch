@@ -3,7 +3,7 @@
 Start with the installed diagnostic:
 
 ```sh
-t2-touchid-doctor
+sudo t2-touchid-doctor
 ```
 
 The doctor requests elevation through `sudo` so its report is complete. The
@@ -33,8 +33,25 @@ messages, and result for diagnosis if a normal reboot leaves it unchanged.
 An already-running installation is different. When its resident transport
 matches the requested build, its root-private configuration is intact, and the
 complete prerequisite service chain is active, the installer permits an
-in-place userspace upgrade and restarts only the upper service chain. This does
-not relax the result-1 requirement for fresh setup or transport replacement.
+in-place userspace upgrade and restarts only the upper service chain. If an
+older userspace defect left that chain unhealthy, the installer also admits a
+repair only after proving that the installed product is intact, the resident,
+installed, and requested transports are identical, and the root-private
+Linux-native provisioning authority represents a completed installation. For
+an identified transport replacement, `--prepare-transport-update` records a
+root-private proof bound to either a healthy installation or validated completed
+native authority, matching resident/on-disk modules, both old/new module
+identities, and the required intervening host boot. This also permits preparation
+when the old userspace is broken; it never replaces the resident driver live.
+The next installer run may use that proof; it is removed only after setup becomes
+ready. This does not relax the result-1 requirement for fresh or partial setup or an unprepared replacement.
+
+The earlier update workflow removed the units that served as its own upgrade
+proof and could therefore strand a completed Linux-native installation at this
+gate. Such a system is recovered only when the installed product and transport
+are absent and the protected provisioning journal, enabled mapping, and their
+recorded generations validate exactly. A partial fresh installation cannot
+satisfy those checks.
 
 Earlier installers either collapsed this reply into “missing, ambiguous,
 failed, or unsupported” or blocked an otherwise healthy userspace upgrade.
@@ -63,10 +80,10 @@ git pull --ff-only
 Keep `/var/lib/t2-touchid` and its journals intact. An interrupted
 `absence-reconciled` operation is resumed from saved activation material with
 fresh absence checks; deleting its journal would discard that recovery evidence.
-This repair was regression-tested against the actual C admission code and built
-against the reference kernel. The operator subsequently completed the normal installer: first-run reported
-`mapping-ready` and fprintd started. A later actual lock-screen fingerprint
-authentication succeeded with the same compositor still running.
+The prepared-update proof is likewise stored below this root-private directory.
+If preparation stops before requesting a reboot, resolve the reported failure
+and rerun the same command. Its recovery hold and prepared-update proof remain
+in place across a retry. Reboot only after preparation reports success.
 
 ## fprintd dependency failure after a cold bridgeOS boot
 
@@ -92,6 +109,28 @@ loaded-empty save-dirty state. Startup requires the selected user, exact
 identity inventory, group absence, and rolling BioLockout state to reconcile
 before publishing fprintd. A master-only state 3 is a partial restore and is
 not retried as a pristine cold generation.
+
+## Another operating system changed the enrolled fingerprints
+
+Startup validates the configured account's keybag and activation authority. It
+then compares independently collected per-user and global T2 inventories with
+the saved Linux inventory. A new or replaced fingerprint within that authorized
+account is reconciled regardless of which operating system enrolled it.
+
+The reconciler preserves surviving neutral handles, assigns available handles
+to newly observed identities, and saves the current opaque user/master Catacombs.
+It does not enroll, delete, reload an old fingerprint, or change the account or
+keybag. A private component backup and a durable journal precede the save.
+Inventory changes during the save prevent success from being reported.
+
+An interrupted save remains blocking with its recovery evidence intact. Only an
+intent that demonstrably stopped before dispatch can close automatically: the
+prepare/commit directories must be absent, the account mapping unchanged, and
+the current components byte-identical to their validated backup. Do not erase a
+pending journal to bypass this check.
+
+Account authorization remains required. An unrelated account's keybag cannot
+be adopted merely because its fingerprint is visible in a global inventory.
 
 ## Enrollment remains on “Preparing sensor” without a permission dialog
 

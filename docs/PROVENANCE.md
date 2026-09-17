@@ -31,3 +31,47 @@ change the license of the inherited implementation.
 The upstream [discovery helper](../src/discover-biometric-port.py), licensed
 GPL-2.0-only, imports `RemoteXPCConnection` from the pinned pymobiledevice3
 dependency. License compatibility for that combination remains unresolved.
+
+## Install-time Python provenance
+
+`install.sh` installs the root daemon venv through the same helper as CI:
+
+```sh
+# The helper resolves the repository root for the file: wheel path.
+tools/install-python-deps.sh /path/to/venv/bin/python
+```
+
+`requirements-hashed.txt` pins the runtime packages, including
+`dbus-next==0.2.3`, `cryptography`, `construct`, and the rest of the
+pymobiledevice3 dependency tree. PyPI artifacts are locked by SHA-256.
+`pymobiledevice3` is accepted only as the vendored wheel
+`vendor/python/pymobiledevice3-11.1.3-py3-none-any.whl`, referenced by a
+`file:` URL in the lock so pip cannot substitute the PyPI 11.1.3 wheel
+(digest `6d6da2f7…`). The vendored artifact was built with
+`pip wheel --no-deps` from
+`4fcfdd82ffcf30b6a11460b505fadb5579e7b2bb` with Python 3.14.7.
+The GitHub sdist/archive cannot satisfy `setuptools_scm` without a `.git`
+directory, so that commit is shipped as a wheel rather than cloned at
+install time.
+
+There is no second unhashed `pip install`. Transitive versions cannot
+float: `--require-hashes` refuses any file whose digest is not listed.
+The supported CI interpreters are Python 3.12 and 3.14 on Linux. The lock
+includes `sslpsk-pmd3` for Python <3.13 and `backports.zstd` for Python
+>=3.10,<3.14, matching the vendored wheel metadata. Validate resolution for
+both CI interpreters when regenerating; a lock resolved only on 3.14 misses
+these conditional dependencies. `test_provenance_lock` checks every direct
+wheel dependency against the lock under both interpreter environments.
+
+The helper first installs `setuptools==80.9.0` and `wheel==0.45.1` from
+`requirements-build-hashed.txt`, requiring hashed wheels only. The runtime
+installation then uses `--no-build-isolation`: pip must use that installed
+backend and cannot silently fetch unpinned build dependencies. This matters
+for source-only `hexdump` and the Python 3.14 builds of `lzfse` and `pylzss`.
+Both locks and the helper participate in the installer freshness stamp.
+Source compilation still uses the host compiler and headers; the lock does
+not claim reproducible compiler output.
+
+The vendored wheel redistributes the GPL-3.0-or-later pymobiledevice3 dependency. The
+GPL-2.0-only/GPLv3 compatibility issue above remains unresolved; pinning and
+hashing the artifact do not resolve licensing or redistribution obligations.

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 SOURCE = Path(__file__).parents[1] / "src"
@@ -164,6 +166,209 @@ class UserActivationJournalTests(unittest.TestCase):
         )
         self.assertEqual(history.phase, activation.UserActivationPhase.READY)
         self.assertEqual(history.temporary_handle, 7)
+
+    def _absent_through_alias_observed(self) -> None:
+        self.create(readiness.AliasEvidence(False, None, None, None, None))
+        self.append(
+            "USER_KEYBAG_LOAD_INTENT",
+            {
+                "runtime_generation": self.runtime,
+                "keybag_sha256": "b" * 64,
+                "mutation_possible": True,
+            },
+        )
+        self.append(
+            "USER_KEYBAG_HANDLE_OBSERVED",
+            {
+                "runtime_generation": self.runtime,
+                "handle": 7,
+                "bag_uuid_matches": True,
+            },
+        )
+        self.append(
+            "USER_ALIAS_BIND_INTENT",
+            {
+                "runtime_generation": self.runtime,
+                "handle": 7,
+                "special_alias": -501,
+                "mutation_possible": True,
+            },
+        )
+        self.append(
+            "USER_ALIAS_OBSERVED",
+            {
+                "runtime_generation": self.runtime,
+                "special_alias": -501,
+                "bag_uuid_matches": True,
+                "account_uuid_matches": True,
+                "command_status": 0,
+                "command_raised": False,
+            },
+        )
+
+    def test_every_mutation_intent_is_a_commit_milestone(self):
+        source = Path(activation.__file__).read_text(encoding="utf-8")
+        named = set(re.findall(r'"(USER_[A-Z0-9_]+_INTENT)"', source))
+        self.assertEqual(named, activation.MUTATION_INTENTS)
+        self.assertTrue(activation.MUTATION_INTENTS <= activation.COMMIT_MILESTONES)
+
+    def test_baseline_and_load_intent_are_durable_before_hardware(self):
+        with (
+            mock.patch.object(activation.journal, "_durable_file_sync") as file_sync,
+            mock.patch.object(activation.journal, "_sync_directory") as dir_sync,
+        ):
+            self.create(readiness.AliasEvidence(False, None, None, None, None))
+            self.assertGreaterEqual(file_sync.call_count, 1)
+            self.assertGreaterEqual(dir_sync.call_count, 1)
+            before_intent = file_sync.call_count
+            history = self.append(
+                "USER_KEYBAG_LOAD_INTENT",
+                {
+                    "runtime_generation": self.runtime,
+                    "keybag_sha256": "b" * 64,
+                    "mutation_possible": True,
+                },
+            )
+            self.assertGreater(file_sync.call_count, before_intent)
+            self.assertEqual(history.phase, activation.UserActivationPhase.LOAD_INTENT)
+            recovered = activation.read(self.path)
+            self.assertEqual(recovered.phase, activation.UserActivationPhase.LOAD_INTENT)
+
+    def test_remaining_mutation_intents_are_durable_before_hardware(self):
+        self._absent_through_alias_observed()
+        cases = (
+            (
+                "USER_ALIAS_CONFIGURATION_INTENT",
+                {
+                    "runtime_generation": self.runtime,
+                    "special_alias": -501,
+                    "mutation_possible": True,
+                },
+                activation.UserActivationPhase.CONFIGURATION_INTENT,
+            ),
+            (
+                "USER_KEYBAG_UNLOAD_INTENT",
+                {
+                    "runtime_generation": self.runtime,
+                    "handle": 7,
+                    "mutation_possible": True,
+                },
+                activation.UserActivationPhase.UNLOAD_INTENT,
+            ),
+        )
+        for milestone, evidence, phase in cases:
+            with self.subTest(milestone=milestone):
+                path = self.path.with_name(f"{milestone.lower()}.jsonl")
+                path.write_bytes(self.path.read_bytes())
+                path.chmod(0o600)
+                with (
+                    mock.patch.object(
+                        activation.journal, "_durable_file_sync"
+                    ) as file_sync,
+                    mock.patch.object(activation.journal, "_sync_directory") as dir_sync,
+                ):
+                    before = file_sync.call_count
+                    history = activation.append_checked(
+                        path,
+                        activation.read(path).operation_id,
+                        milestone,
+                        evidence,
+                    )
+                    self.assertGreater(file_sync.call_count, before)
+                    self.assertGreaterEqual(dir_sync.call_count, 1)
+                    self.assertEqual(history.phase, phase)
+                    self.assertEqual(activation.read(path).phase, phase)
+
+        preexisting = Path(self.temp.name) / "unlock.jsonl"
+        history = activation.create(
+            preexisting,
+            self.mapping_set,
+            self.selected,
+            "verify",
+            persistent(),
+            readiness.AliasEvidence(True, -501, identifier(2), 1, identifier(1)),
+            linux_boot_uuid=self.boot,
+            runtime_generation=self.runtime,
+        )
+        with (
+            mock.patch.object(activation.journal, "_durable_file_sync") as file_sync,
+            mock.patch.object(activation.journal, "_sync_directory") as dir_sync,
+        ):
+            before = file_sync.call_count
+            history = activation.append_checked(
+                preexisting,
+                history.operation_id,
+                "USER_ALIAS_UNLOCK_INTENT",
+                {
+                    "runtime_generation": self.runtime,
+                    "special_alias": -501,
+                    "mutation_possible": True,
+                },
+            )
+            self.assertGreater(file_sync.call_count, before)
+            self.assertGreaterEqual(dir_sync.call_count, 1)
+            self.assertEqual(history.phase, activation.UserActivationPhase.UNLOCK_INTENT)
+            self.assertEqual(
+                activation.read(preexisting).phase,
+                activation.UserActivationPhase.UNLOCK_INTENT,
+            )
+
+    def test_power_loss_after_mutation_intent_keeps_recovery_evidence(self):
+        disk_synced = {"bytes": b""}
+
+        def file_sync(descriptor: int) -> None:
+            sync = getattr(activation.journal.os, "fdatasync", activation.journal.os.fsync)
+            sync(descriptor)
+            disk_synced["bytes"] = self.path.read_bytes()
+
+        def directory_sync(path: Path) -> None:
+            directory_fd = activation.journal.os.open(
+                path.parent,
+                activation.journal.os.O_RDONLY | activation.journal.os.O_DIRECTORY,
+            )
+            try:
+                activation.journal.os.fsync(directory_fd)
+            finally:
+                activation.journal.os.close(directory_fd)
+            disk_synced["bytes"] = path.read_bytes()
+
+        with (
+            mock.patch.object(activation.journal, "_durable_file_sync", file_sync),
+            mock.patch.object(activation.journal, "_sync_directory", directory_sync),
+        ):
+            self.create(
+                readiness.AliasEvidence(True, -501, identifier(2), 1, identifier(1))
+            )
+            self.append(
+                "USER_ALIAS_UNLOCK_INTENT",
+                {
+                    "runtime_generation": self.runtime,
+                    "special_alias": -501,
+                    "mutation_possible": True,
+                },
+            )
+        if disk_synced["bytes"]:
+            self.path.write_bytes(disk_synced["bytes"])
+        elif self.path.exists():
+            self.path.unlink()
+        recovered = activation.read(self.path)
+        self.assertEqual(recovered.phase, activation.UserActivationPhase.UNLOCK_INTENT)
+        activation.append_checked(
+            self.path,
+            recovered.operation_id,
+            "USER_ACTIVATION_OUTCOME_UNKNOWN",
+            {
+                "runtime_generation": self.runtime,
+                "stage": "unlock",
+                "reason": "crash-before-readback",
+                "mutation_possible": True,
+            },
+        )
+        history = activation.read(self.path)
+        self.assertEqual(history.phase, activation.UserActivationPhase.OUTCOME_UNKNOWN)
+        self.assertEqual(
+            history.terminal_from_phase, activation.UserActivationPhase.UNLOCK_INTENT
+        )
 
     def test_preexisting_locked_alias_skips_load_and_bind(self):
         self.create(

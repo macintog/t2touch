@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import select
 import signal
 import stat
 import struct
@@ -42,6 +43,7 @@ if str(MODULE_ROOT) not in sys.path:
 
 import t2_acm_device
 import t2_activation_bundle
+import t2_activation_journal_retention
 import t2_aks_transport
 import t2_enrollment_journal
 import t2_fprint_result
@@ -62,8 +64,6 @@ NATIVE_MATCH_ROOT = STATE_ROOT / "native-match"
 RUN_ROOT = Path("/run/t2-touchid")
 OPERATION_LOCK = RUN_ROOT / "operation.lock"
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
-SYSTEMD_INHIBIT = Path("/usr/bin/systemd-inhibit")
-CAT = Path("/usr/bin/cat")
 PROBE = Path("/opt/t2-touchid/src/bridge-xpc-probe.py")
 FIRST_DYNAMIC_PORT = 49152
 DISCOVERY_TIMEOUT_SECONDS = 45
@@ -143,6 +143,7 @@ def _require_runtime() -> None:
     _private(RUN_ROOT, directory=True)
     for path in (CATACOMB_ROOT, BIOLOCKOUT_ROOT, ACTIVATION_ROOT):
         _private(path, directory=True)
+    t2_activation_journal_retention.prune(ACTIVATION_ROOT)
 
 
 def _discover_port(host: str, interface: str) -> int:
@@ -164,67 +165,100 @@ def _discover_port(host: str, interface: str) -> int:
     return port
 
 
-def _inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
-    if process.poll() is not None:
-        return False
-    completed = subprocess.run(
-        [str(SYSTEMD_INHIBIT), "--list", "--json=short"],
-        check=False,
-        capture_output=True,
-        timeout=2,
-    )
-    if completed.returncode:
-        return False
+def _open_sleep_inhibitor_fd() -> int:
+    """Hold login1 Inhibit's returned fd; registration is complete on reply."""
+
+    from dbus_next import BusType, Message, MessageType
+    from dbus_next.aio import MessageBus
+
+    async def inhibit() -> int:
+        bus = MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True)
+        held: list[int] = []
+        try:
+            await asyncio.wait_for(bus.connect(), 3)
+            reply = await asyncio.wait_for(
+                bus.call(
+                    Message(
+                        destination="org.freedesktop.login1",
+                        path="/org/freedesktop/login1",
+                        interface="org.freedesktop.login1.Manager",
+                        member="Inhibit",
+                        signature="ssss",
+                        body=[
+                            "sleep",
+                            "t2-touchid-native-match",
+                            "Linux-native Touch ID match is active",
+                            "block",
+                        ],
+                    )
+                ),
+                3,
+            )
+            descriptors = [
+                descriptor
+                for descriptor in getattr(reply, "unix_fds", []) or []
+                if type(descriptor) is int and descriptor >= 0
+            ]
+            held.extend(descriptors)
+            if (
+                not isinstance(reply, Message)
+                or reply.message_type is not MessageType.METHOD_RETURN
+                or reply.signature != "h"
+                or type(reply.body) is not list
+                or len(reply.body) != 1
+                or type(reply.body[0]) is not int
+                or reply.body[0] != 0
+                or len(held) != 1
+            ):
+                raise NativeMatchError("sleep inhibitor reply is invalid")
+            return held.pop()
+        finally:
+            for descriptor in held:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            disconnect = getattr(bus, "disconnect", None)
+            if callable(disconnect):
+                disconnect()
+
     try:
-        records = json.loads(completed.stdout)
-    except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return isinstance(records, list) and any(
-        isinstance(record, dict)
-        and record.get("pid") == process.pid
-        and record.get("who") == "t2-touchid-native-match"
-        and record.get("what") == "sleep"
-        and record.get("mode") == "block"
-        for record in records
-    )
+        return asyncio.run(inhibit())
+    except NativeMatchError:
+        raise
+    except Exception as error:
+        raise NativeMatchError("sleep inhibitor could not be acquired") from error
 
 
 @contextmanager
-def _sleep_inhibitor() -> Iterator[subprocess.Popen[bytes]]:
+def _sleep_inhibitor() -> Iterator[int]:
     started = time.monotonic()
-    process = subprocess.Popen(
-        [
-            str(SYSTEMD_INHIBIT),
-            "--what=sleep",
-            "--who=t2-touchid-native-match",
-            "--why=Linux-native Touch ID match is active",
-            "--mode=block",
-            str(CAT),
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    descriptor = _open_sleep_inhibitor_fd()
     try:
-        for _attempt in range(20):
-            if _inhibitor_registered(process):
-                break
-            if process.poll() is not None:
-                raise NativeMatchError("sleep inhibitor exited during setup")
-            time.sleep(0.05)
-        else:
-            raise NativeMatchError("sleep inhibitor could not be verified")
         t2_performance.emit("native_match", "inhibitor_acquire", started)
-        yield process
+        yield descriptor
     finally:
-        if process.stdin is not None:
-            process.stdin.close()
         try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            process.wait(timeout=2)
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _sleep_inhibitor_is_active(descriptor: int) -> bool:
+    """Reject a closed or released login1 inhibitor before sensor dispatch."""
+
+    if type(descriptor) is not int or descriptor < 0:
+        return False
+    try:
+        fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        poller = select.poll()
+        poller.register(
+            descriptor,
+            select.POLLERR | select.POLLHUP | select.POLLNVAL,
+        )
+        return not poller.poll(0)
+    except (OSError, ValueError):
+        return False
 
 
 def _grant(
@@ -1018,7 +1052,10 @@ def _run(
                                         phase_started,
                                     )
                                 _wipe(activation_material)
-                                if cancellation.is_set() or inhibitor.poll() is not None:
+                                if (
+                                    cancellation.is_set()
+                                    or not _sleep_inhibitor_is_active(inhibitor)
+                                ):
                                     raise NativeMatchError(
                                         "native match cancelled before sensor start"
                                     )
@@ -1187,7 +1224,7 @@ def _serve_worker() -> int:
                     "ok": True,
                     "result": terminal,
                 }
-            except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+            except Exception as error:
                 response = {
                     "schema_version": 1,
                     "request_id": request_id,

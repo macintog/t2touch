@@ -9,6 +9,27 @@ After=t2-sep-transport.service t2-biometric-port-refresh.service local-fs.target
 Type=oneshot
 ExecStart=/usr/local/sbin/t2-keybag-load
 RemainAfterExit=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_IPC_LOCK CAP_SYS_ADMIN
+
+ProtectSystem=strict
+NoNewPrivileges=true
+ReadWritePaths=/run/t2-touchid /var/lib/t2-touchid
+DevicePolicy=closed
+DeviceAllow=/dev/t2-aks rw
+DeviceAllow=/dev/t2-acm rw
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from src import t2_mutation_journal as journal
 
@@ -161,6 +162,70 @@ class MutationJournalTests(unittest.TestCase):
             self.assertFalse(journal.secure_regular_file(link))
             with self.assertRaises(journal.JournalError):
                 journal.read(link)
+
+    def test_torn_tail_is_truncated_under_lock_and_records_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.jsonl"
+            _operation_id, first = journal.create(path, "enroll", baseline())
+            complete = path.read_bytes()
+            fragment = b'{"milestone":"TORN'
+            path.write_bytes(complete + fragment)
+            records = journal.read(path)
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["record_hash"], first["record_hash"])
+            self.assertEqual(records[-1]["milestone"], journal.REPAIR_MILESTONE)
+            self.assertEqual(
+                records[-1]["evidence"], {"truncated_bytes": len(fragment)}
+            )
+            self.assertTrue(path.read_bytes().endswith(b"\n"))
+            self.assertNotIn(b'{"milestone":"TORN', path.read_bytes())
+            later = journal.append(
+                path,
+                records[0]["operation_id"],
+                "ENROLL_START_INTENT",
+                {"authorization_digest": "b" * 64},
+            )
+            self.assertEqual(later["previous_hash"], records[-1]["record_hash"])
+
+    def test_newline_terminated_garbage_and_torn_only_files_stay_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.jsonl"
+            journal.create(path, "enroll", baseline())
+            path.write_bytes(path.read_bytes() + b"not-json\n")
+            with self.assertRaises(journal.JournalError):
+                journal.read(path)
+            torn_only = Path(directory) / "torn.jsonl"
+            torn_only.write_bytes(b'{"format_version":1')
+            torn_only.chmod(0o600)
+            with self.assertRaises(journal.JournalError):
+                journal.read(torn_only)
+
+    def test_non_durable_append_skips_file_and_directory_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.jsonl"
+            operation_id, _first = journal.create(path, "enroll", baseline())
+            with (
+                mock.patch.object(journal, "_durable_file_sync") as file_sync,
+                mock.patch.object(journal, "_sync_directory") as dir_sync,
+            ):
+                journal.append(
+                    path,
+                    operation_id,
+                    "ENROLL_START_INTENT",
+                    {"authorization_digest": "b" * 64},
+                    durable=False,
+                )
+                file_sync.assert_not_called()
+                dir_sync.assert_not_called()
+                journal.append(
+                    path,
+                    operation_id,
+                    "ENROLL_COMPLETED",
+                    {"status": 0},
+                    durable=True,
+                )
+                file_sync.assert_called()
+                dir_sync.assert_called()
 
 
 if __name__ == "__main__":

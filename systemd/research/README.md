@@ -4,6 +4,12 @@ These units are design artifacts for the future mapped-user broker. They are
 not copied by `install.sh`, contain no `[Install]` section, and must not be
 manually installed or started yet.
 
+The unused `t2-user-activation.socket` and `t2-user-activation@.service`
+candidates live here rather than `systemd/system/` so a future install-list
+edit cannot pick up a world-connectable root socket. The socket is
+`SocketMode=0660` with a private runtime directory; the product installer
+still does not enable it.
+
 See the [broker reference](../../src/README.md#multi-user-policy-and-broker-non-exposed)
 for the surrounding components. These units are not part of the supported
 installation.

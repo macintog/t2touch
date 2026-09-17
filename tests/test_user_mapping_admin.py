@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -334,6 +336,72 @@ class MappingAdminTests(unittest.TestCase):
                 self.bind()
         finally:
             self.root.chmod(0o700)
+
+    def test_renameat2_einval_falls_back_to_link(self):
+        recorded = []
+        real_link = os.link
+
+        def tracing_link(*args, **kwargs):
+            recorded.append((args, kwargs))
+            return real_link(*args, **kwargs)
+
+        def failing_renameat2(*_args):
+            ctypes.set_errno(errno.EINVAL)
+            return -1
+
+        fake_libc = mock.Mock()
+        fake_libc.renameat2 = failing_renameat2
+        with (
+            mock.patch.object(admin.ctypes, "CDLL", return_value=fake_libc),
+            mock.patch.object(os, "link", side_effect=tracing_link),
+        ):
+            result = self.bind()
+        self.assertEqual(result.state, "mapping-bound-disabled")
+        self.assertTrue(self.path.exists())
+        self.assertTrue(recorded)
+
+    def test_renameat2_enosys_falls_back_to_link(self):
+        recorded = []
+        real_link = os.link
+
+        def tracing_link(*args, **kwargs):
+            recorded.append((args, kwargs))
+            return real_link(*args, **kwargs)
+
+        def failing_renameat2(*_args):
+            ctypes.set_errno(errno.ENOSYS)
+            return -1
+
+        fake_libc = mock.Mock()
+        fake_libc.renameat2 = failing_renameat2
+        with (
+            mock.patch.object(admin.ctypes, "CDLL", return_value=fake_libc),
+            mock.patch.object(os, "link", side_effect=tracing_link),
+        ):
+            result = self.bind()
+        self.assertEqual(result.state, "mapping-bound-disabled")
+        self.assertTrue(self.path.exists())
+        self.assertTrue(recorded)
+
+    def test_missing_renameat2_falls_back_to_link(self):
+        class Libc:
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        recorded = []
+        real_link = os.link
+
+        def tracing_link(*args, **kwargs):
+            recorded.append(True)
+            return real_link(*args, **kwargs)
+
+        with (
+            mock.patch.object(admin.ctypes, "CDLL", return_value=Libc()),
+            mock.patch.object(os, "link", side_effect=tracing_link),
+        ):
+            self.bind()
+        self.assertTrue(self.path.exists())
+        self.assertTrue(recorded)
 
 
 if __name__ == "__main__":

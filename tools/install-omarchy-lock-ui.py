@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -115,10 +117,75 @@ def atomic_write(path, data, mode, owner=None):
             os.unlink(temporary)
 
 
+def restore_from_receipt(backup):
+    receipt = json.loads((backup / 'receipt.json').read_text(encoding='utf-8'))
+    paths = [Path(item) for item in receipt['paths']]
+    installed = receipt.get('installed_sha256')
+    if not isinstance(installed, list) or len(installed) != len(paths):
+        raise SystemExit('Omarchy UI receipt is missing installed hashes.')
+    plans = []
+    for path, expected in zip(paths, installed):
+        saved = backup / path.name
+        if not saved.is_file():
+            raise SystemExit(f'Omarchy UI backup {saved} is missing.')
+        if not path.is_file() or path.is_symlink():
+            raise SystemExit(f'Omarchy UI target {path} is missing.')
+        current = path.read_bytes()
+        if hashlib.sha256(current).hexdigest() != expected:
+            raise SystemExit(
+                'Omarchy UI has changed since this receipt; refusing restore.'
+            )
+        info = path.stat()
+        plans.append(
+            (
+                path,
+                saved.read_bytes(),
+                current,
+                info.st_mode & 0o777,
+                (info.st_uid, info.st_gid),
+            )
+        )
+    written = []
+    try:
+        for path, data, previous, mode, owner in plans:
+            atomic_write(path, data, mode, owner)
+            written.append((path, previous, mode, owner))
+    except BaseException:
+        for path, previous, mode, owner in reversed(written):
+            atomic_write(path, previous, mode, owner)
+        raise
+    print(f'Omarchy authentication UI restored from {backup}')
+
+
+def lint_qml(texts):
+    qmllint = shutil.which('qmllint')
+    if qmllint is None:
+        return
+    directory = tempfile.mkdtemp(prefix='.t2touch-qml-')
+    try:
+        names = ['Service.qml', 'LockView.qml', 'PolkitAgent.qml']
+        for name, text in zip(names, texts):
+            Path(directory, name).write_text(text, encoding='utf-8')
+        completed = subprocess.run(
+            [qmllint, *names], cwd=directory, check=False, capture_output=True
+        )
+        if completed.returncode != 0:
+            raise ValueError('qmllint rejected the transformed Omarchy QML')
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def main():
     if os.geteuid() != 0:
         raise SystemExit('Run through the Omarchy installer (requires root).')
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else '/usr/share/omarchy')
+    args = [item for item in sys.argv[1:] if item != '--restore']
+    restore_requested = '--restore' in sys.argv[1:]
+    if restore_requested:
+        if not args:
+            raise SystemExit('Pass the backup directory created at install time.')
+        restore_from_receipt(Path(args[0]))
+        return
+    root = Path(args[0] if args else '/usr/share/omarchy')
     directory = root / 'shell/plugins/lock'
     paths = [directory / 'Service.qml', directory / 'LockView.qml',
              root / 'shell/plugins/polkit/PolkitAgent.qml']
@@ -128,7 +195,9 @@ def main():
     originals = [path.read_bytes() for path in paths]
     try:
         lock = transform(*(data.decode() for data in originals[:2]))
-        changed = [text.encode() for text in (*lock, transform_polkit(originals[2].decode()))]
+        polkit = transform_polkit(originals[2].decode())
+        lint_qml((*lock, polkit))
+        changed = [text.encode() for text in (*lock, polkit)]
     except (ValueError, UnicodeError) as error:
         print(f'Omarchy lock UI integration skipped: {error}. No files changed.')
         return

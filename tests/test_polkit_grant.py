@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import subprocess
+import hashlib
+import hmac
+from types import SimpleNamespace
+from unittest.mock import patch, Mock
 import sys
 import tempfile
 import unittest
@@ -81,7 +85,8 @@ class PolkitGrantTests(unittest.TestCase):
 
     def test_uses_exact_race_resistant_subject_and_bound_details(self):
         runner = FakeRunner()
-        result = self.collect(runner)
+        with patch.object(collector, "_account_generation_detail", return_value=None):
+            result = self.collect(runner)
         self.assertEqual(result.outcome, "authorized")
         self.assertTrue(result.grant.authorized)
         self.assertEqual(result.grant.issued_monotonic_ns, 10_000)
@@ -106,9 +111,6 @@ class PolkitGrantTests(unittest.TestCase):
                 "t2.mapping-generation",
                 "a" * 64,
                 "--detail",
-                "t2.account-generation",
-                "b" * 64,
-                "--detail",
                 "t2.runtime-generation",
                 identifier(12),
                 "--allow-user-interaction",
@@ -117,6 +119,40 @@ class PolkitGrantTests(unittest.TestCase):
         rendered = str(result.redacted())
         self.assertNotIn(identifier(10), rendered)
         self.assertNotIn("1000", rendered)
+
+    def test_private_key_hmacs_detail_without_changing_grant_binding(self):
+        key = b"k" * 32
+        key_file = Mock()
+        key_file.stat.return_value = SimpleNamespace(st_uid=0, st_mode=0o100600, st_nlink=1)
+        key_file.read_bytes.return_value = key
+        runner = FakeRunner()
+        with patch.object(collector, "DETAIL_KEY", key_file):
+            result = self.collect(runner)
+        expected = hmac.new(key, ("b" * 64).encode("ascii"), hashlib.sha256).hexdigest()
+        self.assertIn(expected, runner.command)
+        self.assertNotIn("b" * 64, runner.command)
+        self.assertEqual(result.grant.linux_account_generation, "b" * 64)
+
+    def test_unavailable_or_unsafe_detail_key_omits_digest(self):
+        for uid, mode, links, key, missing in (
+            (0, 0o100600, 1, b"k" * 32, True),
+            (1000, 0o100600, 1, b"k" * 32, False),
+            (0, 0o100644, 1, b"k" * 32, False),
+            (0, 0o100600, 2, b"k" * 32, False),
+            (0, 0o100600, 1, b"short", False),
+        ):
+            with self.subTest(uid=uid, mode=mode, links=links, missing=missing):
+                key_file = Mock()
+                key_file.stat.return_value = SimpleNamespace(st_uid=uid, st_mode=mode, st_nlink=links)
+                key_file.read_bytes.return_value = key
+                if missing:
+                    key_file.stat.side_effect = FileNotFoundError
+                runner = FakeRunner()
+                with patch.object(collector, "DETAIL_KEY", key_file):
+                    result = self.collect(runner)
+                self.assertNotIn("t2.account-generation", runner.command)
+                self.assertNotIn("b" * 64, runner.command)
+                self.assertEqual(result.grant.linux_account_generation, "b" * 64)
 
     def test_denial_no_agent_and_dismissal_are_typed_non_grants(self):
         for returncode, outcome in (

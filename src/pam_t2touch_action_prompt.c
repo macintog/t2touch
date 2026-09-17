@@ -59,9 +59,20 @@ static int marked_conversation(int count, const struct pam_message **messages,
 
 static void free_prompt_context(pam_handle_t *pamh, void *data, int status)
 {
-    (void)pamh;
+    struct prompt_context *context = data;
+    const void *current = NULL;
+
     (void)status;
-    free(data);
+    if (pamh != NULL && context != NULL &&
+        pam_get_item(pamh, PAM_CONV, &current) == PAM_SUCCESS &&
+        current != NULL) {
+        const struct pam_conv *live = (const struct pam_conv *)current;
+
+        /* pam_set_item copies the conv; match by wrapper and appdata. */
+        if (live->conv == marked_conversation && live->appdata_ptr == context)
+            (void)pam_set_item(pamh, PAM_CONV, &context->upstream);
+    }
+    free(context);
 }
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,

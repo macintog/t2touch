@@ -233,6 +233,12 @@ int main(void) {
             )
             subprocess.run([str(executable)], check=True)
 
+    def test_codec0_get_device_state_command_is_removed(self) -> None:
+        source = (ROOT / "src/t2-aks-tool.c").read_text(encoding="utf-8")
+        self.assertIn("get-device-state-v1", source)
+        self.assertNotIn("get-device-state HANDLE SELECTOR OUTPUT", source)
+        self.assertNotIn("static int get_device_state(", source)
+
     def test_verify_secret_kernel_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "t2-aks-protocol-unit"

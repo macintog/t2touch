@@ -14,6 +14,9 @@ printf '%s\n' 'options t2_sep_transport identity_create_version=4' |
   sudo tee /etc/modprobe.d/t2-sep-create-version.conf
 ```
 
+`sudo ./uninstall.sh` also removes this override. Recreate it before the next
+transport load if you reinstall on this firmware.
+
 Follow the [installation instructions](../README.md#try-it-on-omarchy), then
 check that the loaded policy reports `4`:
 

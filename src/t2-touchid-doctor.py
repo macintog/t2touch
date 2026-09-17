@@ -24,6 +24,14 @@ PORT_CACHE = Path("/var/lib/t2-touchid/biometric-port")
 CREDENTIAL = Path("/etc/credstore.encrypted/t2-touchid-password")
 ACM_PREFLIGHT = Path("/usr/local/sbin/t2-acm-preflight")
 MEM_SLEEP = Path("/sys/power/mem_sleep")
+POLKIT_RULES_DIRS = (
+    Path("/etc/polkit-1/rules.d"),
+    Path("/usr/local/share/polkit-1/rules.d"),
+)
+MUTATION_ACTIONS = (
+    "org.t2linux.touchid.enroll",
+    "org.t2linux.touchid.identity-management",
+)
 SERVICES = (
     "t2-sep-transport.service",
     "t2-keybag-load.service",
@@ -279,6 +287,49 @@ def sleep_mode_check() -> Check:
     )
 
 
+def polkit_yes_grant_check() -> Check:
+    granted = False
+    readable = True
+    for directory in POLKIT_RULES_DIRS:
+        try:
+            if not directory.is_dir():
+                continue
+            for path in directory.iterdir():
+                if not path.name.endswith(".rules") or not path.is_file():
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    readable = False
+                    continue
+                if "polkit.Result.YES" not in text:
+                    continue
+                if any(action in text for action in MUTATION_ACTIONS):
+                    granted = True
+                    break
+            if granted:
+                break
+        except OSError:
+            readable = False
+    if granted:
+        return Check(
+            "warn",
+            "polkit-mutation-rules",
+            "a rules.d file grants YES for enroll/identity-management",
+        )
+    if not readable:
+        return Check(
+            "warn",
+            "polkit-mutation-rules",
+            "not readable; run as root",
+        )
+    return Check(
+        "pass",
+        "polkit-mutation-rules",
+        "no YES grant for mutation actions",
+    )
+
+
 def acm_transport_check(enabled: bool) -> Check:
     if not enabled:
         return Check("pass", "acm-transport", "research endpoint disabled")
@@ -443,6 +494,7 @@ def collect() -> list[Check]:
         checks.append(network_check(config, cached_port))
 
     checks.append(sleep_mode_check())
+    checks.append(polkit_yes_grant_check())
     if os.geteuid() == 0:
         checks.append(watchdog_check())
     else:
@@ -454,8 +506,13 @@ def collect() -> list[Check]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--no-sudo",
+        action="store_true",
+        help="run unprivileged checks only; do not re-exec through sudo",
+    )
     args = parser.parse_args()
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 and not args.no_sudo:
         command = ["sudo", "--", str(Path(__file__).resolve())]
         if args.json:
             command.append("--json")

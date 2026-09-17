@@ -39,6 +39,27 @@ class UserActivationPhase(Enum):
     QUARANTINED = "quarantined"
 
 
+MUTATION_INTENTS = frozenset(
+    {
+        "USER_KEYBAG_LOAD_INTENT",
+        "USER_ALIAS_BIND_INTENT",
+        "USER_KEYBAG_UNLOAD_INTENT",
+        "USER_ALIAS_CONFIGURATION_INTENT",
+        "USER_ALIAS_UNLOCK_INTENT",
+    }
+)
+COMMIT_MILESTONES = MUTATION_INTENTS | frozenset(
+    {
+        "USER_ACTIVATION_BASELINE",
+        "USER_KEYBAG_HANDLE_RELEASED",
+        "USER_ACTIVATION_READY",
+        "USER_ACTIVATION_STOPPED",
+        "USER_ACTIVATION_OUTCOME_UNKNOWN",
+        "USER_ACTIVATION_RECOVERY_OBSERVED",
+    }
+)
+
+
 @dataclass(frozen=True, repr=False)
 class UserActivationHistory:
     operation_id: str
@@ -150,6 +171,8 @@ def validate_history(records: list[dict[str, Any]]) -> UserActivationHistory:
     terminal_from_phase: UserActivationPhase | None = None
 
     for record in records[1:]:
+        if journal.is_repair_milestone(record.get("milestone")):
+            continue
         if record.get("operation_id") != operation_id:
             raise UserActivationJournalError("operation ID changed in activation journal")
         milestone = record.get("milestone")
@@ -608,6 +631,7 @@ def create(
         "USER_ACTIVATION_BASELINE",
         {"operation_kind": "user-activation", "baseline": baseline},
         exclusive=True,
+        durable=True,
     )
     return read(path)
 
@@ -641,5 +665,6 @@ def append_checked(
         evidence,
         expected_record_count=current.record_count,
         expected_previous_hash=current.head_hash,
+        durable=milestone in COMMIT_MILESTONES,
     )
     return read(path)

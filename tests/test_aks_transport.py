@@ -13,6 +13,10 @@ from unittest import mock
 
 SOURCE = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
+
+if sys.platform != "linux":
+    raise unittest.SkipTest("Linux-only EREMOTEIO transport errors")
+
 import t2_aks_transport as transport
 
 

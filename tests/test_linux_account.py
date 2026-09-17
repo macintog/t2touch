@@ -14,6 +14,10 @@ from unittest import mock
 
 SOURCE = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
+
+if sys.platform != "linux":
+    raise unittest.SkipTest("Linux-only account binding")
+
 import t2_linux_account as account
 import t2_native_account_rebind as native_rebind
 

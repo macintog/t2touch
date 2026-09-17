@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import re
 
@@ -54,6 +55,20 @@ class SenderAwareMessageBus(MessageBus):
                         # context fails to suppress it in async callbacks.
                         # Expected protocol replies must not look like crashes.
                         send_reply.send_error(exc_value)
+                        return True
+                    if exc_type is not None and issubclass(
+                        exc_type, asyncio.CancelledError
+                    ):
+                        # CancelledError is a BaseException, so dbus-next's
+                        # SendReply never writes a method error. Convert it
+                        # here so PAM and the lock screen are not left on
+                        # the default 25s D-Bus timeout.
+                        send_reply.send_error(
+                            DBusError(
+                                "net.reactivated.Fprint.Error.NoActionInProgress",
+                                "operation was cancelled",
+                            )
+                        )
                         return True
                     return send_reply.__exit__(exc_type, exc_value, traceback)
 

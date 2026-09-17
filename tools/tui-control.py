@@ -18,7 +18,7 @@ PROFILES = {
     "sudo-pam": {
         "class": "t2-sudo-pam",
         "title": "T2-Sudo-PAM-Authentication",
-        "launcher": "/usr/local/sbin/t2-sudo-pam-test-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-sudo-pam-test-launch",
         "backend": b"/usr/bin/sudo",
         "ready_title": "Touch the fingerprint sensor now.",
         "terminal_titles": (
@@ -40,7 +40,7 @@ PROFILES = {
     "fprintd-preview": {
         "class": "t2-fprintd-preview",
         "title": "T1Bridge-Touch-ID-Preview",
-        "launcher": "/usr/local/sbin/t2-fprintd-preview-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-fprintd-preview-tui-launch",
         "backend": b"/opt/t2-touchid/src/t2-fprintd-enroll-tui.py",
         "ready_title": "Lift and touch this finger repeatedly",
         "terminal_titles": ("Fingerprint enrolled",),
@@ -49,7 +49,7 @@ PROFILES = {
     "fprintd-verification": {
         "class": "t2-fprintd-verify",
         "title": "T2-Fprintd-Verification",
-        "launcher": "/usr/local/sbin/t2-fprintd-verify-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-fprintd-verify-tui-launch",
         "backend": b"/opt/t2-touchid/src/t2-fprintd-enroll-tui.py",
         "ready_title": "Touch with any enrolled finger",
         "terminal_titles": (
@@ -60,7 +60,7 @@ PROFILES = {
     "fprintd-negative": {
         "class": "t2-fprintd-negative",
         "title": "T2-Fprintd-Negative-Control",
-        "launcher": "/usr/local/sbin/t2-fprintd-negative-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-fprintd-negative-tui-launch",
         "backend": b"/opt/t2-touchid/src/t2-fprintd-enroll-tui.py",
         "ready_title": "Touch with an unenrolled finger",
         "terminal_titles": (
@@ -71,7 +71,7 @@ PROFILES = {
     "fprintd-deletion": {
         "class": "t2-fprintd-delete",
         "title": "T2-Fprintd-Deletion",
-        "launcher": "/usr/local/sbin/t2-fprintd-delete-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-fprintd-delete-tui-launch",
         "backend": b"/usr/bin/fprintd-delete",
         "ready_title": "FINGERPRINT DELETED",
         "terminal_titles": (
@@ -82,7 +82,7 @@ PROFILES = {
     "enrollment": {
         "class": "t2-native-enroll",
         "title": "T2-Native-Enrollment",
-        "launcher": "/usr/local/sbin/t2-native-enroll-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-native-enroll-tui-launch",
         "backend": b"/usr/local/sbin/t2-native-enroll",
         "ready_title": "PLACE FINGER NOW",
         "terminal_titles": (
@@ -94,7 +94,7 @@ PROFILES = {
     "match": {
         "class": "t2-native-match",
         "title": "T2-Native-Match",
-        "launcher": "/usr/local/sbin/t2-native-match-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-native-match-tui-launch",
         "backend": b"/usr/local/sbin/t2-native-match",
         "ready_title": "PLACE FINGER NOW",
         "terminal_titles": (
@@ -107,7 +107,7 @@ PROFILES = {
     "negative": {
         "class": "t2-native-negative",
         "title": "T2-Native-Negative-Control",
-        "launcher": "/usr/local/sbin/t2-native-negative-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-native-negative-tui-launch",
         "backend": b"/usr/local/sbin/t2-native-match",
         "ready_title": "PLACE UNENROLLED FINGER NOW",
         "terminal_titles": (
@@ -120,7 +120,7 @@ PROFILES = {
     "new-finger": {
         "class": "t2-native-new-finger",
         "title": "T2-Native-New-Finger-Proof",
-        "launcher": "/usr/local/sbin/t2-native-new-finger-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-native-new-finger-tui-launch",
         "backend": b"/usr/local/sbin/t2-native-match",
         "ready_title": "PLACE NEW FINGER NOW",
         "terminal_titles": (
@@ -133,7 +133,7 @@ PROFILES = {
     "second": {
         "class": "t2-second-finger",
         "title": "T2-Second-Finger-Ceremony",
-        "launcher": "/usr/local/sbin/t2-second-finger-tui-launch",
+        "launcher": "/opt/t2-touchid/bin/t2-second-finger-tui-launch",
         "backend": b"/opt/t2-touchid/src/t2-second-finger-ceremony.py",
         "ready_title": "PLACE CURRENT FINGER NOW",
         "terminal_titles": (

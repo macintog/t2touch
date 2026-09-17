@@ -19,12 +19,15 @@
 #include <linux/dma-mapping.h>
 #include <linux/hex.h>
 #include <linux/io.h>
+#include <linux/kref.h>
 #include <linux/ktime.h>
 #include <linux/miscdevice.h>
-#include <linux/mutex.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/random.h>
+#include <linux/slab.h>
 #include <linux/unaligned.h>
 #include <linux/uaccess.h>
 
@@ -70,6 +73,7 @@ static_assert(sizeof(struct t2_aks_ioc_info) == 32);
 #define T2_SEP_OOL_SIZE             0x4000
 #define T2_SEP_DMA_BITS             44
 #define T2_SEP_TIMEOUT_US           (5 * USEC_PER_SEC)
+#define T2_SEP_RELEASE_TIMEOUT_US   (USEC_PER_SEC)
 #define T2_SEP_AKS_GET_CAPABILITIES 0x4d
 #define T2_SEP_AKS_GET_PRIMARY_IDENTITY 0x51
 #define T2_SEP_AKS_HEADER_V1        1
@@ -94,8 +98,12 @@ enum t2_aks_provisioning_phase {
 };
 
 struct t2_sep_transport {
+	struct kref kref;
 	struct pci_dev *pdev;
 	void __iomem *bar;
+	bool removed;
+	bool io_deadline_active;
+	ktime_t io_deadline;
 	void *ool_in;
 	dma_addr_t ool_in_dma;
 	void *ool_out;
@@ -111,6 +119,7 @@ struct t2_sep_transport {
 	struct miscdevice aks_miscdev;
 	struct miscdevice acm_miscdev;
 	struct mutex exchange_lock;
+	bool tight_mailbox;
 	atomic_t aks_opened;
 	atomic_t acm_opened;
 	u8 next_transaction;
@@ -156,6 +165,27 @@ struct t2_sep_transport {
 	bool misc_registered;
 	bool acm_misc_registered;
 };
+
+static void t2_sep_release_dev(struct kref *kref)
+{
+	struct t2_sep_transport *sep = container_of(kref,
+		struct t2_sep_transport, kref);
+
+	mutex_destroy(&sep->exchange_lock);
+	if (sep->pdev)
+		pci_dev_put(sep->pdev);
+	kfree(sep);
+}
+
+static void t2_sep_get(struct t2_sep_transport *sep)
+{
+	kref_get(&sep->kref);
+}
+
+static void t2_sep_put(struct t2_sep_transport *sep)
+{
+	kref_put(&sep->kref, t2_sep_release_dev);
+}
 
 static bool register_ool;
 module_param(register_ool, bool, 0400);
@@ -239,21 +269,29 @@ static_assert(sizeof(struct t2_aks_header_v2) == T2_SEP_AKS_HEADER_V2_SIZE);
 
 static int t2_aks_stamp_verify_platform_data(struct t2_aks_header_v2 *header)
 {
+	char cdhash_hex[sizeof(aks_platform_cdhash)];
 	u8 cdhash[T2_SEP_AKS_CDHASH_SIZE];
+	unsigned long proc_uniqueid;
+	unsigned int asid;
 	size_t length;
 	int ret;
 
-	put_unaligned_le64(aks_platform_proc_uniqueid,
-			     header->v1.platform_data);
-	put_unaligned_le32(aks_platform_asid,
-			     header->v1.platform_data + sizeof(__le64));
+	kernel_param_lock(THIS_MODULE);
+	proc_uniqueid = aks_platform_proc_uniqueid;
+	asid = aks_platform_asid;
+	memcpy(cdhash_hex, aks_platform_cdhash, sizeof(cdhash_hex));
+	kernel_param_unlock(THIS_MODULE);
 
-	length = strnlen(aks_platform_cdhash, sizeof(aks_platform_cdhash));
+	put_unaligned_le64(proc_uniqueid, header->v1.platform_data);
+	put_unaligned_le32(asid, header->v1.platform_data + sizeof(__le64));
+
+	length = strnlen(cdhash_hex, sizeof(cdhash_hex));
 	if (!length)
 		return 0;
 	if (length != T2_SEP_AKS_CDHASH_HEX_SIZE)
 		return -EINVAL;
-	ret = hex2bin(cdhash, aks_platform_cdhash, sizeof(cdhash));
+	ret = hex2bin(cdhash, cdhash_hex, sizeof(cdhash));
+	memzero_explicit(cdhash_hex, sizeof(cdhash_hex));
 	if (ret)
 		return ret;
 	memcpy(header->v1.platform_data + sizeof(__le64) + sizeof(__le32),
@@ -262,12 +300,29 @@ static int t2_aks_stamp_verify_platform_data(struct t2_aks_header_v2 *header)
 	return 0;
 }
 
+static unsigned int t2_sep_poll_timeout_us(struct t2_sep_transport *sep)
+{
+	s64 remaining;
+
+	if (!sep->io_deadline_active)
+		return T2_SEP_TIMEOUT_US;
+	remaining = ktime_us_delta(sep->io_deadline, ktime_get());
+	if (remaining <= 0)
+		return 0;
+	if (remaining > T2_SEP_TIMEOUT_US)
+		return T2_SEP_TIMEOUT_US;
+	return (unsigned int)remaining;
+}
+
 static int t2_sep_wait_outbox(struct t2_sep_transport *sep)
 {
+	unsigned int timeout_us = t2_sep_poll_timeout_us(sep);
 	unsigned int waited;
 	u32 inbox, outbox;
 
-	for (waited = 0; waited < T2_SEP_TIMEOUT_US; waited += 100) {
+	if (!timeout_us)
+		return -ETIMEDOUT;
+	for (waited = 0; waited < timeout_us; waited += 100) {
 		if (!(readl(sep->bar + T2_SEP_OUTBOX_STATUS) &
 		      T2_SEP_OUTBOX_FULL))
 			return 0;
@@ -301,10 +356,13 @@ static int t2_sep_send(struct t2_sep_transport *sep,
 static int t2_sep_receive(struct t2_sep_transport *sep,
 			  struct t2_sep_message *message)
 {
+	unsigned int timeout_us = t2_sep_poll_timeout_us(sep);
 	unsigned int waited;
 	u32 inbox, outbox;
 
-	for (waited = 0; waited < T2_SEP_TIMEOUT_US; waited += 100) {
+	if (!timeout_us)
+		return -ETIMEDOUT;
+	for (waited = 0; waited < timeout_us; waited += 100) {
 		if (!(readl(sep->bar + T2_SEP_INBOX_STATUS) &
 		      T2_SEP_INBOX_EMPTY)) {
 			message->word[0] = readl(sep->bar + T2_SEP_INBOX_DATA + 0x0);
@@ -381,7 +439,8 @@ static void t2_sep_log_mailbox_timeout(struct t2_sep_transport *sep,
 }
 
 static int t2_sep_control(struct t2_sep_transport *sep, u8 target_endpoint,
-			  u8 opcode, u8 tag, dma_addr_t dma, size_t size)
+			  u8 opcode, u8 tag, dma_addr_t dma, size_t size,
+			  bool *sent)
 {
 	struct t2_sep_message request = { };
 	struct t2_sep_message reply;
@@ -389,6 +448,8 @@ static int t2_sep_control(struct t2_sep_transport *sep, u8 target_endpoint,
 	u8 endpoint;
 	int ret;
 
+	if (sent)
+		*sent = false;
 	if (!IS_ALIGNED(dma, SZ_4K) || dma >> T2_SEP_DMA_BITS || size > U32_MAX)
 		return -ERANGE;
 
@@ -405,6 +466,8 @@ static int t2_sep_control(struct t2_sep_transport *sep, u8 target_endpoint,
 				target_endpoint, opcode, "send", 0);
 		return ret;
 	}
+	if (sent)
+		*sent = true;
 
 	for (;;) {
 		ret = t2_sep_receive(sep, &reply);
@@ -422,7 +485,7 @@ static int t2_sep_control(struct t2_sep_transport *sep, u8 target_endpoint,
 
 		/* Discovery names are public metadata; other payloads stay private. */
 		t2_sep_log_unrelated(sep, &reply);
-		if (++skipped == 32)
+		if (++skipped == (sep->tight_mailbox ? 4 : 32))
 			return -EOVERFLOW;
 	}
 
@@ -747,7 +810,7 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 		    (((reply.word[0] >> 8) & 0xff) == (operation | 0x80)) &&
 		    ((reply.word[0] >> 16) & 0xff) == transaction)
 			break;
-		if (++skipped == 32)
+		if (++skipped == (sep->tight_mailbox ? 4 : 32))
 			return -EOVERFLOW;
 	}
 
@@ -1110,7 +1173,8 @@ static int t2_aks_provisioning_preflight_locked(
 
 static int t2_aks_record_provisioning_reply_locked(
 	struct t2_sep_transport *sep, u8 operation,
-	const u8 *request, const u8 *response, size_t response_length)
+	const u8 *request, size_t request_length,
+	const u8 *response, size_t response_length)
 {
 	u32 handle;
 
@@ -1137,7 +1201,7 @@ static int t2_aks_record_provisioning_reply_locked(
 		   sep->aks_provisioning_phase == T2_AKS_PROVISIONING_COMPLETE &&
 		   !sep->aks_provisioning_handle_released &&
 		   t2_aks_unload_keybag_request_matches(
-			   request, 16, sep->aks_provisioning_session,
+			   request, request_length, sep->aks_provisioning_session,
 			   sep->aks_provisioning_handle)) {
 		sep->aks_provisioning_handle_released = true;
 		sep->aks_provisioning_unload_attempted = false;
@@ -1230,7 +1294,7 @@ static int t2_aks_runtime_preflight_locked(
 
 static int t2_aks_record_runtime_reply_locked(
 	struct t2_sep_transport *sep, u8 operation, const u8 *request,
-	const u8 *response, size_t response_length)
+	size_t request_length, const u8 *response, size_t response_length)
 {
 	u32 handle;
 
@@ -1255,7 +1319,7 @@ static int t2_aks_record_runtime_reply_locked(
 		}
 	} else if (operation == 0x05 && sep->aks_runtime_handle_active &&
 		   t2_aks_unload_keybag_request_matches(
-			   request, 16, sep->aks_runtime_session,
+			   request, request_length, sep->aks_runtime_session,
 			   sep->aks_runtime_handle)) {
 		if (!t2_aks_status_response_valid(response, response_length) ||
 		    t2_aks_wire_get_le32(response) != 0)
@@ -1280,6 +1344,10 @@ static long t2_aks_get_info(struct t2_sep_transport *sep,
 	ret = mutex_lock_interruptible(&sep->exchange_lock);
 	if (ret)
 		return ret;
+	if (sep->removed) {
+		mutex_unlock(&sep->exchange_lock);
+		return -ENODEV;
+	}
 	memcpy(info.connection_generation, sep->aks_connection_generation,
 	       sizeof(info.connection_generation));
 	if (sep->ool_in_registered && sep->ool_out_registered)
@@ -1345,6 +1413,10 @@ static long t2_aks_arm_replacement(struct t2_sep_transport *sep,
 	ret = mutex_lock_interruptible(&sep->exchange_lock);
 	if (ret)
 		goto out_wipe;
+	if (sep->removed) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
 	if (sep->aks_replacement_phase != T2_AKS_REPLACEMENT_PHASE_NONE &&
 	    !(sep->aks_replacement_phase == T2_AKS_REPLACEMENT_PHASE_DELETE &&
 	      arm.phase == T2_AKS_REPLACEMENT_PHASE_CREATE &&
@@ -1432,6 +1504,8 @@ static long t2_aks_ioctl(struct file *file, unsigned int command,
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (READ_ONCE(sep->removed))
+		return -ENODEV;
 	if (command == T2_AKS_IOC_GET_INFO)
 		return t2_aks_get_info(sep, user_argument);
 	if (command == T2_AKS_IOC_ARM_REPLACEMENT)
@@ -1467,6 +1541,10 @@ static long t2_aks_ioctl(struct file *file, unsigned int command,
 	ret = mutex_lock_interruptible(&sep->exchange_lock);
 	if (ret)
 		goto out_free;
+	if (sep->removed) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
 	ret = t2_aks_provisioning_preflight_locked(
 		sep, exchange.operation, request, exchange.request_length);
 	if (ret) {
@@ -1534,11 +1612,13 @@ static long t2_aks_ioctl(struct file *file, unsigned int command,
 		goto out_unlock;
 	}
 	ret = t2_aks_record_provisioning_reply_locked(
-		sep, exchange.operation, request, response, response_length);
+		sep, exchange.operation, request, exchange.request_length,
+		response, response_length);
 	if (ret)
 		goto out_unlock;
 	ret = t2_aks_record_runtime_reply_locked(
-		sep, exchange.operation, request, response, response_length);
+		sep, exchange.operation, request, exchange.request_length,
+		response, response_length);
 	if (ret)
 		goto out_unlock;
 	if (response_length > exchange.response_capacity) {
@@ -1581,6 +1661,8 @@ static int t2_aks_open(struct inode *inode, struct file *file)
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (READ_ONCE(sep->removed))
+		return -ENODEV;
 	if (atomic_cmpxchg(&sep->aks_opened, 0, 1))
 		return -EBUSY;
 	ret = nonseekable_open(inode, file);
@@ -1588,6 +1670,7 @@ static int t2_aks_open(struct inode *inode, struct file *file)
 		atomic_set(&sep->aks_opened, 0);
 		return ret;
 	}
+	t2_sep_get(sep);
 	mutex_lock(&sep->exchange_lock);
 	t2_aks_reset_absence_locked(sep);
 	t2_aks_clear_replacement_arm_locked(sep);
@@ -1600,9 +1683,17 @@ static int t2_aks_release(struct inode *inode, struct file *file)
 	struct miscdevice *misc = file->private_data;
 	struct t2_sep_transport *sep = container_of(misc,
 		struct t2_sep_transport, aks_miscdev);
+	int ret = 0;
 
 	(void)inode;
 	mutex_lock(&sep->exchange_lock);
+	if (sep->removed) {
+		ret = -ENODEV;
+		goto out;
+	}
+	sep->tight_mailbox = true;
+	sep->io_deadline_active = true;
+	sep->io_deadline = ktime_add_us(ktime_get(), T2_SEP_RELEASE_TIMEOUT_US);
 	if (retain_runtime_handle && sep->aks_runtime_handle_active &&
 	    sep->aks_runtime_alias_bound && !sep->aks_runtime_poisoned &&
 	    !sep->aks_runtime_unload_attempted) {
@@ -1624,7 +1715,8 @@ static int t2_aks_release(struct inode *inode, struct file *file)
 					     &response_length, &sep_status);
 		if (!ret)
 			ret = t2_aks_record_runtime_reply_locked(
-				sep, 0x05, request, response, response_length);
+				sep, 0x05, request, sizeof(request),
+				response, response_length);
 		if (ret) {
 			sep->aks_runtime_poisoned = true;
 			dev_warn(&sep->pdev->dev,
@@ -1655,8 +1747,8 @@ static int t2_aks_release(struct inode *inode, struct file *file)
 				&response_length, &sep_status);
 			if (!ret)
 				ret = t2_aks_record_provisioning_reply_locked(
-					sep, 0x05, request, response,
-					response_length);
+					sep, 0x05, request, sizeof(request),
+					response, response_length);
 			if (ret) {
 				t2_aks_poison_provisioning_locked(sep);
 				dev_warn(&sep->pdev->dev,
@@ -1679,9 +1771,13 @@ static int t2_aks_release(struct inode *inode, struct file *file)
 	memzero_explicit(sep->ool_out, T2_SEP_OOL_SIZE);
 	t2_aks_reset_absence_locked(sep);
 	t2_aks_clear_replacement_arm_locked(sep);
+out:
+	sep->io_deadline_active = false;
+	sep->tight_mailbox = false;
 	mutex_unlock(&sep->exchange_lock);
 	atomic_set(&sep->aks_opened, 0);
-	return 0;
+	t2_sep_put(sep);
+	return ret;
 }
 
 static const struct file_operations t2_aks_fops = {
@@ -1923,7 +2019,7 @@ static int t2_acm_exchange_locked(struct t2_sep_transport *sep,
 		if ((reply.word[0] & 0xff) == T2_SEP_ACM_ENDPOINT &&
 		    ((reply.word[0] >> 8) & 0xff) == request_code)
 			break;
-		if (++skipped == 32) {
+		if (++skipped == (sep->tight_mailbox ? 4 : 32)) {
 			t2_acm_poison_locked(sep);
 			return -EOVERFLOW;
 		}
@@ -1957,10 +2053,16 @@ static long t2_acm_ioctl(struct file *file, unsigned int command,
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (READ_ONCE(sep->removed))
+		return -ENODEV;
 	if (command == T2_ACM_IOC_GET_INFO) {
 		ret = mutex_lock_interruptible(&sep->exchange_lock);
 		if (ret)
 			return ret;
+		if (sep->removed) {
+			mutex_unlock(&sep->exchange_lock);
+			return -ENODEV;
+		}
 		info.generation = sep->acm_generation;
 		info.capacity = T2_SEP_OOL_SIZE;
 		if (sep->acm_poisoned)
@@ -1992,6 +2094,10 @@ static long t2_acm_ioctl(struct file *file, unsigned int command,
 	ret = mutex_lock_interruptible(&sep->exchange_lock);
 	if (ret)
 		goto out;
+	if (sep->removed) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
 	if (exchange.generation != sep->acm_generation) {
 		exchange.generation = sep->acm_generation;
 		ret = -ESTALE;
@@ -2046,11 +2152,16 @@ static int t2_acm_open(struct inode *inode, struct file *file)
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (READ_ONCE(sep->removed))
+		return -ENODEV;
 	if (atomic_cmpxchg(&sep->acm_opened, 0, 1))
 		return -EBUSY;
 	ret = nonseekable_open(inode, file);
-	if (ret)
+	if (ret) {
 		atomic_set(&sep->acm_opened, 0);
+		return ret;
+	}
+	t2_sep_get(sep);
 	return ret;
 }
 
@@ -2071,6 +2182,13 @@ static int t2_acm_release(struct inode *inode, struct file *file)
 	(void)inode;
 
 	mutex_lock(&sep->exchange_lock);
+	if (sep->removed) {
+		ret = -ENODEV;
+		goto out;
+	}
+	sep->tight_mailbox = true;
+	sep->io_deadline_active = true;
+	sep->io_deadline = ktime_add_us(ktime_get(), T2_SEP_RELEASE_TIMEOUT_US);
 	while (sep->acm_context_active && !sep->acm_poisoned &&
 	       cleanup_attempts++ < 2) {
 		memcpy(request + 8, sep->acm_context,
@@ -2103,10 +2221,14 @@ static int t2_acm_release(struct inode *inode, struct file *file)
 	t2_aks_clear_authorization_locked(sep);
 	memzero_explicit(sep->acm_ool_in, T2_SEP_OOL_SIZE);
 	memzero_explicit(sep->acm_ool_out, T2_SEP_OOL_SIZE);
+out:
+	sep->io_deadline_active = false;
+	sep->tight_mailbox = false;
 	mutex_unlock(&sep->exchange_lock);
 	memzero_explicit(request, sizeof(request));
 	atomic_set(&sep->acm_opened, 0);
-	return 0;
+	t2_sep_put(sep);
+	return ret;
 }
 
 static const struct file_operations t2_acm_fops = {
@@ -2154,18 +2276,26 @@ static int t2_aks_probe_capabilities(struct t2_sep_transport *sep)
 
 static void t2_sep_free_ool(struct t2_sep_transport *sep)
 {
-	if (sep->acm_ool_out)
+	if (sep->acm_ool_out) {
 		dma_free_coherent(&sep->pdev->dev, T2_SEP_OOL_SIZE,
 				  sep->acm_ool_out, sep->acm_ool_out_dma);
-	if (sep->acm_ool_in)
+		sep->acm_ool_out = NULL;
+	}
+	if (sep->acm_ool_in) {
 		dma_free_coherent(&sep->pdev->dev, T2_SEP_OOL_SIZE,
 				  sep->acm_ool_in, sep->acm_ool_in_dma);
-	if (sep->ool_out)
+		sep->acm_ool_in = NULL;
+	}
+	if (sep->ool_out) {
 		dma_free_coherent(&sep->pdev->dev, T2_SEP_OOL_SIZE,
 				  sep->ool_out, sep->ool_out_dma);
-	if (sep->ool_in)
+		sep->ool_out = NULL;
+	}
+	if (sep->ool_in) {
 		dma_free_coherent(&sep->pdev->dev, T2_SEP_OOL_SIZE,
 				  sep->ool_in, sep->ool_in_dma);
+		sep->ool_in = NULL;
+	}
 }
 
 static int t2_sep_probe(struct pci_dev *pdev,
@@ -2185,21 +2315,23 @@ static int t2_sep_probe(struct pci_dev *pdev,
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "cannot enable PCI function\n");
 
-	ret = pcim_iomap_regions(pdev, BIT(T2_SEP_MAILBOX_BAR),
-				 "t2_sep_transport");
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "cannot map BAR4\n");
-
-	sep = devm_kzalloc(&pdev->dev, sizeof(*sep), GFP_KERNEL);
+	sep = kzalloc(sizeof(*sep), GFP_KERNEL);
 	if (!sep)
 		return -ENOMEM;
-	sep->pdev = pdev;
-	sep->bar = pcim_iomap_table(pdev)[T2_SEP_MAILBOX_BAR];
-	if (!sep->bar)
-		return -ENODEV;
+	sep->pdev = pci_dev_get(pdev);
+	sep->bar = pcim_iomap_region(pdev, T2_SEP_MAILBOX_BAR,
+				     "t2_sep_transport");
+	if (IS_ERR(sep->bar)) {
+		ret = PTR_ERR(sep->bar);
+		sep->bar = NULL;
+		pci_dev_put(pdev);
+		kfree(sep);
+		return dev_err_probe(&pdev->dev, ret, "cannot map BAR4\n");
+	}
 	mutex_init(&sep->exchange_lock);
 	atomic_set(&sep->aks_opened, 0);
 	atomic_set(&sep->acm_opened, 0);
+	kref_init(&sep->kref);
 	sep->aks_header_version = T2_AKS_HEADER_VERSION_1;
 	get_random_bytes(sep->aks_connection_generation,
 			 sizeof(sep->aks_connection_generation));
@@ -2217,22 +2349,34 @@ static int t2_sep_probe(struct pci_dev *pdev,
 	if (mirror_apple_start)
 		t2_sep_mirror_apple_start(sep);
 	if (inventory_only &&
-	    (!register_ool || register_acm || probe_capabilities))
-		return dev_err_probe(&pdev->dev, -EINVAL,
+	    (!register_ool || register_acm || probe_capabilities)) {
+		dev_err_probe(&pdev->dev, -EINVAL,
 			"inventory_only requires register_ool=1 with ACM and capability probing disabled\n");
+		ret = -EINVAL;
+		goto err_free_sep;
+	}
 	if (enable_identity_provisioning &&
 	    (!register_ool || !register_acm || !probe_capabilities ||
-	     inventory_only))
-		return dev_err_probe(&pdev->dev, -EINVAL,
+	     inventory_only)) {
+		dev_err_probe(&pdev->dev, -EINVAL,
 			"identity provisioning requires endpoint-7 and ACM OOL, successful capability probing, and inventory_only=0\n");
-	if (enable_identity_replacement && !enable_identity_provisioning)
-		return dev_err_probe(&pdev->dev, -EINVAL,
+		ret = -EINVAL;
+		goto err_free_sep;
+	}
+	if (enable_identity_replacement && !enable_identity_provisioning) {
+		dev_err_probe(&pdev->dev, -EINVAL,
 			"identity replacement requires identity provisioning to be enabled\n");
+		ret = -EINVAL;
+		goto err_free_sep;
+	}
 	if (retain_runtime_handle &&
 	    (!register_ool || !register_acm || inventory_only ||
-	     enable_identity_provisioning || enable_identity_replacement))
-		return dev_err_probe(&pdev->dev, -EINVAL,
+	     enable_identity_provisioning || enable_identity_replacement)) {
+		dev_err_probe(&pdev->dev, -EINVAL,
 			"compatibility runtime retention requires endpoint-7 and ACM only\n");
+		ret = -EINVAL;
+		goto err_free_sep;
+	}
 
 	if (!register_ool) {
 		dev_info(&pdev->dev,
@@ -2243,8 +2387,10 @@ static int t2_sep_probe(struct pci_dev *pdev,
 
 	ret = dma_set_mask_and_coherent(&pdev->dev,
 					DMA_BIT_MASK(T2_SEP_DMA_BITS));
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "no usable 44-bit DMA mask\n");
+	if (ret) {
+		dev_err_probe(&pdev->dev, ret, "no usable 44-bit DMA mask\n");
+		goto err_free_sep;
+	}
 	pci_set_master(pdev);
 	sep->ool_in = dma_alloc_coherent(&pdev->dev, T2_SEP_OOL_SIZE,
 					 &sep->ool_in_dma, GFP_KERNEL);
@@ -2272,16 +2418,27 @@ static int t2_sep_probe(struct pci_dev *pdev,
 			goto err_free_ool;
 		}
 	}
-	ret = t2_sep_control(sep, T2_SEP_AKS_ENDPOINT,
-			 T2_SEP_CMSG_SET_OOL_IN, 1,
-				 sep->ool_in_dma, T2_SEP_OOL_SIZE);
-	if (ret) {
-		goto err_free_ool;
+	{
+		bool sent = false;
+
+		ret = t2_sep_control(sep, T2_SEP_AKS_ENDPOINT,
+				 T2_SEP_CMSG_SET_OOL_IN, 1,
+				 sep->ool_in_dma, T2_SEP_OOL_SIZE, &sent);
+		if (ret) {
+			if (sent && (ret == -ETIMEDOUT || ret == -EOVERFLOW)) {
+				sep->ool_in_registered = true;
+				__module_get(THIS_MODULE);
+				dev_err(&pdev->dev,
+					"OOL input registration reply lost; reboot before retry\n");
+				return 0;
+			}
+			goto err_free_ool;
+		}
 	}
 	sep->ool_in_registered = true;
 	ret = t2_sep_control(sep, T2_SEP_AKS_ENDPOINT,
 			 T2_SEP_CMSG_SET_OOL_OUT, 2,
-				 sep->ool_out_dma, T2_SEP_OOL_SIZE);
+				 sep->ool_out_dma, T2_SEP_OOL_SIZE, NULL);
 	if (ret) {
 		/*
 		 * SEP now retains ool_in_dma.  Never free or unload backing memory
@@ -2297,7 +2454,7 @@ static int t2_sep_probe(struct pci_dev *pdev,
 	if (register_acm) {
 		ret = t2_sep_control(sep, T2_SEP_ACM_ENDPOINT,
 				 T2_SEP_CMSG_SET_OOL_IN, 3,
-				 sep->acm_ool_in_dma, T2_SEP_OOL_SIZE);
+				 sep->acm_ool_in_dma, T2_SEP_OOL_SIZE, NULL);
 		if (ret) {
 			dev_err(&pdev->dev,
 				"endpoint-7 registered but ACM input registration failed; reboot before retry\n");
@@ -2307,7 +2464,7 @@ static int t2_sep_probe(struct pci_dev *pdev,
 		sep->acm_ool_in_registered = true;
 		ret = t2_sep_control(sep, T2_SEP_ACM_ENDPOINT,
 				 T2_SEP_CMSG_SET_OOL_OUT, 4,
-				 sep->acm_ool_out_dma, T2_SEP_OOL_SIZE);
+				 sep->acm_ool_out_dma, T2_SEP_OOL_SIZE, NULL);
 		if (ret) {
 			dev_err(&pdev->dev,
 				"ACM input registered but output registration failed; reboot before retry\n");
@@ -2381,7 +2538,12 @@ err_free_ool:
 	t2_sep_free_ool(sep);
 	sep->ool_in = NULL;
 	sep->ool_out = NULL;
+	sep->acm_ool_in = NULL;
+	sep->acm_ool_out = NULL;
 	pci_clear_master(pdev);
+err_free_sep:
+	pci_set_drvdata(pdev, NULL);
+	t2_sep_put(sep);
 	return ret;
 }
 
@@ -2389,20 +2551,25 @@ static void t2_sep_remove(struct pci_dev *pdev)
 {
 	struct t2_sep_transport *sep = pci_get_drvdata(pdev);
 
-	if (!sep || !register_ool)
+	if (!sep)
 		return;
+	mutex_lock(&sep->exchange_lock);
+	WRITE_ONCE(sep->removed, true);
+	mutex_unlock(&sep->exchange_lock);
 	if (sep->misc_registered)
 		misc_deregister(&sep->aks_miscdev);
 	if (sep->acm_misc_registered)
 		misc_deregister(&sep->acm_miscdev);
-	if (sep->ool_in_registered || sep->ool_out_registered ||
-	    sep->acm_ool_in_registered || sep->acm_ool_out_registered) {
+	if (register_ool && (sep->ool_in_registered || sep->ool_out_registered ||
+	    sep->acm_ool_in_registered || sep->acm_ool_out_registered)) {
 		dev_warn(&pdev->dev,
 			 "retaining SEP-registered DMA memory until reboot\n");
-		return;
+	} else if (register_ool) {
+		t2_sep_free_ool(sep);
+		pci_clear_master(pdev);
 	}
-	t2_sep_free_ool(sep);
-	pci_clear_master(pdev);
+	pci_set_drvdata(pdev, NULL);
+	t2_sep_put(sep);
 }
 
 static const struct pci_device_id t2_sep_ids[] = {

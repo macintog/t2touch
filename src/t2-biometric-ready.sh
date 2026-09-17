@@ -69,10 +69,14 @@ while (( SECONDS < deadline )); do
 done
 [[ $port =~ ^[0-9]+$ ]] || exit 1
 
-[[ $validated == 1 ]] || validate_port "$port"
+if [[ $validated != 1 ]]; then
+  validate_port "$port" || exit 1
+fi
 temporary_port_file=$(mktemp "${port_file}.XXXXXX")
+trap 'rm -f -- "$temporary_port_file"' EXIT
 printf '%s\n' "$port" >"$temporary_port_file"
 chmod 0600 "$temporary_port_file"
 mv -f "$temporary_port_file" "$port_file"
+trap - EXIT
 logger --priority authpriv.info --tag t2-biometric-ready \
   'T2 BiometricKit endpoint discovery and HELO validation passed'

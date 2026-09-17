@@ -8,12 +8,17 @@ import json
 import os
 import sys
 
+import t2_activation_journal_retention
 import t2_native_post_reboot_reconciler
 import t2_post_reboot_diagnostic
 import t2_post_reboot_reconciler
 
 
 def main() -> int:
+    try:
+        t2_activation_journal_retention.prune()
+    except t2_activation_journal_retention.ActivationJournalRetentionError:
+        pass
     try:
         mode = os.environ.get("T2_TOUCHID_AUTHORITY_MODE")
         if mode == "linux-native":

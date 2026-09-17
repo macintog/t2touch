@@ -392,7 +392,12 @@ def reconcile_external_deletion_if_needed(
         not isinstance(document, dict)
         or document.get("schema_version") != 1
         or document.get("identifiers_redacted") is not True
-        or document.get("sep_mutation_performed") is not False
+        or not (
+            document.get("sep_mutation_performed") is False
+            or (document.get("external_inventory_reconciled") is True
+                and document.get("sep_mutation_performed") is True
+                and document.get("fingerprint_mutation_performed") is False)
+        )
         or not (
             document.get("external_deletion_reconciled") is True
             or document.get("external_deletion_reconciliation_needed") is False
@@ -401,6 +406,8 @@ def reconcile_external_deletion_if_needed(
         raise NativePostRebootReconcilerError(
             "native external reconciliation returned an invalid proof"
         )
+    if document.get("external_inventory_reconciled") is True:
+        return NativePostRebootReconcilerResult("external-inventory-reconciled", True)
     changed = document.get("external_deletion_reconciled") is True
     return NativePostRebootReconcilerResult(
         "external-deletion-reconciled" if changed else "no-pending-mutation",

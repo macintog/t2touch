@@ -11,6 +11,25 @@ ConditionPathExists=/etc/t2-touchid.conf
 Type=oneshot
 ExecStart=/usr/local/sbin/t2-biometric-port-refresh
 RemainAfterExit=yes
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/t2-touchid
+RestrictAddressFamilies=AF_UNIX AF_INET6
+
+ProtectSystem=strict
+NoNewPrivileges=true
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

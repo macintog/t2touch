@@ -73,6 +73,21 @@ class DBusIdentityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OSError):
             fcntl.fcntl(peer_descriptor, fcntl.F_GETFD)
 
+    async def test_verification_does_not_require_permission_to_signal_peer(self):
+        message = reply()
+        bus = FakeBus(message)
+        caller = await identity.collect(bus, ":1.43")
+        try:
+            with mock.patch.object(
+                identity,
+                "signal",
+                create=True,
+            ) as unavailable_signal:
+                self.assertEqual(caller.verify(), caller.subject)
+            unavailable_signal.pidfd_send_signal.assert_not_called()
+        finally:
+            caller.close()
+
     async def test_root_identity_is_pinned_but_not_granted_mutation_here(self):
         # The parser supports root callers needed by PAM verification. This
         # collector creates no mapping, session, or PolicyKit authority.

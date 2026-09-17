@@ -71,7 +71,7 @@ class ControlTests(unittest.TestCase):
             dispatched = hypr.call_args_list[-1].args
             self.assertEqual(dispatched[0], "dispatch")
             self.assertIn(
-                "/usr/local/sbin/t2-fprintd-delete-tui-launch finger-3",
+                "/opt/t2-touchid/bin/t2-fprintd-delete-tui-launch finger-3",
                 dispatched[1],
             )
 

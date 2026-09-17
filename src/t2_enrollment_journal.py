@@ -133,6 +133,8 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
     persistence_connection_generation = baseline["connection_generation"]
 
     for record in records[1:]:
+        if journal.is_repair_milestone(record.get("milestone")):
+            continue
         if record.get("operation_id") != operation_id:
             raise EnrollmentJournalError("operation ID changed inside enrollment journal")
         milestone = record.get("milestone")

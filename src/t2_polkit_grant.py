@@ -9,6 +9,8 @@ form and verifies the kernel identity again after the authorization decision.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import subprocess
 import time
@@ -22,6 +24,7 @@ import t2_user_policy
 
 PKCHECK = Path("/usr/bin/pkcheck")
 PROC_ROOT = Path("/proc")
+DETAIL_KEY = Path("/var/lib/t2-touchid/polkit-detail.key")
 MAX_PROC_RECORD = 64 * 1024
 DEFAULT_GRANT_LIFETIME_NS = 60 * 1_000_000_000
 MAX_PID = (1 << 31) - 1
@@ -199,6 +202,21 @@ def _checked_digest(value: object, label: str) -> str:
         raise PolkitGrantError(str(error)) from error
 
 
+def _account_generation_detail(account_generation: str) -> str | None:
+    """HMAC the shadow digest so pkcheck argv is not a stable identifier."""
+
+    try:
+        info = DETAIL_KEY.stat(follow_symlinks=False)
+        if info.st_uid != 0 or info.st_mode & 0o077 or info.st_nlink != 1:
+            return None
+        key = DETAIL_KEY.read_bytes()
+    except OSError:
+        return None
+    if len(key) < 32:
+        return None
+    return hmac.new(key, account_generation.encode("ascii"), hashlib.sha256).hexdigest()
+
+
 def collect(
     *,
     caller_pid: int,
@@ -263,12 +281,14 @@ def collect(
         "t2.mapping-generation",
         mapping_generation,
         "--detail",
-        "t2.account-generation",
-        account_generation,
-        "--detail",
         "t2.runtime-generation",
         runtime_generation,
     ]
+    account_detail = _account_generation_detail(account_generation)
+    if account_detail is not None:
+        command.extend(
+            ["--detail", "t2.account-generation", account_detail]
+        )
     if allow_user_interaction:
         command.append("--allow-user-interaction")
     try:

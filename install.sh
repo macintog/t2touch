@@ -10,8 +10,13 @@ if [[ -z ${SUDO_USER:-} || $SUDO_USER == root ]]; then
   echo "Run through sudo from the desktop user that will use Touch ID." >&2
   exit 1
 fi
+if [[ ! $SUDO_USER =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  echo "SUDO_USER must be a lowercase POSIX username so install and uninstall agree." >&2
+  exit 1
+fi
 
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
+running_kernel=$(uname -r)
 
 prepare_update=0
 prepare_native_recovery=0
@@ -29,15 +34,65 @@ source "$source_dir/tools/installer-services.sh"
 # Build and compare against the running module before changing installed
 # files, configuration, DKMS stamps, or service state. A disk source stamp
 # describes the next load, not the module already resident in this kernel.
-make -C "$source_dir/src"
+echo "Building the T2 userspace helpers and transport…" >&2
+if ! make -C "$source_dir/src"; then
+  echo "make -C src failed for $(uname -r)." >&2
+  echo "Remedy: install matching kernel headers and the C toolchain, then rerun ./install-omarchy.sh." >&2
+  exit 2
+fi
+restore_checkout_build_outputs "${SUDO_UID:-}${SUDO_GID:+:${SUDO_GID}}" "$source_dir/src"
 live_transport_matches=0
+live_srcversion=
+desired_srcversion=$(modinfo -F srcversion "$source_dir/src/t2_sep_transport.ko" 2>/dev/null || true)
 if [[ -d /sys/module/t2_sep_transport ]]; then
   live_srcversion=$(cat /sys/module/t2_sep_transport/srcversion 2>/dev/null || true)
-  desired_srcversion=$(modinfo -F srcversion "$source_dir/src/t2_sep_transport.ko" 2>/dev/null || true)
+fi
+
+# Preserve proof of a healthy installed chain before transport preparation
+# removes its units. The prepared-update marker binds that proof to the exact
+# old and new module identities and to the required intervening host boot.
+installed_product_surface=0
+healthy_installed_chain=0
+installed_srcversion=$(modinfo -k "$running_kernel" -F srcversion t2_sep_transport 2>/dev/null || true)
+if [[ -f /etc/t2-touchid.conf && ! -L /etc/t2-touchid.conf ]] &&
+  [[ $(stat -c '%u:%g:%a:%h' /etc/t2-touchid.conf 2>/dev/null) == 0:0:600:1 ]] &&
+  [[ -f /opt/t2-touchid/src/t2-fprintd.py ]]; then
+  installed_product_surface=1
+fi
+if [[ -n $live_srcversion ]] && (( installed_product_surface )); then
+  healthy_installed_chain=1
+  for unit in t2-bridge-network.service \
+    t2-biometric-port-refresh.service t2-sep-transport.service \
+    t2-native-first-run.service t2-biometric-ready.service fprintd.service; do
+    if ! systemctl is-active --quiet "$unit"; then
+      healthy_installed_chain=0
+      break
+    fi
+  done
+fi
+# Validate the existing installation independently of the requested transport.
+# Otherwise a broken userspace chain cannot prepare the driver update needed
+# to install its repair. This proof admits preparation, never live replacement.
+completed_installed_authority=0
+if (( ! healthy_installed_chain && installed_product_surface )) &&
+  [[ -n $live_srcversion && $live_srcversion == "$installed_srcversion" ]] &&
+  python3 "$source_dir/tools/validate-completed-native-install.py"; then
+  completed_installed_authority=1
+fi
+verified_installed_transport=0
+if (( healthy_installed_chain || completed_installed_authority )) &&
+  [[ -n $live_srcversion && $live_srcversion == "$installed_srcversion" ]]; then
+  verified_installed_transport=1
+fi
+
+# A resident module with missing identity is not an absent module. Stop before
+# any installed-state writes even when its srcversion cannot be read.
+if [[ -d /sys/module/t2_sep_transport ]]; then
   if [[ -z $live_srcversion || -z $desired_srcversion ||
         $live_srcversion != "$desired_srcversion" ]]; then
     if [[ -n $live_srcversion && -n $desired_srcversion && $prepare_update == 1 ]]; then
-      prepare_transport_update || exit $?
+      prepare_transport_update "$live_srcversion" "$desired_srcversion" \
+        "$verified_installed_transport" || exit $?
     fi
     echo "The running T2 transport differs or cannot be identified; installation stopped." >&2
     echo "For an identified transport change, run ./install-omarchy.sh --prepare-transport-update, then restart and rerun the installer." >&2
@@ -51,26 +106,50 @@ if (( prepare_update )); then
 fi
 
 # A recurring BootPolicyReboot reply must still block fresh setup. It does not
-# invalidate an already-running installation: when the resident transport is
-# the requested build and every prerequisite service is currently healthy, the
-# installer only replaces userspace and restarts the upper service chain.
+# invalidate an already-running installation or an exact transport update that
+# was prepared from one. The latter survives the intentional unit removal and
+# reboot through a root-private marker bound to both transport identities.
 active_installed_upgrade=0
-if (( live_transport_matches )) &&
+if (( live_transport_matches && healthy_installed_chain )); then
+  active_installed_upgrade=1
+fi
+# A userspace defect can leave a completed older installation unable to make
+# fprintd active. Requiring that broken chain to be healthy prevents the newer
+# installer from deploying its repair. Admit only the narrower recovery case:
+# the resident, installed, and requested transports are identical; the product
+# surface is intact; and the root-private Linux-native authority validates as a
+# completed installation. This cannot turn partial setup into an upgrade.
+validated_recovery_upgrade=0
+if (( live_transport_matches && completed_installed_authority )); then
+  validated_recovery_upgrade=1
+  echo "Recovered a completed installation with an unhealthy service chain; continuing a verified userspace repair." >&2
+fi
+prepared_installed_upgrade=0
+if [[ -z $live_srcversion && -n $desired_srcversion ]] &&
+  prepared_transport_update_matches "$desired_srcversion"; then
+  prepared_installed_upgrade=1
+fi
+# Releases before the marker fix can already have completed the destructive
+# preparation step. Recover only a fully validated Linux-native authority with
+# no installed product or transport left; partial fresh setup cannot satisfy
+# the completed provisioning journal and enabled mapping checks.
+legacy_prepared_upgrade=0
+if (( ! prepared_installed_upgrade )) && [[ -z $live_srcversion ]] &&
+  [[ ! -e /opt/t2-touchid && ! -e /etc/systemd/system/t2-sep-transport.service ]] &&
   [[ -f /etc/t2-touchid.conf && ! -L /etc/t2-touchid.conf ]] &&
   [[ $(stat -c '%u:%g:%a:%h' /etc/t2-touchid.conf 2>/dev/null) == 0:0:600:1 ]] &&
-  [[ -f /opt/t2-touchid/src/t2-fprintd.py ]]; then
-  active_installed_upgrade=1
-  # With multiple units, is-active succeeds if ANY unit is active.
-  for unit in t2-bridge-network.service \
-    t2-biometric-port-refresh.service t2-sep-transport.service \
-    t2-native-first-run.service t2-biometric-ready.service fprintd.service; do
-    if ! systemctl is-active --quiet "$unit"; then
-      active_installed_upgrade=0
-      break
-    fi
-  done
+  ! modinfo -k "$running_kernel" -n t2_sep_transport >/dev/null 2>&1 &&
+  python3 "$source_dir/tools/validate-completed-native-install.py"; then
+  legacy_prepared_upgrade=1
+  echo "Recovered a completed installation left by the earlier transport-update workflow." >&2
 fi
-check_applesmc_prerequisite "$active_installed_upgrade" || exit $?
+require_t2_hardware || exit $?
+check_applesmc_prerequisite "$(( active_installed_upgrade || validated_recovery_upgrade || prepared_installed_upgrade || legacy_prepared_upgrade ))" || exit $?
+# Capture units and recovery holds before this run writes files. Do not reuse
+# active_installed_upgrade: that flag requires a matching live transport and
+# every prerequisite to be active, so a stopped, recovery-held, or
+# transport-changing install would be torn down on DKMS failure.
+capture_prior_install_state
 
 target_dir=/opt/t2-touchid
 target_user=$SUDO_USER
@@ -196,9 +275,8 @@ if [[ $authority_mode == linux-native ]]; then
         echo "Could not generate the private identity credential." >&2
         exit 2
       fi
-      umask 077
-      if ! printf '%s\n' "$identity_credential" | systemd-creds encrypt \
-        --name=t2-touchid-password - "$native_credential"; then
+      if ! ( umask 077; printf '%s\n' "$identity_credential" | systemd-creds encrypt \
+        --name=t2-touchid-password - "$native_credential" ); then
         unset identity_credential
         echo "Could not protect the private identity credential." >&2
         exit 2
@@ -209,7 +287,7 @@ if [[ $authority_mode == linux-native ]]; then
     if [[ ! -f $native_credential || -L $native_credential ]] ||
       [[ $(stat -c '%u:%g:%a:%h' "$native_credential" 2>/dev/null) != 0:0:600:1 ]]; then
       echo "A blank Linux-native install requires the root-owned mode-0600 encrypted credential at $native_credential." >&2
-      echo "Create it with systemd-creds as documented in README.md, then rerun." >&2
+      echo "Create it with tools/provision-credential.sh, then rerun." >&2
       exit 2
     fi
   elif [[ ! -e $native_mapping || ! -e $native_journal ]]; then
@@ -322,14 +400,15 @@ install -o root -g root -m 0755 "$source_dir/src/t2-touchid-provision-catacomb.p
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-identify-finger.py" /usr/local/sbin/t2-touchid-identify-finger
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-manage.py" /usr/local/sbin/t2-touchid-manage
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-baseline.py" /usr/local/sbin/t2-touchid-baseline
-install -o root -g root -m 0755 "$source_dir/src/t2-catacomb-fixture-check.py" /usr/local/sbin/t2-catacomb-fixture-check
+install -d -o root -g root -m 0755 /opt/t2-touchid/bin
+install -o root -g root -m 0755 "$source_dir/src/t2-catacomb-fixture-check.py" /opt/t2-touchid/bin/t2-catacomb-fixture-check
 install -o root -g root -m 0755 "$source_dir/src/t2-acm-preflight.py" /usr/local/sbin/t2-acm-preflight
-install -o root -g root -m 0755 "$source_dir/src/t2-aks-observe-test.py" /usr/local/sbin/t2-aks-observe-test
-install -o root -g root -m 0755 "$source_dir/src/t2-acm-lifecycle-test.py" /usr/local/sbin/t2-acm-lifecycle-test
-install -o root -g root -m 0755 "$source_dir/src/t2-acm-policy-preflight.py" /usr/local/sbin/t2-acm-policy-preflight
-install -o root -g root -m 0755 "$source_dir/src/t2-acm-authorize-test.py" /usr/local/sbin/t2-acm-authorize-test
-install -o root -g root -m 0755 "$source_dir/src/t2-acm-identity-secret-test.py" /usr/local/sbin/t2-acm-identity-secret-test
-install -o root -g root -m 0755 "$source_dir/src/t2-touchid-enroll-test.py" /usr/local/sbin/t2-touchid-enroll-test
+install -o root -g root -m 0755 "$source_dir/src/t2-aks-observe-test.py" /opt/t2-touchid/bin/t2-aks-observe-test
+install -o root -g root -m 0755 "$source_dir/src/t2-acm-lifecycle-test.py" /opt/t2-touchid/bin/t2-acm-lifecycle-test
+install -o root -g root -m 0755 "$source_dir/src/t2-acm-policy-preflight.py" /opt/t2-touchid/bin/t2-acm-policy-preflight
+install -o root -g root -m 0755 "$source_dir/src/t2-acm-authorize-test.py" /opt/t2-touchid/bin/t2-acm-authorize-test
+install -o root -g root -m 0755 "$source_dir/src/t2-acm-identity-secret-test.py" /opt/t2-touchid/bin/t2-acm-identity-secret-test
+install -o root -g root -m 0755 "$source_dir/src/t2-touchid-enroll-test.py" /opt/t2-touchid/bin/t2-touchid-enroll-test
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-enroll.py" /usr/local/sbin/t2-touchid-enroll
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-user-map.py" /usr/local/sbin/t2-touchid-user-map
 install -o root -g root -m 0755 "$source_dir/src/t2-native-authority-rebind.py" /usr/local/sbin/t2-native-authority-rebind
@@ -348,11 +427,19 @@ install -o root -g root -m 0644 \
 
 python -m venv "$target_dir/.venv"
 requirements_stamp=$target_dir/.requirements.sha256
-requirements_hash=$(sha256sum "$source_dir/requirements.txt" | cut -d' ' -f1)
+requirements_hash=$(
+  sha256sum \
+    "$source_dir/requirements.txt" \
+    "$source_dir/requirements-hashed.txt" \
+    "$source_dir/requirements-build-hashed.txt" \
+    "$source_dir/tools/install-python-deps.sh" \
+    "$source_dir/vendor/python/pymobiledevice3-11.1.3-py3-none-any.whl" \
+    | sha256sum | cut -d' ' -f1
+)
 installed_hash=$(sed -n '1p' "$requirements_stamp" 2>/dev/null || true)
 if [[ $installed_hash != "$requirements_hash" ]] || \
     ! "$target_dir/.venv/bin/python" -c 'import dbus_next, pymobiledevice3' 2>/dev/null; then
-  "$target_dir/.venv/bin/pip" install --requirement "$source_dir/requirements.txt"
+  "$source_dir/tools/install-python-deps.sh" "$target_dir/.venv/bin/python"
   printf '%s\n' "$requirements_hash" >"$requirements_stamp"
   chmod 0644 "$requirements_stamp"
 else
@@ -383,17 +470,18 @@ install -o root -g root -m 0700 "$source_dir/src/t2-sep-transport-load.sh" /usr/
 install -o root -g root -m 0700 "$source_dir/src/t2-sep-transport-unload.sh" /usr/local/sbin/t2-sep-transport-unload
 install -o root -g root -m 0700 "$source_dir/src/t2-sep-prerequisite-ready.sh" /usr/local/sbin/t2-sep-prerequisite-ready
 install -o root -g root -m 0700 "$source_dir/src/t2-bridge-network-ready.sh" /usr/local/sbin/t2-bridge-network-ready
-install -o root -g root -m 0755 "$source_dir/src/t2-native-enroll-tui-launch.sh" /usr/local/sbin/t2-native-enroll-tui-launch
 install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-enroll-tui-launch.sh" /usr/local/sbin/t2-fprintd-enroll-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-preview-tui-launch.sh" /usr/local/sbin/t2-fprintd-preview-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-verify-tui-launch.sh" /usr/local/sbin/t2-fprintd-verify-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-sudo-pam-test-launch.sh" /usr/local/sbin/t2-sudo-pam-test-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-negative-tui-launch.sh" /usr/local/sbin/t2-fprintd-negative-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-delete-tui-launch.sh" /usr/local/sbin/t2-fprintd-delete-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-new-finger-tui-launch.sh" /usr/local/sbin/t2-native-new-finger-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-match-tui-launch.sh" /usr/local/sbin/t2-native-match-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-negative-tui-launch.sh" /usr/local/sbin/t2-native-negative-tui-launch
-install -o root -g root -m 0755 "$source_dir/src/t2-second-finger-tui-launch.sh" /usr/local/sbin/t2-second-finger-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-native-enroll-tui-launch.sh" /opt/t2-touchid/bin/t2-native-enroll-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-preview-tui-launch.sh" /opt/t2-touchid/bin/t2-fprintd-preview-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-verify-tui-launch.sh" /opt/t2-touchid/bin/t2-fprintd-verify-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-sudo-pam-test-launch.sh" /opt/t2-touchid/bin/t2-sudo-pam-test-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-negative-tui-launch.sh" /opt/t2-touchid/bin/t2-fprintd-negative-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-fprintd-delete-tui-launch.sh" /opt/t2-touchid/bin/t2-fprintd-delete-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-new-finger-tui-launch.sh" /opt/t2-touchid/bin/t2-native-new-finger-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-match-tui-launch.sh" /opt/t2-touchid/bin/t2-native-match-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-negative-tui-launch.sh" /opt/t2-touchid/bin/t2-native-negative-tui-launch
+install -o root -g root -m 0755 "$source_dir/src/t2-second-finger-tui-launch.sh" /opt/t2-touchid/bin/t2-second-finger-tui-launch
+remove_legacy_path_research_helpers
 install -o root -g root -m 0644 \
   "$source_dir/systemd/system/fprintd.service" \
   "$source_dir/systemd/system/t2-biometric-port-refresh.service" \
@@ -412,6 +500,11 @@ install -d -o root -g root -m 0755 /etc/systemd/sleep.conf.d
 install -o root -g root -m 0644 \
   "$source_dir/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf" \
   /etc/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf
+install -d -o root -g root -m 0755 /usr/lib/tmpfiles.d
+install -o root -g root -m 0644 \
+  "$source_dir/systemd/tmpfiles.d/t2-touchid.conf" \
+  /usr/lib/tmpfiles.d/t2-touchid.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/t2-touchid.conf >/dev/null
 if [[ ! $target_home =~ ^/[A-Za-z0-9._/-]+$ ]] || \
     [[ $target_home == *//* || $target_home == */../* || \
        $target_home == */./* || $target_home == */.. || $target_home == */. ]] || \
@@ -419,13 +512,11 @@ if [[ ! $target_home =~ ^/[A-Za-z0-9._/-]+$ ]] || \
   echo "The configured home path is unsafe for the fprintd sandbox." >&2
   exit 2
 fi
-for service in fprintd t2-touchid-adaptive-sync; do
-  dropin_dir=/etc/systemd/system/$service.service.d
-  install -d -o root -g root -m 0755 "$dropin_dir"
-  printf '[Service]\nBindReadOnlyPaths=%s\n' "$target_home" \
-    >"$dropin_dir/05-account-home.conf"
-  chmod 0644 "$dropin_dir/05-account-home.conf"
-done
+install -d -o root -g root -m 0755 /etc/systemd/system/fprintd.service.d
+printf '[Service]\nBindReadOnlyPaths=%s\n' "$target_home" \
+  >/etc/systemd/system/fprintd.service.d/05-account-home.conf
+chmod 0644 /etc/systemd/system/fprintd.service.d/05-account-home.conf
+install -d -o root -g root -m 0755 /etc/systemd/system/t2-touchid-adaptive-sync.service.d
 authority_dropin=/etc/systemd/system/fprintd.service.d/10-authority.conf
 first_run_dropin_dir=/etc/systemd/system/t2-native-first-run.service.d
 first_run_dropin=$first_run_dropin_dir/10-authority.conf
@@ -482,10 +573,6 @@ chmod 0644 /etc/modprobe.d/t2-sep-transport.conf
   printf 'softdep t2_sep_transport pre: applesmc\n'
 } >/etc/modprobe.d/t2-sep-boot-state.conf
 chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf
-# Persist both the selected applesmc module and its boot-state options. This is
-# required even when the running module was already capable: uninstall may have
-# rebuilt the image without this product-owned configuration.
-rebuild_boot_images
 
 install -d -o "$target_user" -g "$target_gid" -m 0755 "$target_home/.config/systemd/user"
 install -o "$target_user" -g "$target_gid" -m 0644 \
@@ -504,26 +591,10 @@ cat >/etc/dbus-1/system.d/99-t2-touchid-fprint.conf <<EOF
 EOF
 chmod 0644 /etc/dbus-1/system.d/99-t2-touchid-fprint.conf
 
-systemctl daemon-reload
-systemctl disable --now t2-interactive-unlock.service 2>/dev/null || true
-systemctl enable t2-bridge-network.service t2-sep-transport.service t2-biometric-port-refresh.service t2-biometric-ready.service fprintd.service
-if [[ $authority_mode == macos-control-oracle ]]; then
-  systemctl enable t2-keybag-load.service t2-credential-unlock.service
-else
-  systemctl disable --now t2-keybag-load.service t2-credential-unlock.service 2>/dev/null || true
-fi
-systemctl reload dbus.service
-target_runtime_dir=/run/user/$target_uid
-if [[ -S $target_runtime_dir/bus ]]; then
-  if ! runuser -u "$target_user" -- env \
-    XDG_RUNTIME_DIR="$target_runtime_dir" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$target_runtime_dir/bus" \
-    systemctl --user daemon-reload; then
-    echo "Warning: could not reload $target_user's active user manager." >&2
-  fi
-fi
-
+# Register the transport with DKMS before enabling product units so a failed
+# build cannot leave boot-failing enabled services.
 if command -v dkms >/dev/null 2>&1; then
+  echo "Building the T2 transport (DKMS)…" >&2
   dkms_source=/usr/src/t2-sep-transport-0.1.0
   dkms_stamp=$dkms_source/.source.sha256
   module_source_hash=$(
@@ -548,15 +619,49 @@ if command -v dkms >/dev/null 2>&1; then
     echo "DKMS module is already installed for $running_kernel."
   else
     if [[ -z $dkms_state ]]; then
-      dkms add -m t2-sep-transport -v 0.1.0
+      if ! dkms add -m t2-sep-transport -v 0.1.0; then
+        echo "t2-sep-transport DKMS add failed for $running_kernel." >&2
+        echo "Remedy: install dkms and matching kernel headers, then rerun ./install-omarchy.sh." >&2
+        rollback_units_after_dkms_failure /etc/systemd/system /etc/systemd/sleep.conf.d
+        exit 2
+      fi
     fi
-    dkms build --force -m t2-sep-transport -v 0.1.0 -k "$running_kernel"
-    dkms install --force -m t2-sep-transport -v 0.1.0 -k "$running_kernel"
+    if ! dkms build --force -m t2-sep-transport -v 0.1.0 -k "$running_kernel" ||
+       ! dkms install --force -m t2-sep-transport -v 0.1.0 -k "$running_kernel"; then
+      echo "t2-sep-transport DKMS build/install failed for $running_kernel." >&2
+      echo "Remedy: install matching kernel headers for $running_kernel, then rerun ./install-omarchy.sh." >&2
+      rollback_units_after_dkms_failure /etc/systemd/system /etc/systemd/sleep.conf.d
+      exit 2
+    fi
     printf '%s\n' "$module_source_hash" >"$dkms_stamp"
     chmod 0644 "$dkms_stamp"
   fi
 else
-  echo "Warning: dkms is unavailable; rerun this installer after kernel upgrades." >&2
+  echo "Warning: dkms is unavailable; product units will still be enabled without a DKMS-registered transport. Install dkms and matching kernel headers, then rerun this installer after kernel upgrades." >&2
+fi
+
+# Persist applesmc + transport modprobe options in the boot image only after
+# DKMS succeeded (or was already installed). An upgrade build failure must
+# not rewrite boot images or tear down a working installation.
+rebuild_boot_images
+
+systemctl daemon-reload
+systemctl disable --now t2-interactive-unlock.service 2>/dev/null || true
+systemctl enable t2-bridge-network.service t2-sep-transport.service t2-biometric-port-refresh.service t2-biometric-ready.service fprintd.service
+if [[ $authority_mode == macos-control-oracle ]]; then
+  systemctl enable t2-keybag-load.service t2-credential-unlock.service
+else
+  systemctl disable --now t2-keybag-load.service t2-credential-unlock.service 2>/dev/null || true
+fi
+systemctl reload dbus.service
+target_runtime_dir=/run/user/$target_uid
+if [[ -S $target_runtime_dir/bus ]]; then
+  if ! runuser -u "$target_user" -- env \
+    XDG_RUNTIME_DIR="$target_runtime_dir" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$target_runtime_dir/bus" \
+    systemctl --user daemon-reload; then
+    echo "Warning: could not reload $target_user's active user manager." >&2
+  fi
 fi
 
 if [[ $authority_mode == linux-native ]]; then
@@ -593,8 +698,13 @@ if [[ $authority_mode == linux-native ]]; then
   }
   "$source_dir/tools/install-pam.sh"
   echo
-  echo "t2touch is ready. Enroll a fingerprint with:"
-  echo "  t2touch enroll"
+  if [[ ${T2TOUCH_OMARCHY_WRAPPER:-0} == 1 ]]; then
+    echo "t2touch userspace is installed. Finish the Omarchy logout step before enrolling."
+  else
+    echo "t2touch is installed. Log out and sign back in, then enroll a fingerprint with:"
+    echo "  t2touch enroll"
+  fi
 else
   echo "Compatibility mode is installed. Run sudo t2-touchid-doctor for its status."
 fi
+clear_prepared_transport_update

@@ -145,6 +145,7 @@ fprintd starts.
 ## Requirements
 
 - An Intel Mac with an Apple T2 chip
+- Linux 6.12 or newer headers for the DKMS transport (`<linux/hex.h>`, `<linux/unaligned.h>`, and `pcim_iomap_region()`)
 - Omarchy with the T2 Linux kernel and matching headers. The installer supplies a DKMS build of the
   typed `applesmc` SEP boot-state publisher from
   [`linux_native/patches/applesmc-t2-sep-boot-state.patch`](linux_native/patches/applesmc-t2-sep-boot-state.patch).
@@ -163,6 +164,11 @@ If the running `applesmc` driver lacks the boot-state publisher, the first
 installer run stages the included `applesmc-t2touch` DKMS prerequisite and
 stops before changing biometric, PAM, or service state. Follow the installer’s
 restart or recovery instructions, then rerun `./install-omarchy.sh`. The installer never reboots the machine itself.
+
+The installer exits `3` when a reboot is required before it can continue
+(staging the applesmc boot-state publisher, or `--prepare-transport-update`).
+That is an expected stop, not a build failure: a labelled `NEXT STEP` block is
+printed on stdout. Other non-zero exits are failures.
 
 Run the installer as your desktop account, not as root. It invokes `sudo` only
 for the system changes it owns.

@@ -1,0 +1,5 @@
+pymobiledevice3 11.1.3
+source: git+https://github.com/doronz88/pymobiledevice3.git@4fcfdd82ffcf30b6a11460b505fadb5579e7b2bb
+artifact: pymobiledevice3-11.1.3-py3-none-any.whl
+built: pip wheel --no-deps with Python 3.14.7
+sha256: 281fb1ff69751004bbc001ad304197b05cb64b51929f4e07cfb494bac6027e07

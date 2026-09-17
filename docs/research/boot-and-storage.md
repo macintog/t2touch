@@ -15,9 +15,11 @@ AKS capability response established that the application was ready afterward.
 
 A received byte is not itself readiness. The
 [VirtualSMC EFMS reference](https://github.com/acidanthera/VirtualSMC/blob/master/Docs/SMCKeys.txt)
-identifies 1 as `BootPolicyOk` and 3 as `BootPolicyReboot`. The installer accepts
-only 1 for proceeding to independent service readiness, reports 3 as requiring
-T2 boot-policy recovery, and blocks other outcomes. On a fresh Omarchy installation, the
+identifies 1 as `BootPolicyOk` and 3 as `BootPolicyReboot`. Fresh setup accepts
+only 1 for proceeding to independent service readiness. A verified running
+upgrade, or an exact transport replacement deliberately prepared from one, may
+continue to the same independent readiness checks on 3; other outcomes remain
+blocked. On a fresh Omarchy installation, the
 patched publisher was observed returning 3 after its first kernel restart;
 the response alone does not establish SEP app readiness. Private bridgeOS logs
 subsequently showed successful `StartVersionedApps` calls followed by a

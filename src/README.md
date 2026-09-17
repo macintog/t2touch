@@ -268,7 +268,7 @@ reconciliation snapshot, operation UUID, and exact mapping generation. Runtime
 load accepts only that root-owned mode-0600 manifest and a post-reboot-verified
 journal whose Linux UID, Apple UID, account UUID, bag UUID, and mapping all
 match. No caller-selected path or authority field crosses IPC.
-The retained, default-disabled `t2-user-activation.socket` accepts one bounded version-1
+The retained, default-disabled `systemd/research/t2-user-activation.socket` accepts one bounded version-1
 `SOCK_SEQPACKET` message containing only an optional password. Its per-request
 service derives the target from peer credentials, returns only ready,
 already-ready, or a generic unavailable result, and wipes both receive and
@@ -605,7 +605,7 @@ reconciliation snapshot, operation UUID, and exact mapping generation. Runtime
 load accepts only that root-owned mode-0600 manifest and a post-reboot-verified
 journal whose Linux UID, Apple UID, account UUID, bag UUID, and mapping all
 match. No caller-selected path or authority field crosses IPC.
-The retained, default-disabled `t2-user-activation.socket` accepts one bounded version-1
+The retained, default-disabled `systemd/research/t2-user-activation.socket` accepts one bounded version-1
 `SOCK_SEQPACKET` message containing only an optional password. Its per-request
 service derives the target from peer credentials, returns only ready,
 already-ready, or a generic unavailable result, and wipes both receive and

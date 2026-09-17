@@ -40,11 +40,7 @@ def _report_failure(error: BaseException) -> None:
     causes: list[str] = []
     current: BaseException | None = error
     while current is not None and len(causes) < 8:
-        message = " ".join(str(current).split())
-        causes.append(
-            type(current).__name__
-            + (f": {message[:240]}" if message else "")
-        )
+        causes.append(type(current).__name__)
         current = current.__cause__
     print(
         "native T2 user activation unavailable: " + " <- ".join(causes),
