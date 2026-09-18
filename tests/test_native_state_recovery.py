@@ -193,7 +193,7 @@ class NativeStateRecoveryTests(unittest.TestCase):
             )
         return history
 
-    def advance_to_canonical_user_rejection(self, path):
+    def advance_to_canonical_user_rejection(self, path, *, direct=False):
         history = self.advance_to_reprepared_rejection(path)
         evidence = {
             "COLD_RESTART_PREPARED": {
@@ -280,9 +280,14 @@ class NativeStateRecoveryTests(unittest.TestCase):
             "CANONICAL_USER_LOAD_REPLY_REJECTED": {
                 "reply_received": True,
                 "retry_permitted": False,
+                "reply_status": 5,
             },
         }
-        for milestone in recovery.EMPTY_REPROVISION_MILESTONES[24:38]:
+        sequence = (
+            recovery.DIRECT_EMPTY_REPROVISION_MILESTONES if direct
+            else recovery.EMPTY_REPROVISION_MILESTONES
+        )
+        for milestone in sequence[24:sequence.index("EMPTY_REPROVISION_SURFACE_RECONCILED")]:
             history = recovery._append(
                 path, history.operation_id, milestone, evidence[milestone]
             )
@@ -304,10 +309,16 @@ class NativeStateRecoveryTests(unittest.TestCase):
         self.assertFalse(recovery.is_retained_master_inventory(changed, USER))
 
     def test_rejected_canonical_user_reprovisions_empty_generation(self):
+        self.check_rejected_canonical_user_reprovisions_empty_generation(direct=False)
+
+    def test_direct_rejected_canonical_user_reprovisions_empty_generation(self):
+        self.check_rejected_canonical_user_reprovisions_empty_generation(direct=True)
+
+    def check_rejected_canonical_user_reprovisions_empty_generation(self, *, direct):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path, _history, user, components = self.create(root)
-            history = self.advance_to_canonical_user_rejection(path)
+            history = self.advance_to_canonical_user_rejection(path, direct=direct)
             self.assertTrue(history.blocked)
             self.assertTrue(
                 recovery.empty_reprovision_is_resumable(
@@ -415,6 +426,119 @@ class NativeStateRecoveryTests(unittest.TestCase):
             load.assert_called_once()
             self.assertTrue(history.complete)
             self.assertEqual(history.milestone, "EMPTY_REPROVISION_COMPLETE")
+
+    def test_direct_reprovision_rejects_unknown_outcome_or_missing_master_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _history, _user, _components = self.create(Path(directory))
+            self.advance_to_canonical_user_rejection(path, direct=True)
+            records = t2_mutation_journal.read(path)
+            unknown = copy.deepcopy(records)
+            unknown[-1]['milestone'] = 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'
+            unknown[-1]['evidence'] = {'dispatch_attempted': True, 'retry_permitted': False}
+            self.assertFalse(recovery.empty_reprovision_is_resumable(unknown))
+            missing = [record for record in records
+                       if record['milestone'] != 'CANONICAL_MASTER_REPLY_RECONCILED']
+            with self.assertRaises(recovery.NativeStateRecoveryError):
+                recovery.empty_reprovision_is_resumable(missing)
+
+    def test_direct_reprovision_preserves_journal_when_live_surface_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _history, _user, _components = self.create(Path(directory))
+            self.advance_to_canonical_user_rejection(path, direct=True)
+            before = path.read_bytes()
+            lease = FakeLease(client_version=2)
+            surface = {
+                'per_user_identity_count': 1,
+                'global_identity_count': 1,
+                'user_states': (("master", 0xFFFFFFFF, 3),),
+                'group_state_count': 0,
+            }
+            with patch.object(recovery.t2_compatibility_user_rebind,
+                              'read_stable_surface', return_value=surface):
+                with self.assertRaises(recovery.NativeStateRecoveryError):
+                    recovery.reconcile_incompatible_user_surface(
+                        lease, apple_user_id=USER, journal_path=path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(lease.commands, [])
+
+    def test_legacy_rejection_is_readable_but_cannot_authorize_empty_reprovision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _history, _user, _components = self.create(Path(directory))
+            self.advance_to_canonical_user_rejection(path, direct=True)
+            records = t2_mutation_journal.read(path)
+            del records[-1]['evidence']['reply_status']
+            self.assertTrue(recovery.validate_history(records).blocked)
+            self.assertFalse(recovery.empty_reprovision_is_resumable(records))
+
+    def test_invalid_rejection_status_cannot_authorize_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _history, _user, _components = self.create(Path(directory))
+            self.advance_to_canonical_user_rejection(path, direct=True)
+            records = t2_mutation_journal.read(path)
+            for status in (False, True, 0, -1, 0x100000000, '5', None):
+                with self.subTest(status=status):
+                    changed = copy.deepcopy(records)
+                    changed[-1]['evidence']['reply_status'] = status
+                    with self.assertRaises(recovery.NativeStateRecoveryError):
+                        recovery.empty_reprovision_is_resumable(changed)
+
+    def test_canonical_user_reply_classification_preserves_ambiguous_outcomes(self):
+        cases = (
+            ([5, b''], [], 'CANONICAL_USER_LOAD_REPLY_REJECTED'),
+            ([0, b''], [], 'CANONICAL_USER_LOAD_ACCEPTED'),
+            ([], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            ([False, b''], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            (['5', b''], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            ([-1, b''], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            ([0x100000000, b''], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            ([0, b'unexpected'], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            ([5, b'unexpected'], [], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+            ([5, b''], ['unexpected-event'], 'CANONICAL_USER_LOAD_OUTCOME_UNKNOWN'),
+        )
+        for reply, events, expected in cases:
+            with self.subTest(reply=reply, events=events), tempfile.TemporaryDirectory() as directory:
+                path, _history, user, _components = self.create(Path(directory))
+                self.advance_to_canonical_user_rejection(path, direct=True)
+                # Exercise the accepted-master path. Legacy state-3 readback
+                # after rejection must never authorize a new user load.
+                records = t2_mutation_journal.read(path)[:-2]
+                records[-2]['milestone'] = 'CANONICAL_MASTER_LOAD_ACCEPTED'
+                records[-1]['milestone'] = 'CANONICAL_MASTER_RECONCILED'
+                records[-1]['evidence'].pop('nonzero_reply')
+                records[-1]['evidence'].pop('load_replayed')
+                path.write_bytes(b''.join(path.read_bytes().splitlines(keepends=True)[:-4]))
+                for record in records[-2:]:
+                    recovery._append(path, record['operation_id'],
+                                     record['milestone'], record['evidence'])
+                lease = FakeLease(client_version=2)
+                surface = {
+                    'per_user_identity_count': 0, 'global_identity_count': 0,
+                    'group_state_count': 0,
+                    'user_states': (("master", 0xFFFFFFFF, 3),),
+                }
+                with patch.object(recovery.t2_compatibility_user_rebind,
+                                  'read_stable_surface', return_value=surface), patch.object(
+                                      lease, 'biometric_command', return_value=(reply, events)
+                                  ) as command:
+                    if expected.endswith('_ACCEPTED'):
+                        recovery.load_canonical_user(lease, apple_user_id=USER,
+                                                     user=user, journal_path=path)
+                    else:
+                        with self.assertRaises(recovery.NativeStateRecoveryError):
+                            recovery.load_canonical_user(lease, apple_user_id=USER,
+                                                         user=user, journal_path=path)
+                    records = t2_mutation_journal.read(path)
+                    self.assertEqual(recovery.validate_history(records).milestone, expected)
+                    explicit_rejection = expected.endswith('_REPLY_REJECTED')
+                    # Empty reprovision only recognizes its historical exact
+                    # branches; this accepted-master path does not enter them.
+                    self.assertFalse(recovery.empty_reprovision_is_resumable(records))
+                    if explicit_rejection:
+                        self.assertEqual(records[-1]['evidence']['reply_status'], 5)
+                    with self.assertRaises(recovery.NativeStateRecoveryError):
+                        recovery.load_canonical_user(lease, apple_user_id=USER,
+                                                     user=user, journal_path=path)
+                    command.assert_called_once()
 
     def test_full_sequence_is_journaled_before_each_command(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1118,49 +1242,46 @@ class NativeStateRecoveryTests(unittest.TestCase):
                     )
                 records = t2_mutation_journal.read(path)
                 self.assertTrue(recovery.validate_history(records).blocked)
-                self.assertTrue(
+                self.assertFalse(
                     recovery.canonical_master_reply_is_resumable(records)
                 )
-                rejected_copy = root / "rejected-master-copy.jsonl"
-                rejected_copy.write_bytes(path.read_bytes())
-                rejected_copy.chmod(0o600)
-                with patch.object(
-                    recovery.t2_compatibility_user_rebind,
-                    "read_stable_surface",
-                    return_value=cold,
-                ):
-                    with self.assertRaisesRegex(
-                        recovery.NativeStateRecoveryError,
-                        "exact loaded surface",
-                    ):
-                        recovery.reconcile_canonical_master_reply(
-                            canonical_lease,
-                            apple_user_id=USER,
-                            journal_path=rejected_copy,
-                        )
-                self.assertEqual(canonical_lease.commands, [0x40])
-                recovery.reconcile_canonical_master_reply(
-                    canonical_lease,
-                    apple_user_id=USER,
-                    journal_path=path,
-                )
-                recovery.load_canonical_user(
-                    canonical_lease,
-                    apple_user_id=USER,
-                    user=user,
-                    journal_path=path,
-                )
-                history = recovery.reconcile_saved_user(
-                    canonical_lease,
-                    apple_user_id=USER,
-                    user=user,
-                    journal_path=path,
-                )
-            self.assertEqual(history.milestone, "SAVED_USER_RECONCILED")
-            self.assertEqual(
-                canonical_lease.payloads,
-                [canonical_secure, user.secure_data],
-            )
+                before = path.read_bytes()
+                for surface in (cold, after_master):
+                    with patch.object(
+                        recovery.t2_compatibility_user_rebind,
+                        "read_stable_surface", return_value=surface,
+                    ) as readback:
+                        with self.assertRaisesRegex(
+                            recovery.NativeStateRecoveryError,
+                            "does not prove the saved archive loaded",
+                        ):
+                            recovery.reconcile_canonical_master_reply(
+                                canonical_lease, apple_user_id=USER,
+                                journal_path=path,
+                            )
+                        readback.assert_not_called()
+                self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(canonical_lease.payloads, [canonical_secure])
+
+    def test_legacy_master_readback_cannot_authorize_user_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _history, user, _components = self.create(Path(directory))
+            self.advance_to_canonical_user_rejection(path, direct=True)
+            path.write_bytes(b''.join(path.read_bytes().splitlines(keepends=True)[:-2]))
+            before = path.read_bytes()
+            self.assertEqual(recovery.validate_history(t2_mutation_journal.read(path)).milestone,
+                             'CANONICAL_MASTER_REPLY_RECONCILED')
+            lease = FakeLease()
+            with patch.object(recovery.t2_compatibility_user_rebind,
+                              'read_stable_surface') as readback:
+                with self.assertRaisesRegex(recovery.NativeStateRecoveryError,
+                                            'not at its master boundary'):
+                    recovery.load_canonical_user(lease, apple_user_id=USER,
+                                                 user=user, journal_path=path)
+                readback.assert_not_called()
+            self.assertEqual(lease.commands, [])
+            self.assertEqual(path.read_bytes(), before)
+
 
 
 if __name__ == "__main__":

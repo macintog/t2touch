@@ -35,6 +35,8 @@ if (( pam_backup_present )); then
   "$source_dir/tools/rollback-pam.sh"
 fi
 
+python3 "$source_dir/tools/retire-sleep-policy.py"
+
 systemctl disable --now fprintd.service t2-touchid-adaptive-sync.service \
   t2-touchid-post-reboot.service t2-biometric-ready.service \
   t2-native-first-run.service \
@@ -77,7 +79,6 @@ for file in /etc/systemd/system/{fprintd,t2-native-first-run,t2-touchid-adaptive
   /etc/systemd/system/fprintd.service.d/10-native-enrollment.conf \
   /etc/systemd/system/fprintd.service.d/20-native-identity-management.conf \
   /etc/systemd/system/t2-native-first-run.service.d/10-authority.conf \
-  /etc/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf \
   /usr/lib/tmpfiles.d/t2-touchid.conf \
   /etc/modprobe.d/t2-sep-transport.conf \
   /etc/modprobe.d/t2-sep-transport-autoload.conf \

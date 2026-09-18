@@ -20,84 +20,49 @@ SPEC.loader.exec_module(DOCTOR)
 
 
 class SuspendPolicyTests(unittest.TestCase):
-    def test_installed_policy_selects_only_s2idle(self):
-        policy = (
-            ROOT / "systemd/sleep.conf.d/90-t2-touchid-s2idle.conf"
-        ).read_text(encoding="utf-8")
-        self.assertIn("[Sleep]", policy)
-        self.assertIn("MemorySleepMode=s2idle", policy)
-        self.assertNotIn("MemorySleepMode=deep", policy)
+    def test_install_and_uninstall_retire_without_selecting_a_mode(self):
+        self.assertFalse((ROOT / "systemd/sleep.conf.d/90-t2-touchid-s2idle.conf").exists())
+        for filename in ("install.sh", "uninstall.sh"):
+            script = (ROOT / filename).read_text()
+            self.assertIn('python3 "$source_dir/tools/retire-sleep-policy.py"', script)
+            self.assertNotIn("/etc/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf", script)
 
-        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
-        uninstaller = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
-        target = "/etc/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf"
-        self.assertIn(target, installer)
-        self.assertIn(target, uninstaller)
-
-    def test_doctor_accepts_s2idle_and_warns_for_deep(self):
+    def check_mode(self, modes, config="", returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mem_sleep"
-            with (
-                mock.patch.object(DOCTOR, "MEM_SLEEP", path),
-                mock.patch.object(
-                    DOCTOR,
-                    "run",
-                    return_value=mock.Mock(returncode=1, stdout=""),
-                ),
-            ):
-                path.write_text("[s2idle] deep\n", encoding="ascii")
-                check = DOCTOR.sleep_mode_check()
-                self.assertEqual(check.status, "pass")
-                self.assertIn("s2idle selected", check.detail)
+            path.write_text(modes, encoding="ascii")
+            with (mock.patch.object(DOCTOR, "MEM_SLEEP", path),
+                  mock.patch.object(DOCTOR, "run", return_value=mock.Mock(
+                      returncode=returncode, stdout=config))):
+                return DOCTOR.sleep_mode_check()
 
-                path.write_text("s2idle [deep]\n", encoding="ascii")
-                check = DOCTOR.sleep_mode_check()
-                self.assertEqual(check.status, "warn")
-                self.assertIn("use s2idle", check.detail)
-
-    def test_doctor_accepts_systemd_s2idle_policy_before_suspend(self):
-        with tempfile.TemporaryDirectory() as directory:
-            modes = Path(directory) / "mem_sleep"
-            modes.write_text("s2idle [deep]\n", encoding="ascii")
-            with (
-                mock.patch.object(DOCTOR, "MEM_SLEEP", modes),
-                mock.patch.object(
-                    DOCTOR,
-                    "run",
-                    return_value=mock.Mock(
-                        returncode=0,
-                        stdout="[Sleep]\nMemorySleepMode=s2idle\n",
-                    ),
-                ),
-            ):
-                check = DOCTOR.sleep_mode_check()
-            self.assertEqual(check.status, "pass")
-            self.assertIn("systemd selects s2idle", check.detail)
-
-    def test_doctor_honors_effective_sleep_policy_order_and_section(self):
-        with tempfile.TemporaryDirectory() as directory:
-            modes = Path(directory) / "mem_sleep"
-            modes.write_text("s2idle [deep]\n", encoding="ascii")
-            effective = mock.Mock(
-                returncode=0,
-                stdout=(
-                    "[Other]\nMemorySleepMode=s2idle\n"
-                    "[Sleep]\nMemorySleepMode=s2idle\nMemorySleepMode=deep\n"
-                ),
-            )
-            with (
-                mock.patch.object(DOCTOR, "MEM_SLEEP", modes),
-                mock.patch.object(DOCTOR, "run", return_value=effective),
-            ):
-                check = DOCTOR.sleep_mode_check()
+    def test_neither_kernel_mode_proves_resume_health(self):
+        for modes in ("[s2idle] deep", "s2idle [deep]"):
+            check = self.check_mode(modes)
             self.assertEqual(check.status, "warn")
+            self.assertIn("suspend/resume unqualified", check.detail)
+            self.assertNotIn("use s2idle", check.detail)
 
-    def test_doctor_fails_closed_for_ambiguous_mode(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "mem_sleep"
-            path.write_text("s2idle deep\n", encoding="ascii")
-            with mock.patch.object(DOCTOR, "MEM_SLEEP", path):
-                self.assertEqual(DOCTOR.sleep_mode_check().status, "warn")
+    def test_systemd_override_is_checked_even_when_kernel_selects_s2idle(self):
+        check = self.check_mode("[s2idle] deep", "[Sleep]\nMemorySleepMode=deep\n")
+        self.assertIn("kernel currently selects s2idle", check.detail)
+        self.assertIn("systemd MemorySleepMode=deep", check.detail)
+        self.assertEqual(check.status, "warn")
+
+    def test_systemd_section_order_reset_and_whitespace(self):
+        check = self.check_mode("s2idle [deep]", (
+            "[Other]\nMemorySleepMode=deep\n[Sleep]\n"
+            "MemorySleepMode=deep\nMemorySleepMode = s2idle\n"))
+        self.assertIn("systemd MemorySleepMode=s2idle", check.detail)
+        reset = self.check_mode("s2idle [deep]", (
+            "[Sleep]\nMemorySleepMode=s2idle\nMemorySleepMode=\n"))
+        self.assertIn("no MemorySleepMode override", reset.detail)
+
+    def test_unavailable_or_ambiguous_policy_is_not_a_pass(self):
+        check = self.check_mode("s2idle [deep]", returncode=1)
+        self.assertIn("systemd sleep policy unavailable", check.detail)
+        self.assertEqual(check.status, "warn")
+        self.assertEqual(self.check_mode("s2idle deep").status, "warn")
 
     def test_installer_negotiates_applekeystore_before_keybag_loading(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")

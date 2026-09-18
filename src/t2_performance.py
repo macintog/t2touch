@@ -6,6 +6,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -84,3 +85,14 @@ def phase(operation: str, label: str) -> Iterator[None]:
         raise
     else:
         emit(operation, label, started)
+
+
+@contextmanager
+def transport_phase(operation: str, label: str) -> Iterator[None]:
+    """Opt-in syscall attribution using only validated, fixed opcode labels."""
+
+    if os.environ.get("T2_TOUCHID_PROFILE_IO") == "1":
+        with phase(operation, label):
+            yield
+    else:
+        yield

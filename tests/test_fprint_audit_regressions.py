@@ -196,6 +196,48 @@ class VerdictTests(unittest.TestCase):
             with self.subTest(extra=extra), self.assertRaises(RuntimeError):
                 FPRINT.resolved_any_finger_from_result(result)
 
+    def repeated_result(self, *, no_match=False):
+        result = match_result()
+        event = negative() if no_match else result["match_events"][0]
+        event.update(host_accepted_result=True)
+        if no_match:
+            event["no_match_matcher"] = True
+        result["match_events"] = [dict(event), dict(event)]
+        result["post_match_biolockout_generations"] = [
+            dict(match_result_generation=i, linux_store_committed=True)
+            for i in (1, 2)]
+        return result
+
+    def test_consistent_repeated_results_require_each_durable_generation(self):
+        for no_match in (False, True):
+            result = self.repeated_result(no_match=no_match)
+            self.assertEqual(FPRINT.resolved_any_finger_from_result(result),
+                             None if no_match else "finger-2")
+            result["post_match_biolockout_generations"].pop()
+            with self.assertRaises(RuntimeError):
+                FPRINT.resolved_any_finger_from_result(result)
+
+    def test_repeated_result_conflicts_and_missing_proofs_fail_closed(self):
+        for field, value in (("matched_finger_name", "finger-1"),
+                             ("matched_finger_name_present", False),
+                             ("host_accepted_result", False),
+                             ("result_valid", False), ("no_match", True)):
+            result = self.repeated_result()
+            result["match_events"][1][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                FPRINT.resolved_any_finger_from_result(result)
+        for field, value in (("linux_store_committed", False),
+                             ("match_result_generation", True),
+                             ("match_result_generation", 1)):
+            result = self.repeated_result()
+            result["post_match_biolockout_generations"][1][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                FPRINT.resolved_any_finger_from_result(result)
+        result = self.repeated_result()
+        result["match_events"][1] = dict(negative(), host_accepted_result=True)
+        with self.assertRaises(RuntimeError):
+            FPRINT.resolved_any_finger_from_result(result)
+
     def test_conflicting_result_flags_fail_closed(self):
         result = match_result()
         result["match_events"][0]["no_match"] = True
@@ -566,6 +608,11 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(task, 2)
         self.assertIsNotNone(children[0].returncode)
         self.assertIsNone(backend.process)
+        # Cancellation retains an unused import-only spare. Drain it too when
+        # this fixture's daemon shuts down, rather than abandoning its pipes.
+        backend.system_sleeping = True
+        await backend._quiesce_hardware_for_sleep()
+        self.assertTrue(all(child.returncode is not None for child in children))
 
     async def test_stop_does_not_terminate_other_operation(self):
         backend = self.backend()
@@ -723,6 +770,8 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
             backend.system_sleeping = sleeping
             if not sleeping:
                 schedule_warm()
+            else:
+                backend.native_worker_sleep_task = asyncio.create_task(asyncio.sleep(0))
         backend.system_sleep_changed = mock.Mock(side_effect=sleep_changed)
         changes = dict(
             T2Backend=lambda *_args, **_kwargs: backend, SenderAwareMessageBus=lambda **_kwargs: bus,
@@ -773,7 +822,8 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
             calls[3].body,
             ["org.freedesktop.login1.Manager", "PreparingForSleep"],
         )
-        _backend.system_sleep_changed.assert_called_once_with(False)
+        _backend.system_sleep_changed.assert_has_calls([mock.call(False), mock.call(True)])
+        self.assertTrue(_backend.native_worker_sleep_task.done())
         _backend.warm_runtime.assert_awaited_once_with()
 
     async def test_subscription_failure_prevents_exposure(self):
@@ -801,7 +851,7 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(error)
         self.assertEqual(
             backend.system_sleep_changed.call_args_list,
-            [mock.call(False), mock.call(False)],
+            [mock.call(False), mock.call(False), mock.call(True)],
         )
 
     async def test_suspend_invalidates_without_starting_a_warmup(self):
@@ -820,7 +870,7 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(error)
         self.assertEqual(
             backend.system_sleep_changed.call_args_list,
-            [mock.call(False), mock.call(True)],
+            [mock.call(False), mock.call(True), mock.call(True)],
         )
 
     async def test_spoofed_sleep_sender_is_ignored(self):
@@ -837,7 +887,7 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
         _calls, ready, error, backend = await self.run_main(reply, lifecycle)
         self.assertTrue(ready)
         self.assertIsNone(error)
-        backend.system_sleep_changed.assert_called_once_with(False)
+        self.assertEqual(backend.system_sleep_changed.call_args_list, [mock.call(False), mock.call(True)])
 
     async def test_sleep_signal_during_owner_lookup_is_preserved(self):
         reply = Message(message_type=TYPES.METHOD_RETURN, signature="", body=[])
@@ -876,7 +926,7 @@ class SubscriptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(error)
         self.assertEqual(
             backend.system_sleep_changed.call_args_list,
-            [mock.call(False), mock.call(True), mock.call(False)],
+            [mock.call(False), mock.call(True), mock.call(False), mock.call(True)],
         )
         self.assertEqual(backend.warm_runtime.await_count, 2)
 

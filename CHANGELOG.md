@@ -6,11 +6,99 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.0.9 - 2026-09-17
+
+This release makes Touch ID ready sooner, fixes false failures when the same
+finger is touched twice, and adds safeguards against losing fingerprints
+during recovery.
+
+### Fingerprint recovery
+
+Recovery could not restore the reference machine's existing fingerprints after
+a cold reset, even though the saved files remained intact. We do not yet know
+whether those fingerprints can be recovered. Resetting and enrolling again
+worked, and the new enrollment survived a T2 and host reboot. The recovery
+code involved is also present in `0.0.8`. See the
+[recovery findings](docs/RECOVERY_RELEASE_GATE.md).
+
+### Recovery safeguards
+
+- Stop automatic startup from saving hardware state when its fingerprint list
+  differs from this installation's saved list. Two cloned installations with
+  the same account credentials were found to hold different saved archives.
+- Stop when firmware rejects a saved master archive. An empty master reported
+  in state 3 no longer overrides that rejection.
+- Require explicit consent to fingerprint loss before recovery recreates or
+  removes T2 components, including when resuming an interrupted operation.
+- Distinguish malformed replies from explicit firmware rejections. A historical
+  user-load failure without a recorded firmware status cannot authorize a reset
+  to an empty fingerprint inventory.
+- Keep installation paused while recovery is incomplete, and recognize journals
+  created by the direct canonical-recovery command.
+
+### Changed
+
+- Stop installing the machine-wide s2idle override. Install and uninstall
+  archive only the exact, unchanged T2Touch-owned sleep-policy file; modified
+  files and conflicting backups are preserved with a warning. Interrupted
+  retirement can resume safely. Subsequent sleep requests follow remaining
+  systemd and kernel policy, which may select deep sleep. This is not a suspend
+  repair: neither mode is qualified on the reference machine. Review the
+  [migration guidance](docs/SLEEP_POLICY.md) before upgrading.
+- Report effective sleep configuration and kernel mode in doctor diagnostics,
+  with an explicit warning that resume remains unqualified.
+- Reduce the wait for Touch ID to become ready from a historical **5.06 seconds
+  to 0.31 seconds** on the reference MacBookPro16,1: about **4.74 seconds less
+  waiting (94%)**. Both measure direct verification through reader readiness,
+  but were recorded in different sessions and kernel versions. The latest
+  controlled comparison measured 1.69 → 0.31 seconds (81% less time).
+  Reusable identity preparation moves work out of each request while keeping
+  caller authorization and biometric matching fresh. These are readiness
+  measurements, not touch-to-result or full-login timings. See the
+  [measurement record](docs/evaluations/touchid-prepared-identity-2026-09-17.md)
+  for the historical baseline, validation, and limits.
+
+### Fixed
+
+- Accept consistent repeated results for the same attested finger instead of
+  turning a successful double touch into a failure. Retain callbacks received
+  during export and cleanup, acknowledge each once, and durably publish every
+  accepted result. Conflicting, unbound, or unpersisted results still fail.
+- Release idle prepared AKS/ACM ownership for authorized peer operations,
+  including the C helper used by password-fallback callers, so retained
+  preparation does not leave them reporting a busy device. Active requests
+  retain exclusive ownership; matching and caller authorization remain fresh.
+- Receive complete bridgeOS diagnostic archives whether the RemoteXPC stream
+  announcement was already consumed or remains in the stream. Validate gzip
+  integrity and retain data in a final HTTP/2 frame before publishing a capture.
+- Disable TCP write batching before BridgeXPC HELO, retain fragmented RSD
+  discovery headers, and reject malformed service ports without letting a
+  failed optional hint save invalidate live discovery.
+- Fail closed on partial-frame timeouts while preserving retryable idle waits.
+  Validate callback and reply envelope versions and routing consistently.
+- Serialize BioLockout generation publication and reduce each commit to one
+  retained-history scan, preserving append-only generations, collision checks,
+  all four durability flushes, and previous-generation recovery.
+
+### Limitations
+
+- Preparation still takes time at service startup. The readiness figures
+  measure requests after startup, not cold service-start latency.
+- The fixed 500 ms post-cancel quiet period remains. Reader-readiness gains
+  are not measurements of physical-touch-to-result or full-login latency.
+- After the reboot, the newly enrolled finger matched and an unenrolled finger
+  was rejected. Repeated cold cycles, interrupted writes, and use across cloned
+  installations remain untested with that enrollment.
+- One transient post-reboot reconciliation failure remains unexplained despite
+  subsequent successful startup and physical controls. Keep password fallback
+  and a recovery terminal available; no additional hardware is qualified.
+
 ## 0.0.8 - 2026-09-17
 
-This release preserves enrolled fingerprints during recovery and makes
-journaled recovery and management operations resumable across verified
-state transitions and cold boots.
+This release adds archive-preservation guards and resumable journaled recovery.
+Subsequent reference-machine evidence shows that retained archive files do not
+guarantee usable fingerprints after recovery. See the
+[recovery findings](docs/RECOVERY_RELEASE_GATE.md).
 
 ### Fixed
 

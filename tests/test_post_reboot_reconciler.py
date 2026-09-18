@@ -133,6 +133,24 @@ class PostRebootReconcilerTests(unittest.TestCase):
                     with self.assertRaises(native_reconciler.NativePostRebootReconcilerError):
                         native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
 
+    def test_pending_mutation_child_failure_keeps_public_reason(self):
+        message = b"t2-touchid-manage: an earlier biometric mutation is unfinished or awaits verification"
+        mapping_set = SimpleNamespace(mappings=(SimpleNamespace(enabled=True, linux_uid=1000),))
+        runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout=b"", stderr=message + b"\n",
+        ))
+        with (
+            mock.patch.object(native_reconciler.t2_user_mapping, "load", return_value=mapping_set),
+            mock.patch.object(native_reconciler.os.path, "lexists", return_value=True),
+            self.assertRaises(post_reboot_diagnostic.PostRebootStageError) as caught,
+        ):
+            native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+        diagnostic = caught.exception.redacted()
+        self.assertEqual(diagnostic["reason"], "pending-biometric-mutation")
+        self.assertEqual(diagnostic["stage"], "external-deletion-reconciliation")
+        self.assertEqual(diagnostic["child_exit_status"], 1)
+        self.assertIsNone(post_reboot_diagnostic.child_failure_reason(message + b" private identifier"))
+
     def test_external_reconciliation_skips_only_empty_initial_state(self):
         mapping_set = SimpleNamespace(
             mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)

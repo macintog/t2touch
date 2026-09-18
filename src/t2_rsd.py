@@ -73,8 +73,11 @@ def _save_hint(host: str, interface: str, port: int) -> None:
     except OSError:
         pass
     finally:
-        if temporary is not None and os.path.exists(temporary):
-            os.unlink(temporary)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass  # A best-effort hint must not invalidate live discovery.
 
 
 async def _probe_port(
@@ -92,7 +95,18 @@ async def _probe_port(
             await asyncio.wait_for(
                 loop.sock_connect(sock, (host, port, 0, scope_id)), timeout
             )
-            greeting = await asyncio.wait_for(loop.sock_recv(sock, 21), timeout)
+            async def read_header() -> bytes:
+                # TCP can split even this nine-byte HTTP/2 header. Bound the
+                # entire read, not each fragment, and treat EOF as no candidate.
+                header = bytearray()
+                while len(header) < 9:
+                    chunk = await loop.sock_recv(sock, 9 - len(header))
+                    if not chunk:
+                        break
+                    header.extend(chunk)
+                return bytes(header)
+
+            greeting = await asyncio.wait_for(read_header(), timeout)
             if (
                 len(greeting) >= 9
                 and greeting[3] == HTTP2_SETTINGS
@@ -220,10 +234,24 @@ async def discover_peer(
 def service_port(peer: dict[str, Any], service_name: str) -> int:
     """Return one validated dynamic service port from an RSD peer record."""
 
-    service = peer.get("Services", {}).get(service_name)
+    services = peer.get("Services") if isinstance(peer, dict) else None
+    service = services.get(service_name) if isinstance(services, dict) else None
     if not isinstance(service, dict) or "Port" not in service:
         raise RuntimeError(f"T2 did not advertise {service_name}")
-    port = int(service["Port"])
+    port = service["Port"]
+    # Preserve pymobiledevice3's XpcInt64Type/XpcUInt64Type integer wrappers,
+    # but reject booleans and lossy float/string coercions before normalization.
+    if isinstance(port, int) and not isinstance(port, bool):
+        port = int(port)
+    elif (
+        type(port) is str
+        and 1 <= len(port) <= 5
+        and port.isascii()
+        and port.isdecimal()
+    ):
+        port = int(port)
+    if type(port) is not int:
+        raise RuntimeError(f"T2 advertised an invalid port for {service_name}")
     if not FIRST_DYNAMIC_PORT <= port <= LAST_DYNAMIC_PORT:
         raise RuntimeError(f"T2 advertised an invalid port for {service_name}")
     return port

@@ -1944,7 +1944,10 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "create_subprocess_exec",
             AsyncMock(side_effect=spawn_worker),
         ) as spawn:
-            with mock.patch.object(backend, "_schedule_native_worker_warm"):
+            with (
+                mock.patch.object(backend, "_schedule_native_worker_warm"),
+                mock.patch.object(backend, "_schedule_native_spare"),
+            ):
                 await backend._run_native_match("finger-2")
                 await backend._run_native_match("finger-2")
         self.assertEqual(spawn.await_count, 2)

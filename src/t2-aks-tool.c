@@ -10,10 +10,54 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include "t2_sep_transport_uapi.h"
+
+/* Share the Python owners' authenticated idle-release protocol. This path is
+ * reached only after kernel EBUSY, never to bypass an active hardware owner. */
+static int release_prepared_owner(void)
+{
+	pid_t child = fork();
+	int status;
+
+	if (child < 0)
+		return 0;
+	if (child == 0) {
+		int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+
+		if (input < 0 || dup2(input, STDIN_FILENO) < 0)
+			_exit(1);
+		if (input != STDIN_FILENO)
+			close(input);
+		else if (fcntl(STDIN_FILENO, F_SETFD, 0) < 0)
+			_exit(1);
+		/* Survives exec; a broken helper cannot wait indefinitely. */
+		alarm(30);
+		execl("/opt/t2-touchid/.venv/bin/python", "python", "-I",
+		      "/opt/t2-touchid/src/t2_preparation_lease.py", (char *)NULL);
+		_exit(1);
+	}
+	while (waitpid(child, &status, 0) < 0) {
+		if (errno != EINTR)
+			return 0;
+	}
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int open_aks_device(void)
+{
+	int fd = open("/dev/t2-aks", O_RDWR | O_CLOEXEC);
+
+	if (fd < 0 && errno == EBUSY) {
+		if (release_prepared_owner())
+			return open("/dev/t2-aks", O_RDWR | O_CLOEXEC);
+		errno = EBUSY;
+	}
+	return fd;
+}
 
 static uint32_t get_le32(const unsigned char *p)
 {
@@ -1093,7 +1137,7 @@ int main(int argc, char **argv)
 			argv[0], argv[0]);
 		return 2;
 	}
-	fd = open("/dev/t2-aks", O_RDWR | O_CLOEXEC);
+	fd = open_aks_device();
 	if (fd < 0) {
 		perror("open /dev/t2-aks");
 		return 1;

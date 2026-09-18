@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Privacy and schema checks for performance-event journal relaying."""
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src/t2_performance.py"
@@ -16,6 +17,23 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PerformanceRelayTests(unittest.TestCase):
+    def test_transport_profile_is_opt_in_and_preserves_failure(self):
+        output = io.StringIO()
+        with patch.dict(MODULE.os.environ, {}, clear=True), redirect_stderr(output):
+            with MODULE.transport_phase("aks", "op_21"):
+                pass
+        self.assertEqual(output.getvalue(), "")
+        failure = RuntimeError("sensitive diagnostic must not be logged")
+        with patch.dict(MODULE.os.environ, {"T2_TOUCHID_PROFILE_IO": "1"}), redirect_stderr(output):
+            with self.assertRaises(RuntimeError) as raised:
+                with MODULE.transport_phase("acm", "op_01"):
+                    raise failure
+        self.assertIs(raised.exception, failure)
+        event = json.loads(output.getvalue().removeprefix("T2_PERF_EVENT "))
+        self.assertEqual(set(event), MODULE._FIELDS)
+        self.assertEqual((event["operation"], event["phase"], event["outcome"]), ("acm", "op_01", "error"))
+        self.assertNotIn("sensitive", output.getvalue())
+
     def test_exact_event_is_relayed_canonically(self):
         event = {
             "schema_version": 1,

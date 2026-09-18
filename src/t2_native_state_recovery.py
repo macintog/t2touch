@@ -147,6 +147,20 @@ EMPTY_REPROVISION_MILESTONES = (
     "EMPTY_REPROVISION_BIOLOCKOUT_RECONCILED",
     "EMPTY_REPROVISION_COMPLETE",
 )
+# Current recovery loads the canonical master directly after the cold proof.
+# Older journals first tried the derived master and crossed a second cold
+# boundary. Both exact histories can reach the same proven user rejection;
+# keep their prefixes distinct and share only the empty-reprovision suffix.
+DIRECT_EMPTY_REPROVISION_MILESTONES = (
+    *CANONICAL_DIRECT_MASTER_REPLY_RESCUE_MILESTONES[
+        :CANONICAL_DIRECT_MASTER_REPLY_RESCUE_MILESTONES.index(
+            "CANONICAL_USER_LOAD_ACCEPTED"
+        )
+    ],
+    *EMPTY_REPROVISION_MILESTONES[
+        EMPTY_REPROVISION_MILESTONES.index("CANONICAL_USER_LOAD_REPLY_REJECTED"):
+    ],
+)
 FAILURE_MILESTONES = frozenset(
     {
         "PREPARE_MASTER_OUTCOME_UNKNOWN",
@@ -207,6 +221,14 @@ BASELINE_KEYS = frozenset(
 
 class NativeStateRecoveryError(RuntimeError):
     """Raised when retained-master recovery is unsafe or incomplete."""
+
+
+class NativeStateCommandRejected(NativeStateRecoveryError):
+    """A well-formed command reply contains an explicit nonzero status."""
+
+    def __init__(self, label: str, status: int):
+        super().__init__(f"{label} was rejected")
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -398,6 +420,13 @@ def _require_step_evidence(milestone: str, evidence: object) -> None:
             raise NativeStateRecoveryError(
                 "native-state recovery failure evidence is invalid"
             )
+        if "reply_status" in evidence and (
+            not milestone.endswith("_REPLY_REJECTED")
+            or type(evidence["reply_status"]) is not int
+            or not 0 < evidence["reply_status"] <= 0xFFFFFFFF
+            or evidence.get("reply_received") is not True
+        ):
+            raise NativeStateRecoveryError("native-state recovery reply status is invalid")
         return
     keys = expected_keys.get(milestone)
     if keys is None or set(evidence) != keys:
@@ -723,6 +752,7 @@ def validate_history(records: list[dict[str, object]]) -> NativeStateRecoveryHis
         CANONICAL_REDIRECT_MASTER_REPLY_RESCUE_MILESTONES,
         CANONICAL_REJECTION_MASTER_REPLY_RESCUE_MILESTONES,
         EMPTY_REPROVISION_MILESTONES,
+        DIRECT_EMPTY_REPROVISION_MILESTONES,
     )
     exact_prefix = any(
         milestones == list(sequence[: len(milestones)])
@@ -832,19 +862,14 @@ def canonical_restart_is_resumable(records: list[dict[str, object]]) -> bool:
 def canonical_master_reply_is_resumable(
     records: list[dict[str, object]],
 ) -> bool:
-    """Identify only a nonzero canonical load reply awaiting readback."""
-    history = validate_history(records)
-    milestones = [
-        record.get("milestone")
-        for record in records
-        if not t2_mutation_journal.is_repair_milestone(record.get("milestone"))
-    ]
-    return (
-        history.milestone == "CANONICAL_MASTER_LOAD_REPLY_REJECTED"
-        and "COLD_SURFACE_RECONCILED" in milestones
-        and "CANONICAL_MASTER_LOAD_INTENT" in milestones
-        and "CANONICAL_MASTER_LOAD_ACCEPTED" not in milestones
-    )
+    """Retain the legacy API without admitting rejected master loads.
+
+    Firmware can return corrupt-Catacomb status 0x8002 and still expose an
+    empty master in state 3. That surface does not prove the archive loaded.
+    Keep old histories readable, but never advance from this failed command.
+    """
+    validate_history(records)
+    return False
 
 
 def empty_reprovision_is_resumable(
@@ -857,10 +882,22 @@ def empty_reprovision_is_resumable(
         for record in records
         if not t2_mutation_journal.is_repair_milestone(record.get("milestone"))
     ]
+    rejection = next(record for record in reversed(records)
+                     if not t2_mutation_journal.is_repair_milestone(record.get("milestone")))
     return (
         history.milestone == "CANONICAL_USER_LOAD_REPLY_REJECTED"
-        and milestones
-        == list(EMPTY_REPROVISION_MILESTONES[: len(milestones)])
+        # Older writers conflated malformed replies/events with rejection.
+        # Preserve their journals, but do not infer loss authorization from
+        # evidence that cannot establish an explicit firmware rejection.
+        and type(rejection["evidence"].get("reply_status")) is int
+        and 0 < rejection["evidence"]["reply_status"] <= 0xFFFFFFFF
+        and any(
+            milestones == list(sequence[: len(milestones)])
+            for sequence in (
+                EMPTY_REPROVISION_MILESTONES,
+                DIRECT_EMPTY_REPROVISION_MILESTONES,
+            )
+        )
     )
 
 
@@ -994,14 +1031,34 @@ def _reply_output(reply: object, events: object, label: str, apple_user_id: int)
         t2_bridge_inventory.require_preparation_service_events(events, apple_user_id)
     except t2_bridge_inventory.BridgeInventoryError as error:
         raise NativeStateRecoveryError(f"{label} emitted an unexpected event") from error
-    if type(reply) is not list or len(reply) not in (1, 2) or reply[0] != 0:
-        raise NativeStateRecoveryError(f"{label} was rejected")
+    if (
+        type(reply) is not list or len(reply) not in (1, 2)
+        or type(reply[0]) is not int or not 0 <= reply[0] <= 0xFFFFFFFF
+    ):
+        raise NativeStateRecoveryError(f"{label} returned malformed status")
     output = b"" if len(reply) == 1 else reply[1]
     if wire.is_biometric_nil_output(output):
         output = b""
     if type(output) is not bytes or output:
         raise NativeStateRecoveryError(f"{label} returned malformed output")
+    if reply[0] != 0:
+        raise NativeStateCommandRejected(label, reply[0])
     return output
+
+
+def _record_reply_failure(
+    path: Path, operation_id: str, command: str, error: NativeStateRecoveryError
+) -> None:
+    if isinstance(error, NativeStateCommandRejected):
+        _append(path, operation_id, f"{command}_REPLY_REJECTED", {
+            "reply_received": True, "retry_permitted": False,
+            "reply_status": error.status,
+        })
+    else:
+        _append(path, operation_id, f"{command}_OUTCOME_UNKNOWN", {
+            "dispatch_attempted": True, "reply_received": True,
+            "retry_permitted": False,
+        })
 
 
 def prepare_missing_components(
@@ -1057,13 +1114,9 @@ def prepare_missing_components(
             ) from error
         try:
             _reply_output(reply, events, f"{name} preparation", apple_user_id)
-        except NativeStateRecoveryError:
-            _append(
-                journal_path,
-                history.operation_id,
-                f"{intent.removesuffix('_INTENT')}_REPLY_REJECTED",
-                {"reply_received": True, "retry_permitted": False},
-            )
+        except NativeStateRecoveryError as error:
+            _record_reply_failure(journal_path, history.operation_id,
+                                  intent.removesuffix('_INTENT'), error)
             raise
         history = _append(
             journal_path,
@@ -1264,13 +1317,9 @@ def remove_loaded_empty_user(
         ) from error
     try:
         _reply_output(reply, events, "empty-user removal", apple_user_id)
-    except NativeStateRecoveryError:
-        _append(
-            journal_path,
-            history.operation_id,
-            "REMOVE_EMPTY_USER_REPLY_REJECTED",
-            {"reply_received": True, "retry_permitted": False},
-        )
+    except NativeStateRecoveryError as error:
+        _record_reply_failure(journal_path, history.operation_id,
+                              "REMOVE_EMPTY_USER", error)
         raise
     history = _append(
         journal_path,
@@ -1652,13 +1701,9 @@ def reprepare_missing_components(
             ) from error
         try:
             _reply_output(reply, events, f"{name} repreparation", apple_user_id)
-        except NativeStateRecoveryError:
-            _append(
-                journal_path,
-                history.operation_id,
-                f"{intent.removesuffix('_INTENT')}_REPLY_REJECTED",
-                {"reply_received": True, "retry_permitted": False},
-            )
+        except NativeStateRecoveryError as error:
+            _record_reply_failure(journal_path, history.operation_id,
+                                  intent.removesuffix('_INTENT'), error)
             raise
         history = _append(
             journal_path,
@@ -2126,13 +2171,9 @@ def load_canonical_master(
         ) from error
     try:
         _reply_output(reply, events, "canonical master load", apple_user_id)
-    except NativeStateRecoveryError:
-        _append(
-            journal_path,
-            history.operation_id,
-            "CANONICAL_MASTER_LOAD_REPLY_REJECTED",
-            {"reply_received": True, "retry_permitted": False},
-        )
+    except NativeStateRecoveryError as error:
+        _record_reply_failure(journal_path, history.operation_id,
+                              "CANONICAL_MASTER_LOAD", error)
         raise
     return _append(
         journal_path,
@@ -2200,37 +2241,11 @@ def reconcile_canonical_master_reply(
     apple_user_id: int,
     journal_path: Path,
 ) -> NativeStateRecoveryHistory:
-    """Accept only the observed state transition after a nonzero load reply."""
-    records = t2_mutation_journal.read(journal_path)
-    history = validate_history(records)
-    if not canonical_master_reply_is_resumable(records):
-        raise NativeStateRecoveryError(
-            "canonical master reply is not at its readback boundary"
-        )
-    surface = t2_compatibility_user_rebind.read_stable_surface(
-        lease, apple_user_id
-    )
-    if surface != {
-        "per_user_identity_count": 0,
-        "global_identity_count": 0,
-        "user_states": (("master", 0xFFFFFFFF, 3),),
-        "group_state_count": 0,
-    }:
-        raise NativeStateRecoveryError(
-            "nonzero canonical master reply did not produce the exact loaded surface"
-        )
-    return _append(
-        journal_path,
-        history.operation_id,
-        "CANONICAL_MASTER_REPLY_RECONCILED",
-        {
-            "master_state": 3,
-            "user_state": None,
-            "identity_count": 0,
-            "group_state_count": 0,
-            "nonzero_reply": True,
-            "load_replayed": False,
-        },
+    """Refuse the legacy readback override of a rejected master load."""
+    validate_history(t2_mutation_journal.read(journal_path))
+    raise NativeStateRecoveryError(
+        "canonical master load was rejected; an empty state-3 master does not "
+        "prove the saved archive loaded; preserving state for diagnosis"
     )
 
 
@@ -2243,10 +2258,7 @@ def load_canonical_user(
 ) -> NativeStateRecoveryHistory:
     """Load the saved user once after its matching canonical master."""
     history = validate_history(t2_mutation_journal.read(journal_path))
-    if history.milestone not in {
-        "CANONICAL_MASTER_RECONCILED",
-        "CANONICAL_MASTER_REPLY_RECONCILED",
-    }:
+    if history.milestone != "CANONICAL_MASTER_RECONCILED":
         raise NativeStateRecoveryError(
             "canonical user load is not at its master boundary"
         )
@@ -2305,13 +2317,9 @@ def load_canonical_user(
         ) from error
     try:
         _reply_output(reply, events, "canonical user load", apple_user_id)
-    except NativeStateRecoveryError:
-        _append(
-            journal_path,
-            history.operation_id,
-            "CANONICAL_USER_LOAD_REPLY_REJECTED",
-            {"reply_received": True, "retry_permitted": False},
-        )
+    except NativeStateRecoveryError as error:
+        _record_reply_failure(journal_path, history.operation_id,
+                              "CANONICAL_USER_LOAD", error)
         raise
     return _append(
         journal_path,
@@ -2382,13 +2390,9 @@ def load_retained_master(
         ) from error
     try:
         _reply_output(reply, events, "retained-master load", apple_user_id)
-    except NativeStateRecoveryError:
-        _append(
-            journal_path,
-            history.operation_id,
-            "RETAINED_MASTER_LOAD_REPLY_REJECTED",
-            {"reply_received": True, "retry_permitted": False},
-        )
+    except NativeStateRecoveryError as error:
+        _record_reply_failure(journal_path, history.operation_id,
+                              "RETAINED_MASTER_LOAD", error)
         raise
     history = _append(
         journal_path,
@@ -2509,13 +2513,9 @@ def restore_saved_user(
         ) from error
     try:
         _reply_output(reply, events, "saved-user load", apple_user_id)
-    except NativeStateRecoveryError:
-        _append(
-            journal_path,
-            history.operation_id,
-            "SAVED_USER_LOAD_REPLY_REJECTED",
-            {"reply_received": True, "retry_permitted": False},
-        )
+    except NativeStateRecoveryError as error:
+        _record_reply_failure(journal_path, history.operation_id,
+                              "SAVED_USER_LOAD", error)
         raise
     history = _append(
         journal_path,
@@ -2634,13 +2634,9 @@ def prepare_empty_reprovision(
             _reply_output(
                 reply, events, f"empty reprovision {name}", apple_user_id
             )
-        except NativeStateRecoveryError:
-            _append(
-                journal_path,
-                history.operation_id,
-                f"{intent.removesuffix('_INTENT')}_REPLY_REJECTED",
-                {"reply_received": True, "retry_permitted": False},
-            )
+        except NativeStateRecoveryError as error:
+            _record_reply_failure(journal_path, history.operation_id,
+                                  intent.removesuffix('_INTENT'), error)
             raise
         history = _append(
             journal_path,

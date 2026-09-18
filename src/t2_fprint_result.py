@@ -54,13 +54,13 @@ def verdict_from_probe_result(
         raise RuntimeError("the T2 rejected match startup")
     verdict = None
     image_quality_rejected = False
+    terminal_event = None
+    repeated_terminal = False
     for event in events:
         if not isinstance(event, dict):
             raise RuntimeError("malformed T2 match event")
         if event.get("event_kind") != "match_result":
             continue
-        if verdict is not None:
-            raise RuntimeError("the T2 returned multiple terminal match results")
         if event.get("result_valid") is not True:
             raise RuntimeError("the T2 returned an invalid or unknown match result")
         if (
@@ -73,15 +73,53 @@ def verdict_from_probe_result(
                 or event.get("matches_selected_identity") is True
             )
         ):
-            verdict = "verify-match"
-            continue
-        if event.get("no_match") is True and event.get("matched") is False:
+            candidate = "verify-match"
+        elif event.get("no_match") is True and event.get("matched") is False:
             if event.get("no_match_image_quality") is True:
+                if verdict is not None:
+                    raise RuntimeError("the T2 returned a retry after a terminal result")
                 image_quality_rejected = True
                 continue
-            verdict = "verify-no-match"
-            continue
-        raise RuntimeError("the T2 returned an unclassifiable match result")
+            candidate = "verify-no-match"
+        else:
+            raise RuntimeError("the T2 returned an unclassifiable match result")
+        if verdict is not None:
+            same_identity = (
+                target_finger is not None
+                or (
+                    terminal_event.get("matched_finger_name_present") is True
+                    and event.get("matched_finger_name_present") is True
+                    and _is_finger_name(event.get("matched_finger_name"))
+                    and event["matched_finger_name"] == terminal_event.get("matched_finger_name")
+                )
+            )
+            if (
+                candidate != verdict
+                or terminal_event.get("host_accepted_result") is not True
+                or event.get("host_accepted_result") is not True
+                or (candidate == "verify-match" and not same_identity)
+                or (candidate == "verify-no-match" and (
+                    terminal_event.get("no_match_matcher") is not True
+                    or event.get("no_match_matcher") is not True
+                ))
+            ):
+                raise RuntimeError("the T2 returned conflicting or unbound terminal results")
+            repeated_terminal = True
+        else:
+            verdict, terminal_event = candidate, event
+    if repeated_terminal:
+        accepted = sum(event.get("event_kind") == "match_result"
+                       and event.get("host_accepted_result") is True for event in events)
+        generations = result.get("post_match_biolockout_generations")
+        if (
+            type(generations) is not list or len(generations) != accepted
+            or any(type(generation) is not dict
+                   or generation.get("linux_store_committed") is not True
+                   or type(generation.get("match_result_generation")) is not int
+                   or generation["match_result_generation"] != index
+                   for index, generation in enumerate(generations, 1))
+        ):
+            raise RuntimeError("repeated T2 match results lack durable lockout state")
     if verdict is not None:
         return verdict
     if image_quality_rejected:
@@ -167,6 +205,41 @@ def compact_worker_result(
     }
 
 
+def validate_cancelled_probe_result(result: object, target_finger: str | None,
+                                    resolve_any_finger: bool) -> None:
+    """Prove reusable cleanup without turning cancellation into a verdict."""
+    if type(result) is not dict or any(result.get(key) is not True for key in (
+        "termination_requested", "configured_identity_records_reconciled",
+        "bridge_os_transaction_released_after_match", "match_cleanup_valid",
+        "post_cancel_callback_quiescent",
+    )):
+        raise RuntimeError("cancelled match cleanup is incomplete")
+    if target_finger is not None or resolve_any_finger:
+        key = ("targeted_match_post_attestation" if target_finger is not None
+               else "resolved_any_match_post_attestation")
+        post = result.get(key)
+        if type(post) is not dict or any(post.get(field) is not True for field in (
+            "identity_state_unchanged", "local_components_unchanged",
+            "per_user_inventory_unchanged", "global_inventory_unchanged",
+            "identifiers_redacted",
+        )):
+            raise RuntimeError("cancelled match identity attestation is incomplete")
+    events = result.get("match_events")
+    if type(events) is not list or any(type(event) is not dict for event in events):
+        raise RuntimeError("cancelled match events are invalid")
+    accepted = 0
+    for event in events:
+        if event.get("event_kind") == "match_result":
+            if event.get("result_valid") is not True:
+                raise RuntimeError("cancelled match contains an invalid result")
+            accepted += event.get("host_accepted_result") is True
+    generations = result.get("post_match_biolockout_generations", [])
+    if (type(generations) is not list or len(generations) != accepted
+            or any(type(g) is not dict or g.get("linux_store_committed") is not True
+                   for g in generations)):
+        raise RuntimeError("cancelled match has unpersisted lockout state")
+
+
 def validate_worker_terminal_result(
     result: object,
     target_finger: str | None,
@@ -177,6 +250,7 @@ def validate_worker_terminal_result(
     if (
         type(result) is not dict
         or set(result) != WORKER_TERMINAL_FIELDS
+        or type(result.get("schema_version")) is not int
         or result.get("schema_version") != WORKER_TERMINAL_SCHEMA
         or result.get("verdict") not in {"verify-match", "verify-no-match"}
     ):

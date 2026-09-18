@@ -497,10 +497,7 @@ install -o root -g root -m 0644 \
   "$source_dir/systemd/system/t2-touchid-adaptive-sync.service" \
   "$source_dir/systemd/system/t2-touchid-post-reboot.service" \
   /etc/systemd/system/
-install -d -o root -g root -m 0755 /etc/systemd/sleep.conf.d
-install -o root -g root -m 0644 \
-  "$source_dir/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf" \
-  /etc/systemd/sleep.conf.d/90-t2-touchid-s2idle.conf
+python3 "$source_dir/tools/retire-sleep-policy.py"
 install -d -o root -g root -m 0755 /usr/lib/tmpfiles.d
 install -o root -g root -m 0644 \
   "$source_dir/systemd/tmpfiles.d/t2-touchid.conf" \

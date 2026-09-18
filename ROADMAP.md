@@ -28,7 +28,7 @@ transport requires a planned kernel restart before installation can proceed.
 - A guided importer for machines retaining macOS Touch ID state.
 - Persistence of Linux-only additions across a later macOS boot.
 - Multiple Linux desktop users.
-- Graphical settings integration and deep-sleep recovery.
+- Graphical settings integration and qualified suspend/resume recovery.
 - Kernel-upgrade coverage through DKMS CI and real hardware.
 - Faster, more consistent permission-dialog response; the latest successful test still needed multiple touches.
 - Qualification across display topologies and future Omarchy QML versions.

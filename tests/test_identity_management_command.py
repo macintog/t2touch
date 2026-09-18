@@ -95,6 +95,39 @@ class IdentityManagementCommandTests(unittest.TestCase):
         self.assertFalse(result["external_deletion_reconciled"])
         self.assertFalse(result["local_catacomb_mutated"])
 
+    def test_automatic_external_check_does_not_save_another_installations_inventory(self):
+        configuration = {"authority_mode": "linux-native", "apple_uid": 501,
+                         "mapping_generation": "a" * 64}
+        store = mock.Mock()
+        store.read_committed_components.return_value = {}
+        lease = mock.Mock()
+        live = {"per_user_identity_records": [object()]}
+        context = mock.MagicMock()
+        context.__enter__.return_value = (None, store, {}, object(), lease, live)
+        with (
+            mock.patch.object(MODULE.t2_external_inventory_sync, "abort_undispatched"),
+            mock.patch.object(MODULE, "require_mapping_capability"),
+            mock.patch.object(MODULE.t2_mutation_registry, "blocks_new_mutation", return_value=False),
+            mock.patch.object(MODULE.os.path, "lexists", return_value=False),
+            mock.patch.object(MODULE, "_private_root_owned"),
+            mock.patch.object(MODULE, "_native_management_lease", return_value=context),
+            mock.patch.object(MODULE.t2_native_state_recovery, "is_retained_master_inventory", return_value=False),
+            mock.patch.object(MODULE.t2_native_state_restore, "is_cold_unloaded_inventory", return_value=False),
+            mock.patch.object(MODULE.t2_identity_inventory, "summarize",
+                              side_effect=MODULE.t2_identity_inventory.IdentityInventoryError("mismatch")),
+            mock.patch.object(MODULE.t2_external_inventory_sync, "reconcile") as save,
+            mock.patch.object(MODULE.t2_native_state_restore, "restore_for_enrollment") as restore,
+            mock.patch.object(MODULE.t2_external_delete_reconcile, "plan") as prune,
+        ):
+            with self.assertRaisesRegex(MODULE.IdentityManagementError,
+                                        "live identities differ from this installation"):
+                MODULE.run_external_delete_reconciliation(configuration, if_needed=True)
+        save.assert_not_called()
+        restore.assert_not_called()
+        prune.assert_not_called()
+        lease.biometric_command.assert_not_called()
+        store.stage.assert_not_called()
+
     def test_automatic_external_check_never_mutates_retained_master(self):
         configuration = {
             "authority_mode": "linux-native",
@@ -277,6 +310,42 @@ class IdentityManagementCommandTests(unittest.TestCase):
         )
         self.assertTrue(result["new_mutation_blocked"])
 
+    def test_status_exposes_pending_native_recovery_and_excludes_completed(self):
+        entries = tuple(
+            SimpleNamespace(
+                kind="native-state-restore", phase=phase,
+                blocks_new_mutation=pending, post_reboot_pending=False,
+            )
+            for phase, pending in (
+                ("missing-components-post-state-rejected", True),
+                ("empty-reprovision-complete", False),
+            )
+        )
+        with mock.patch.object(MODULE.t2_mutation_registry, "scan", return_value=entries):
+            result = MODULE.status()
+        self.assertEqual(result["native_state_recovery_pending_count"], 1)
+        self.assertEqual(result["native_state_recovery_pending_phases"], {
+            "missing-components-post-state-rejected": 1,
+        })
+        self.assertTrue(result["new_mutation_blocked"])
+        self.assertTrue(result["identifiers_redacted"])
+
+    def test_status_does_not_offer_recovery_with_another_unlisted_blocker(self):
+        for kind, candidate in (("rename", "rename_recovery_candidate"),
+                                ("delete-one", "delete_recovery_candidate")):
+            for blocker in ("native-state-restore", "enroll", "reconcile-external-inventory"):
+                with self.subTest(kind=kind, blocker=blocker):
+                    entries = tuple(
+                        SimpleNamespace(
+                            kind=item, phase="outcome-unknown",
+                            blocks_new_mutation=True, post_reboot_pending=False,
+                        )
+                        for item in (kind, blocker)
+                    )
+                    with mock.patch.object(MODULE.t2_mutation_registry, "scan", return_value=entries):
+                        result = MODULE.status()
+                    self.assertFalse(result[candidate])
+
     def test_current_host_uses_immutable_backup_only_as_metadata_anchor(self):
         with tempfile.TemporaryDirectory() as directory:
             backup = Path(directory) / ("a" * 64 + ".tar.gz")
@@ -422,13 +491,19 @@ class IdentityManagementCommandTests(unittest.TestCase):
                 MODULE.t2_native_state_recovery,
                 "empty_reprovision_is_resumable",
                 return_value=True,
-            ),
+            ) as resumable,
             mock.patch.object(MODULE, "_native_management_lease") as lease,
         ):
             with self.assertRaisesRegex(
                 MODULE.IdentityManagementError, "preserving it"
             ):
                 MODULE.run_native_state_recovery(configuration)
+            # A loss flag cannot turn unclassified legacy evidence into an
+            # explicit rejection or authorize a reset from an ambiguous reply.
+            resumable.return_value = False
+            with self.assertRaisesRegex(MODULE.IdentityManagementError,
+                                        "lacks a validated firmware rejection status"):
+                MODULE.run_native_state_recovery(configuration, allow_fingerprint_loss=True)
         lease.assert_not_called()
 
     def test_native_state_recovery_requires_specific_loss_acknowledgement(self):
@@ -492,6 +567,64 @@ class IdentityManagementCommandTests(unittest.TestCase):
                     configuration, allow_fingerprint_loss=True
                 )
         lease.assert_called_once()
+
+    def test_component_recreation_requires_loss_acknowledgement_before_lease(self):
+        configuration = {"authority_mode": "linux-native"}
+        journal = Path('/var/lib/t2-touchid/mutations/recovery.jsonl')
+        phases = (
+            None, 'BASELINE_RECONCILED', 'PREPARE_MASTER_ACCEPTED',
+            'MISSING_COMPONENTS_POST_STATE_REJECTED', 'LOADED_EMPTY_USER_RECONCILED',
+            'REMOVE_EMPTY_USER_ACCEPTED', 'REMOVED_USER_RECONCILED',
+            'MASTER_EXPORT_CONFIRMED', 'MASTER_SETTLED', 'REPREPARE_MASTER_ACCEPTED',
+            'EMPTY_REPROVISION_SURFACE_RECONCILED', 'EMPTY_REPROVISION_MASTER_ACCEPTED',
+            'EMPTY_REPROVISION_USER_ACCEPTED', 'EMPTY_REPROVISION_CLIENT_SELECTED',
+            'COLD_RESTART_PREPARED', 'SAVED_USER_RECONCILED',
+            'CANONICAL_MASTER_LOAD_REPLY_REJECTED', 'CANONICAL_MASTER_REPLY_RECONCILED',
+        )
+        for phase in phases:
+            for acknowledged in (False, True):
+                with self.subTest(phase=phase, acknowledged=acknowledged):
+                    history = SimpleNamespace(operation_id=str(uuid.UUID(int=82)),
+                                              complete=False, blocked=False, milestone=phase)
+                    context = mock.MagicMock()
+                    context.__enter__.side_effect = RuntimeError('entered recovery lease')
+                    with (
+                        mock.patch.object(MODULE, 'require_mapping_capability'),
+                        mock.patch.object(MODULE.os.path, 'lexists', side_effect=lambda path:
+                                          path == MODULE.STATE_ROOT / 'native-recovery-hold'),
+                        mock.patch.object(MODULE, '_private_root_owned'),
+                        mock.patch.object(MODULE.t2_mutation_registry,
+                                          'blocks_new_mutation', return_value=False),
+                        mock.patch.object(MODULE.t2_native_state_recovery, 'find_journal',
+                                          return_value=journal if phase else None),
+                        mock.patch.object(MODULE.t2_mutation_journal, 'read', return_value=[]),
+                        mock.patch.multiple(MODULE.t2_native_state_recovery,
+                            validate_history=mock.Mock(return_value=history),
+                            canonical_restart_is_resumable=mock.Mock(return_value=False),
+                            canonical_master_reply_is_resumable=mock.Mock(return_value=False),
+                            empty_reprovision_is_resumable=mock.Mock(return_value=False)),
+                        mock.patch.object(MODULE, '_native_management_lease',
+                                          return_value=context) as lease,
+                        mock.patch.object(MODULE.t2_native_state_recovery,
+                                          'create_journal') as create,
+                    ):
+                        rejected_master = phase in {
+                            'CANONICAL_MASTER_LOAD_REPLY_REJECTED',
+                            'CANONICAL_MASTER_REPLY_RECONCILED',
+                        }
+                        enters = not rejected_master and (acknowledged or phase in {
+                            'COLD_RESTART_PREPARED', 'SAVED_USER_RECONCILED',
+                        })
+                        message = ('does not prove the saved archive loaded' if rejected_master
+                                   else 'entered recovery lease' if enters else 'before dispatch')
+                        with self.assertRaisesRegex(RuntimeError, message):
+                            MODULE.run_native_state_recovery(
+                                configuration, allow_fingerprint_loss=acknowledged)
+                        if enters:
+                            lease.assert_called_once()
+                        else:
+                            lease.assert_not_called()
+                        create.assert_not_called()
 
     def test_activation_journal_path_uses_preferred_name_when_absent(self):
         operation_id = str(uuid.UUID(int=70))

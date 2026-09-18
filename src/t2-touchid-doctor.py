@@ -260,10 +260,6 @@ def sleep_mode_check() -> Check:
     ]
     if len(selected) != 1:
         return Check("warn", "suspend-mode", "kernel sleep mode is ambiguous")
-    if selected[0] == "s2idle":
-        return Check(
-            "pass", "suspend-mode", "s2idle selected; T2 resume path preserved"
-        )
     effective = run("systemd-analyze", "cat-config", "systemd/sleep.conf")
     section = ""
     configured = ""
@@ -272,18 +268,20 @@ def sleep_mode_check() -> Check:
             line = raw_line.strip()
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1]
-            elif section == "Sleep" and line.startswith("MemorySleepMode="):
-                configured = line.split("=", 1)[1].strip()
-    if configured == "s2idle":
-        return Check(
-            "pass",
-            "suspend-mode",
-            f"{selected[0]} is the kernel default; systemd selects s2idle before suspend",
-        )
+            elif section == "Sleep" and "=" in line:
+                key, value = line.split("=", 1)
+                if key.strip() == "MemorySleepMode":
+                    configured = value.strip()
+    policy = (
+        f"systemd MemorySleepMode={configured}"
+        if configured else "systemd has no MemorySleepMode override"
+    ) if effective.returncode == 0 else "systemd sleep policy unavailable"
     return Check(
         "warn",
         "suspend-mode",
-        f"{selected[0]} selected; use s2idle to preserve T2 communication",
+        f"kernel currently selects {selected[0]}; {policy}; "
+        "suspend/resume unqualified: s2idle has failed to wake MacBookPro16,1; "
+        "deep has left T2 transport unusable",
     )
 
 

@@ -13,6 +13,9 @@ fingerprint management.
 | [fprintd integration](FPRINT_INTEGRATION.md) | D-Bus clients, caller authorization, enrollment, matching, and deletion. |
 | [Administration](ADMINISTRATION.md) | Product command scope and the macOS `bioutil` comparison. |
 | [Compatibility](COMPATIBILITY.md) | Hardware and protocol portability, tested scope, and evidence for new models. |
+| [Prepared-identity measurements](evaluations/touchid-prepared-identity-2026-09-17.md) | Current reader-readiness gains, repeated-touch correctness, hardware controls, and validation limits. |
+| [Worker-overlap measurements](evaluations/touchid-responsiveness-worker-overlap-2026-09-17.md) | Measured retry-readiness improvement, memory cost, and remaining authorization latency. |
+| [Sleep policy](SLEEP_POLICY.md) | Retiring the legacy sleep override, ownership, and suspend qualification limits. |
 | [Terminal clients](TUI_CONTROL.md) | Contributor tools for exercising the installed service and native backends. |
 | [T1Bridge reference](T1BRIDGE_REFERENCE.md) | Relevant external designs and the differences that matter on T2. |
 | [Protocol research](research/README.md) | SEP, AKS/ACM, storage, and fingerprint lifecycle. |

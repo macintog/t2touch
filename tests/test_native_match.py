@@ -30,6 +30,32 @@ import t2_mutation_registry as MUTATION_REGISTRY
 
 
 class NativeMatchSafetyTests(unittest.TestCase):
+    def test_cancelled_cleanup_is_not_an_authentication_verdict(self):
+        post = {key: True for key in (
+            "identity_state_unchanged", "local_components_unchanged",
+            "per_user_inventory_unchanged", "global_inventory_unchanged",
+            "identifiers_redacted",
+        )}
+        result = {key: True for key in (
+            "termination_requested", "configured_identity_records_reconciled",
+            "bridge_os_transaction_released_after_match", "match_cleanup_valid",
+            "post_cancel_callback_quiescent",
+        )}
+        result.update(match_events=[], resolved_any_match_post_attestation=post)
+        NATIVE_MATCH.t2_fprint_result.validate_cancelled_probe_result(result, None, True)
+        with self.assertRaises(RuntimeError):
+            NATIVE_MATCH.t2_fprint_result.compact_worker_result(result, None, True)
+        for key in ("match_cleanup_valid", "post_cancel_callback_quiescent"):
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                NATIVE_MATCH.t2_fprint_result.validate_cancelled_probe_result(
+                    {**result, key: False}, None, True
+                )
+        with self.assertRaises(RuntimeError):
+            NATIVE_MATCH.t2_fprint_result.validate_cancelled_probe_result(
+                {**result, "match_events": [{"event_kind": "match_result",
+                    "result_valid": True, "host_accepted_result": True}]}, None, True
+            )
+
     def test_resident_response_compacts_unbounded_probe_history(self):
         result = {
             "configured_identity_records_reconciled": True,

@@ -10,6 +10,7 @@ import json
 import os
 import pwd
 import statistics
+import sys
 import time
 
 from dbus_next import BusType, Message, MessageType
@@ -45,9 +46,12 @@ async def run(
     idle_seconds: float,
     *,
     list_first: bool,
+    wait_for_result: bool = False,
 ) -> dict:
     bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
     ready_event: asyncio.Event | None = None
+    result_event: asyncio.Event | None = None
+    observations: dict = {}
 
     def signal_handler(message):
         nonlocal ready_event
@@ -62,7 +66,23 @@ async def run(
         ):
             value = message.body[1].get("finger-needed")
             if value is not None and value.value is True and ready_event is not None:
+                observations.setdefault("armed", time.monotonic())
                 ready_event.set()
+            present = message.body[1].get("finger-present")
+            if present is not None and present.value is True and ready_event is not None:
+                observations.setdefault("finger_present", time.monotonic())
+        if (
+            message.message_type == MessageType.SIGNAL
+            and message.path == DEVICE_PATH
+            and message.interface == DEVICE_INTERFACE
+            and message.member == "VerifyStatus"
+            and len(message.body) == 2
+            and message.body[1] is True
+            and result_event is not None
+        ):
+            observations["public_status"] = time.monotonic()
+            observations["verdict"] = message.body[0]
+            result_event.set()
         return False
 
     bus.add_message_handler(signal_handler)
@@ -75,8 +95,7 @@ async def run(
             signature="s",
             body=[
                 "type='signal',path='/net/reactivated/Fprint/Device/0',"
-                "interface='org.freedesktop.DBus.Properties',"
-                "member='PropertiesChanged'"
+                "sender='net.reactivated.Fprint'"
             ],
         )
     )
@@ -100,12 +119,25 @@ async def run(
         await call(bus, "Claim", "s", [username])
         claimed = time.monotonic()
         ready_event = asyncio.Event()
+        result_event = asyncio.Event()
+        observations = {}
         start_started = time.monotonic()
         await call(bus, "VerifyStart", "s", ["any"])
         start_returned = time.monotonic()
         try:
             await asyncio.wait_for(ready_event.wait(), ready_timeout)
-            armed = time.monotonic()
+            armed = observations["armed"]
+            if wait_for_result:
+                print(f"Attempt {index + 1}: reader ready; touch the sensor.", file=sys.stderr, flush=True)
+                await asyncio.wait_for(result_event.wait(), ready_timeout)
+                sample["verdict"] = observations["verdict"]
+                sample["armed_to_public_status_seconds"] = round(
+                    observations["public_status"] - armed, 6
+                )
+                if "finger_present" in observations:
+                    sample["host_touch_to_public_status_seconds"] = round(
+                        observations["public_status"] - observations["finger_present"], 6
+                    )
         finally:
             cleanup_started = time.monotonic()
             try:
@@ -114,6 +146,7 @@ async def run(
                 await call(bus, "Release")
             cleaned = time.monotonic()
             ready_event = None
+            result_event = None
         sample.update(
             {
                 "claim_seconds": round(claimed - listed, 6),
@@ -126,7 +159,7 @@ async def run(
             }
         )
         samples.append(sample)
-    fields = tuple(key for key in samples[0] if key != "run")
+    fields = tuple(key for key in samples[0] if key.endswith("_seconds"))
     return {
         "schema_version": 1,
         "iterations": iterations,
@@ -134,7 +167,7 @@ async def run(
         "sequence": "list-then-verify" if list_first else "direct-verify",
         "samples": samples,
         "medians": {
-            field: round(statistics.median(sample[field] for sample in samples), 6)
+            field: round(statistics.median(sample[field] for sample in samples if field in sample), 6)
             for field in fields
         },
     }
@@ -145,6 +178,8 @@ def main() -> int:
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--ready-timeout", type=float, default=15.0)
     parser.add_argument("--idle-seconds", type=float, default=0.0)
+    parser.add_argument("--wait-for-result", action="store_true",
+                        help="wait for a physical touch and terminal verdict before cleanup")
     parser.add_argument(
         "--direct-verify",
         action="store_true",
@@ -165,6 +200,7 @@ def main() -> int:
                     args.ready_timeout,
                     args.idle_seconds,
                     list_first=not args.direct_verify,
+                    wait_for_result=args.wait_for_result,
                 )
             ),
             indent=2,

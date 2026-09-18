@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 import t2_aks_state
+import t2_performance
 import t2_user_readiness
 
 
@@ -111,6 +112,13 @@ def _open_device(path: Path) -> int:
     try:
         return os.open(path, flags)
     except OSError as error:
+        if error.errno == errno.EBUSY and path == DEVICE:
+            import t2_preparation_lease
+            if t2_preparation_lease.release_idle_owner():
+                try:
+                    return os.open(path, flags)
+                except OSError as retry_error:
+                    raise AKSActivationTransportError("AKS device cannot be opened") from retry_error
         raise AKSActivationTransportError("AKS device cannot be opened") from error
 
 
@@ -196,6 +204,21 @@ class AKSActivationTransport:
     def __enter__(self) -> "AKSActivationTransport":
         return self
 
+    def require_current_generation(self, *, authorized_context: bool = False) -> None:
+        generation, flags, version, phase, absence = self._get_info()
+        owned_flags = T2_AKS_INFO_F_RUNTIME_HANDLE_ACTIVE
+        if authorized_context:
+            owned_flags |= T2_AKS_INFO_F_PASSWORD_BOUND | T2_AKS_INFO_F_IDENTITY_SECRET_SET
+        if (str(uuid.UUID(bytes=generation)) != self.runtime_generation
+                or self._live_handle is None or self._bound_alias is None
+                or not flags & T2_AKS_INFO_F_RUNTIME_HANDLE_ACTIVE
+                or flags & ~_KNOWN_INFO_FLAGS
+                or flags & _REQUIRED_INFO_FLAGS != _REQUIRED_INFO_FLAGS
+                or flags & (_UNSAFE_INFO_FLAGS & ~owned_flags)
+                or version != 2 or phase != 0
+                or absence != 0):
+            raise AKSActivationTransportError("prepared AKS generation is no longer valid")
+
     def __exit__(self, *_: object) -> None:
         self.close()
 
@@ -266,7 +289,8 @@ class AKSActivationTransport:
         )
         try:
             try:
-                _ioctl_mutate(self.fd, T2_AKS_IOC_EXCHANGE, exchange)
+                with t2_performance.transport_phase("aks", f"op_{operation:02x}"):
+                    _ioctl_mutate(self.fd, T2_AKS_IOC_EXCHANGE, exchange)
             except OSError as error:
                 returned = struct.unpack(EXCHANGE_FORMAT, exchange)
                 raise AKSActivationTransportError(

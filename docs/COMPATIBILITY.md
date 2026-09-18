@@ -50,6 +50,10 @@ a viable path without pretending its transport is T2 BCE.
 
 ## Display and desktop compatibility
 
+Suspend/resume remains unqualified on MacBookPro16,1. The original successful
+s2idle control was on MacBookPro16,2 and does not establish support on other
+models. See [sleep policy and migration](SLEEP_POLICY.md).
+
 GPU routing is independent of the SEP protocol tuple. T2 machines may expose
 an integrated GPU, a discrete GPU, or both, and either may own a connected
 panel. The installer must not impose the reference laptop's routing policy.

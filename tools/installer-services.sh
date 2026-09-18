@@ -25,10 +25,11 @@ start_touchid_stage() {
     echo "  sudo t2-touchid-user-map status --linux-uid $target_uid" >&2
     echo "Account rebinding is intentionally never automatic." >&2
   elif [[ $unit == t2-touchid-post-reboot.service ]]; then
-    echo "If the redacted reason is retained-master-recovery-required, run:" >&2
+    echo "For retained-master recovery, preserve state under the service hold:" >&2
     echo "  ./install-omarchy.sh --prepare-native-recovery" >&2
-    echo "  sudo t2-touchid-manage recover-native-state --acknowledge-retained-master-recovery" >&2
-    echo "  ./install-omarchy.sh" >&2
+    echo "  sudo t2-touchid-manage status" >&2
+    echo "Component recreation is not qualified to preserve fingerprints; see docs/RECOVERY_RELEASE_GATE.md." >&2
+    echo "Do not repeat normal setup or accept fingerprint loss merely to clear this gate." >&2
   fi
   return 1
 }
@@ -74,7 +75,17 @@ hold_native_recovery() {
 
 resume_native_recovery() {
   local state_root=${1:-/var/lib/t2-touchid}
+  local helper_dir
+  helper_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return
   # Only the normal installer calls this, after software and transport setup.
+  # Reinstalling userspace does not complete a journaled hardware recovery.
+  # In particular, releasing this hold after a warm reboot recreates the same
+  # pending-mutation failure and can disturb the cold surface recovery needs.
+  if ! python3 "$helper_dir/check-native-recovery-resume.py" \
+    --state-root "$state_root"; then
+    hold_native_recovery "$state_root" "${2:-/etc/systemd/system}" || return
+    return 1
+  fi
   rm -f -- "$state_root/native-recovery-hold"
 }
 
@@ -172,7 +183,6 @@ rollback_units_after_dkms_failure() {
 # before this run so leftover files are not treated as this install's.
 disable_and_remove_product_units() {
   local unit_root=${1:-/etc/systemd/system}
-  local sleep_dir=${2:-/etc/systemd/sleep.conf.d}
   systemctl disable --now fprintd.service t2-touchid-adaptive-sync.service \
     t2-touchid-post-reboot.service t2-biometric-ready.service \
     t2-native-first-run.service \
@@ -190,8 +200,7 @@ disable_and_remove_product_units() {
     "$unit_root"/t2-touchid-adaptive-sync.service.d/05-account-home.conf \
     "$unit_root"/fprintd.service.d/10-native-enrollment.conf \
     "$unit_root"/fprintd.service.d/20-native-identity-management.conf \
-    "$unit_root"/t2-native-first-run.service.d/10-authority.conf \
-    "$sleep_dir"/90-t2-touchid-s2idle.conf; do
+    "$unit_root"/t2-native-first-run.service.d/10-authority.conf; do
     path_existed_before_this_run "$file" && continue
     [[ ! -e $file ]] || rm -- "$file"
   done
@@ -200,6 +209,5 @@ disable_and_remove_product_units() {
   rmdir "$unit_root"/t2-touchid-adaptive-sync.service.d 2>/dev/null || true
   rmdir "$unit_root"/t2-biometric-ready.service.d 2>/dev/null || true
   rmdir "$unit_root"/t2-touchid-post-reboot.service.d 2>/dev/null || true
-  rmdir "$sleep_dir" 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
 }

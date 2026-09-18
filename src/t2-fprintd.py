@@ -122,71 +122,7 @@ def verdict_from_result(
         return t2_fprint_result.validate_worker_terminal_result(
             result, target_finger, False
         )[0]
-    if not isinstance(result, dict):
-        raise RuntimeError("malformed T2 probe result")
-    if target_finger is not None:
-        gate = result.get("targeted_match_gate")
-        post = result.get("targeted_match_post_attestation")
-        if (
-            target_finger == "any"
-            or not isinstance(gate, dict)
-            or gate.get("finger_name") != target_finger
-            or gate.get("single_identity_selected") is not True
-            or gate.get("same_connection_inventory_stable") is not True
-            or gate.get("local_live_reconciled") is not True
-            or gate.get("identifiers_redacted") is not True
-            or not isinstance(post, dict)
-            or post.get("identity_state_unchanged") is not True
-            or post.get("local_components_unchanged") is not True
-            or post.get("per_user_inventory_unchanged") is not True
-            or post.get("global_inventory_unchanged") is not True
-            or post.get("identifiers_redacted") is not True
-        ):
-            raise RuntimeError("named T2 match attestation is incomplete")
-    events = result.get("match_events", [])
-    if not isinstance(events, list):
-        raise RuntimeError("malformed T2 match event list")
-    if result.get("match_cleanup_valid") is not True:
-        raise RuntimeError("the T2 match did not close cleanly")
-    if result.get("match_rejected") is True:
-        raise RuntimeError("the T2 rejected match startup")
-    verdict = None
-    image_quality_rejected = False
-    for event in events:
-        if not isinstance(event, dict):
-            raise RuntimeError("malformed T2 match event")
-        if event.get("event_kind") != "match_result":
-            continue
-        if verdict is not None:
-            raise RuntimeError("the T2 returned multiple terminal match results")
-        if event.get("result_valid") is not True:
-            raise RuntimeError("the T2 returned an invalid or unknown match result")
-        if (
-            event.get("matched") is True
-            and event.get("no_match", False) is False
-            and event.get("no_match_image_quality", False) is False
-            and event.get("matches_enrolled_identity") is True
-            and (
-                target_finger is None
-                or event.get("matches_selected_identity") is True
-            )
-        ):
-            verdict = "verify-match"
-            continue
-        if event.get("no_match") is True and event.get("matched") is False:
-            if event.get("no_match_image_quality") is True:
-                image_quality_rejected = True
-                continue
-            verdict = "verify-no-match"
-            continue
-        raise RuntimeError("the T2 returned an unclassifiable match result")
-    if verdict is not None:
-        return verdict
-    if image_quality_rejected:
-        raise RuntimeError(
-            "the T2 match ended after image-quality retries without a verdict"
-        )
-    raise RuntimeError("the T2 match ended without a terminal verdict")
+    return t2_fprint_result.verdict_from_probe_result(result, target_finger)
 
 
 def resolved_any_finger_from_result(result: object) -> str | None:
@@ -198,45 +134,7 @@ def resolved_any_finger_from_result(result: object) -> str | None:
             result, None, True
         )
         return finger_name if verdict == "verify-match" else None
-    if not isinstance(result, dict):
-        raise RuntimeError("malformed T2 probe result")
-    gate = result.get("resolved_any_match_gate")
-    post = result.get("resolved_any_match_post_attestation")
-    if (
-        not isinstance(gate, dict)
-        or type(gate.get("identity_count")) is not int
-        or not 1 <= gate["identity_count"] <= t2_fprint_identity.MAX_ENROLLED_IDENTITIES
-        or gate.get("complete_named_inventory") is not True
-        or gate.get("all_identities_selected") is not True
-        or gate.get("same_connection_inventory_stable") is not True
-        or gate.get("local_live_reconciled") is not True
-        or gate.get("identifiers_redacted") is not True
-        or not isinstance(post, dict)
-        or post.get("identity_state_unchanged") is not True
-        or post.get("local_components_unchanged") is not True
-        or post.get("per_user_inventory_unchanged") is not True
-        or post.get("global_inventory_unchanged") is not True
-        or post.get("identifiers_redacted") is not True
-    ):
-        raise RuntimeError("resolved-any T2 match attestation is incomplete")
-    # Use the same fail-closed terminal checks as named verification. A
-    # placement/image-quality retry is not a terminal negative verdict.
-    if verdict_from_result(result) == "verify-no-match":
-        return None
-    for event in result["match_events"]:
-        if not isinstance(event, dict) or event.get("event_kind") != "match_result":
-            continue
-        if event.get("matched") is not True:
-            continue
-        finger_name = event.get("matched_finger_name")
-        if (
-            event.get("matches_enrolled_identity") is not True
-            or event.get("matched_finger_name_present") is not True
-            or not t2_fprint_projection.is_finger_name(finger_name)
-        ):
-            raise RuntimeError("resolved-any T2 match result is incomplete")
-        return finger_name
-    raise RuntimeError("resolved-any T2 match result has no terminal identity")
+    return t2_fprint_result.resolved_any_finger_from_probe_result(result)
 
 
 def desktop_user_unit_command(unit: object) -> tuple[str, ...] | None:
@@ -338,6 +236,9 @@ class T2Backend:
         self.native_worker_boundary_event: asyncio.Event | None = None
         self.native_worker_start_lock = asyncio.Lock()
         self.native_worker_warm_task: asyncio.Task | None = None
+        self.native_spare_worker: asyncio.subprocess.Process | None = None
+        self.native_spare_stderr_task: asyncio.Task | None = None
+        self.native_spare_warm_task: asyncio.Task | None = None
         self.native_worker_sleep_task: asyncio.Task | None = None
         self.runtime_warm_task: asyncio.Task | None = None
         # Startup is fail-closed until authenticated login1 monitoring has
@@ -844,7 +745,7 @@ class T2Backend:
             await self._pump_native_worker_stderr_stream(process)
         finally:
             boundary = getattr(self, "native_worker_boundary_event", None)
-            if boundary is not None:
+            if self.native_worker is process and boundary is not None:
                 boundary.set()
 
     async def _pump_native_worker_stderr_stream(self, process) -> None:
@@ -856,19 +757,23 @@ class T2Backend:
             chunk = await stream.read(65536)
             if not chunk:
                 if buffered:
-                    self._handle_native_worker_stderr_line(bytes(buffered))
+                    self._handle_native_worker_stderr_line(bytes(buffered), process=process)
                 return
             buffered.extend(chunk)
             while b"\n" in buffered:
                 line, _separator, remainder = buffered.partition(b"\n")
                 buffered = bytearray(remainder)
-                self._handle_native_worker_stderr_line(line)
+                self._handle_native_worker_stderr_line(line, process=process)
             if len(buffered) > 65536:
                 # Protocol records are intentionally small. Continue draining
                 # an untrusted oversized diagnostic without retaining it.
                 buffered.clear()
 
-    def _handle_native_worker_stderr_line(self, line: bytes) -> None:
+    def _handle_native_worker_stderr_line(self, line: bytes, *, process=None) -> None:
+        # A spare only imports code. Its output/EOF must never complete the
+        # active request, publish feedback, or light the reader-ready cue.
+        if process is not None and process is not self.native_worker:
+            return
         prefix = b"T2_MATCH_EVENT "
         if line.startswith(b"T2_WORKER_BOUNDARY "):
             try:
@@ -929,6 +834,31 @@ class T2Backend:
             return process
         if process is not None:
             await self._discard_native_worker(process)
+        spare_start = getattr(self, "native_spare_warm_task", None)
+        if spare_start is not None:
+            # Another request or sleep may cancel this waiter; the startup
+            # task retains cleanup ownership until sleep explicitly drains it.
+            try:
+                await asyncio.shield(spare_start)
+            except Exception:
+                pass  # A failed import-only spare can be replaced safely.
+        if getattr(self, "system_sleeping", False):
+            raise RuntimeError("system sleep transition is active")
+        spare = getattr(self, "native_spare_worker", None)
+        stderr_task = getattr(self, "native_spare_stderr_task", None)
+        if spare is not None:
+            if spare.returncode is None and stderr_task is not None and not stderr_task.done():
+                self.native_worker = spare
+                self.native_worker_stderr_task = stderr_task
+                self.native_spare_worker = None
+                self.native_spare_stderr_task = None
+                return spare
+            await self._discard_native_worker(spare)
+        return await self._start_native_worker(spare=False)
+
+    async def _start_native_worker(self, *, spare: bool):
+        """Start a worker; a resident owner may prepare before its handshake."""
+
         command = [
             sys.executable,
             str(self.project_dir / "src/t2-native-match.py"),
@@ -945,18 +875,31 @@ class T2Backend:
             stderr=asyncio.subprocess.PIPE,
             env=environment,
         )
-        self.native_worker = process
-        self.native_worker_stderr_task = asyncio.create_task(
+        stderr_task = asyncio.create_task(
             self._pump_native_worker_stderr(process)
         )
+        if spare:
+            self.native_spare_worker = process
+            self.native_spare_stderr_task = stderr_task
+        else:
+            self.native_worker = process
+            self.native_worker_stderr_task = stderr_task
         if process.stdout is None:
             await self._discard_native_worker(process)
             raise RuntimeError("native T2 match worker output is unavailable")
         try:
             ready_line = await asyncio.wait_for(process.stdout.readline(), timeout=10)
             ready = json.loads(ready_line)
-            if ready != {"schema_version": 1, "ready": True}:
+            if (type(ready) is not dict
+                or type(ready.get("schema_version")) is not int
+                or ready.get("ready") is not True
+                or ("retained_identity" in ready and ready["retained_identity"] is not True)
+                or ready not in (
+                {"schema_version": 1, "ready": True},
+                {"schema_version": 1, "ready": True, "retained_identity": True},
+            )):
                 raise RuntimeError("native T2 match worker did not become ready")
+            process.t2_retains_identity = ready.get("retained_identity") is True
         except BaseException:
             cleanup = asyncio.create_task(self._discard_native_worker(process))
             while not cleanup.done():
@@ -968,6 +911,33 @@ class T2Backend:
             raise
         t2_performance.emit("native_match", "worker_start", started)
         return process
+
+    def _schedule_native_spare(self) -> None:
+        """Overlap at most one replacement's imports with the current request."""
+
+        if getattr(self, "system_sleeping", False):
+            return
+        task = getattr(self, "native_spare_warm_task", None)
+        if (task is not None and not task.done()) or getattr(self, "native_spare_worker", None) is not None:
+            return
+        task = asyncio.create_task(self._start_native_worker(spare=True))
+        self.native_spare_warm_task = task
+
+        def completed(done: asyncio.Task) -> None:
+            if self.native_spare_warm_task is done:
+                self.native_spare_warm_task = None
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                print(
+                    "Touch ID spare worker warmup failed: "
+                    f"{public_verification_failure(error)}",
+                    flush=True,
+                )
+
+        task.add_done_callback(completed)
 
     def _schedule_native_worker_warm(self) -> None:
         if getattr(self, "system_sleeping", False):
@@ -995,7 +965,7 @@ class T2Backend:
         task.add_done_callback(completed)
 
     async def warm_runtime(self) -> None:
-        """Move presentation and import cold starts before D-Bus exposure."""
+        """Prepare presentation and identity without racing hardware owners."""
 
         if getattr(self, "system_sleeping", False):
             return
@@ -1008,21 +978,16 @@ class T2Backend:
                 flush=True,
             )
             return
-        async def warm_projection():
-            async with self.operation_lock:
-                return await self.runtime_projection()
-
-        operations = [warm_projection()]
+        operations = [self.runtime_projection]
         if authority.origin == NATIVE_AUTHORITY:
-            operations.append(self._ensure_native_worker())
-        results = await asyncio.gather(*operations, return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException):
-                print(
-                    "Touch ID runtime warmup failed: "
-                    f"{public_verification_failure(result)}",
-                    flush=True,
-                )
+            operations.append(self._ensure_native_worker)
+        for operation in operations:
+            try:
+                async with self.operation_lock:
+                    await operation()
+            except Exception as error:
+                print("Touch ID runtime warmup failed: "
+                      f"{public_verification_failure(error)}", flush=True)
 
     def _schedule_runtime_warm(self) -> asyncio.Task | None:
         if getattr(self, "system_sleeping", False):
@@ -1089,6 +1054,7 @@ class T2Backend:
         for task in (
             getattr(self, "runtime_warm_task", None),
             getattr(self, "native_worker_warm_task", None),
+            getattr(self, "native_spare_warm_task", None),
             getattr(self, "inventory_task", None),
             getattr(self, "process_owner", None),
         ):
@@ -1116,6 +1082,9 @@ class T2Backend:
             process = getattr(self, "native_worker", None)
             if process is not None:
                 await self._discard_native_worker(process)
+            spare = getattr(self, "native_spare_worker", None)
+            if spare is not None:
+                await self._discard_native_worker(spare)
         if not still_this_sleep():
             return
         # A collector can own the operation lock before publishing itself as
@@ -1170,13 +1139,23 @@ class T2Backend:
         self._schedule_runtime_warm()
 
     async def _discard_native_worker(self, process) -> None:
-        if self.native_worker is not process:
+        if self.native_worker is process:
+            self.native_worker = None
+            task = self.native_worker_stderr_task
+            self.native_worker_stderr_task = None
+        elif getattr(self, "native_spare_worker", None) is process:
+            self.native_spare_worker = None
+            task = self.native_spare_stderr_task
+            self.native_spare_stderr_task = None
+        else:
             return
-        self.native_worker = None
-        task = self.native_worker_stderr_task
-        self.native_worker_stderr_task = None
         if process.stdin is not None:
             process.stdin.close()
+        if process.returncode is None and getattr(process, "t2_retains_identity", False):
+            try:
+                await asyncio.wait_for(process.wait(), timeout=NATIVE_CANCEL_SECONDS)
+            except asyncio.TimeoutError:
+                pass  # Kernel close still owns bounded emergency unload.
         if process.returncode is None:
             try:
                 pid = process.pid
@@ -1243,10 +1222,13 @@ class T2Backend:
                 json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
             )
             await process.stdin.drain()
+            if not getattr(process, "t2_retains_identity", False):
+                self._schedule_native_spare()
             return await completion
 
         exchange_task = asyncio.create_task(exchange())
         cancelled = False
+        reusable = False
         try:
             try:
                 response_line, _boundary = await asyncio.shield(exchange_task)
@@ -1295,7 +1277,30 @@ class T2Backend:
                 raise RuntimeError(
                     "native T2 match owner returned malformed JSON"
                 ) from error
+            if (
+                type(response) is dict
+                and set(response) == {"schema_version", "request_id", "ok", "result"}
+                and type(response.get("schema_version")) is int
+                and type(response.get("request_id")) is int
+                and response.get("schema_version") == 1
+                and response.get("request_id") == request["request_id"]
+                and response.get("ok") is True
+            ):
+                t2_fprint_result.validate_worker_terminal_result(
+                    response["result"], target_finger, resolve_any_finger
+                )
+                reusable = (getattr(process, "t2_retains_identity", False)
+                            and not getattr(self, "system_sleeping", False))
             if cancelled:
+                if (type(response) is dict
+                    and type(response.get("schema_version")) is int
+                    and type(response.get("request_id")) is int
+                    and response.get("ok") is True
+                    and response.get("cancelled") is True
+                    and response == {"schema_version": 1, "request_id": request["request_id"],
+                                     "ok": True, "cancelled": True}):
+                    reusable = (getattr(process, "t2_retains_identity", False)
+                                and not getattr(self, "system_sleeping", False))
                 raise asyncio.CancelledError
         finally:
             if not exchange_task.done():
@@ -1311,7 +1316,7 @@ class T2Backend:
             if self.process is process and self.process_owner is owner:
                 self.process = None
                 self.process_owner = None
-            if self.native_worker is process:
+            if self.native_worker is process and not reusable:
                 await self._discard_native_worker(process)
             self._schedule_native_worker_warm()
         if (
@@ -1320,6 +1325,8 @@ class T2Backend:
                 {"schema_version", "request_id", "ok", "result"},
                 {"schema_version", "request_id", "ok", "error"},
             )
+            or type(response.get("schema_version")) is not int
+            or type(response.get("request_id")) is not int
             or response.get("schema_version") != 1
             or response.get("request_id") != request["request_id"]
             or type(response.get("ok")) is not bool
@@ -2024,6 +2031,7 @@ class FprintDevice(ServiceInterface):
         self, requested_finger: str, projection: t2_fprint_runtime.RuntimeProjection
     ) -> None:
         current_task = asyncio.current_task()
+        self.verify_result_observed_at = None
         try:
             # dbus-next sends an async method's reply from the completed
             # VerifyStart task. Yield once from this separately scheduled task
@@ -2046,6 +2054,11 @@ class FprintDevice(ServiceInterface):
                     raise RuntimeError("matched any-finger result has no identity")
                 self._emit_claimed("VerifyFingerMatched", "s", [selected])
             self._emit_claimed("VerifyStatus", "sb", [verdict, True])
+            if self.verify_result_observed_at is not None:
+                t2_performance.emit(
+                    "fprint_verify", "result_to_public_status",
+                    self.verify_result_observed_at,
+                )
             if verdict == "verify-match":
                 # Authentication is already terminal. Persistence is a
                 # separately journaled best-effort operation and can neither
@@ -2079,6 +2092,9 @@ class FprintDevice(ServiceInterface):
 
     def _live_verify_event(self, event: dict) -> None:
         """Expose only nonterminal placement feedback from an untrusted stream."""
+        if event.get("event_kind") == "match_result":
+            # Timing only: this untrusted notification never authorizes a verdict.
+            self.verify_result_observed_at = time.monotonic()
         if event.get("event_kind") == "match_armed":
             # PAM's placement prompt must follow actual sensor readiness,
             # not merely scheduling activation and transport setup.
@@ -2872,7 +2888,11 @@ async def main_async(args: argparse.Namespace) -> None:
     bus.export(MANAGER_PATH, FprintManager())
     bus.export(DEVICE_PATH, device)
     await bus.request_name(BUS_NAME)
-    await asyncio.get_running_loop().create_future()
+    try:
+        await asyncio.get_running_loop().create_future()
+    finally:
+        backend.system_sleep_changed(True)
+        await backend.native_worker_sleep_task
 
 
 def main() -> None:

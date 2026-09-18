@@ -38,6 +38,60 @@ def match_result_event(identity_record: bytes, *, version: int = 2) -> bytes:
     )
 
 
+class LateMatchResultTests(unittest.TestCase):
+    def test_queued_callback_is_consumed_without_duplicate_ack(self):
+        events = ["first", "queued-during-export"]
+        with patch.object(MODULE, "receive_envelope") as receive, patch.object(MODULE, "send_message") as send:
+            self.assertEqual(MODULE.next_match_callback(object(), events, 1),
+                             ("queued-during-export", 2))
+            receive.assert_not_called()
+            send.assert_not_called()
+
+    def test_new_callback_is_retained_and_acknowledged_once(self):
+        events = []
+        sock = object()
+        with patch.object(MODULE, "receive_envelope", return_value=[1, False, "callback", "result"]), patch.object(MODULE, "send_message") as send:
+            self.assertEqual(MODULE.next_match_callback(sock, events, 0), ("result", 1))
+            self.assertEqual(events, ["result"])
+            send.assert_called_once_with(sock, [1, True, "callback", [0]])
+
+    def test_late_results_and_export_callbacks_are_all_persisted(self):
+        events = [dict(event_kind="match_result", host_accepted_result=True)]
+        committed = []
+        drains = []
+        def persist(summary):
+            committed.append(summary)
+            if len(committed) == 1:
+                events.append(dict(event_kind="match_result", host_accepted_result=True))
+        summaries = MODULE.reconcile_match_lockout(
+            events, lambda event: event, lambda: len(committed), persist,
+            lambda: drains.append(True))
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual(committed, events)
+        self.assertEqual(drains, [True])
+
+    def test_uncommitted_failed_or_unbounded_results_cannot_complete(self):
+        accepted = dict(event_kind="match_result", host_accepted_result=True)
+        for mode in ("missing", "failed", "unbounded"):
+            events, committed = [accepted], []
+            def persist(summary):
+                if mode == "failed":
+                    raise OSError("publication failed")
+                if mode == "unbounded":
+                    committed.append(summary)
+                    events.append(dict(accepted))
+            with self.subTest(mode=mode), self.assertRaises((RuntimeError, OSError)):
+                MODULE.reconcile_match_lockout(events, lambda event: event,
+                    lambda: len(committed), persist, lambda: None,
+                    maximum_late_results=3)
+
+    def test_export_preserves_callbacks_for_match_owner(self):
+        events = []
+        with patch.object(MODULE, "biometric_command", return_value=([0, b"HRLBtest"], ["late"])), patch.object(MODULE, "summarize_event", return_value={}):
+            MODULE.export_biolockout_record(object(), events=events)
+        self.assertEqual(events, ["late"])
+
+
 class ReplyTests(unittest.TestCase):
     def test_touch_to_verdict_tracks_each_validated_capture(self):
         timing = {}

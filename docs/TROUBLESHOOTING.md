@@ -22,6 +22,21 @@ time, then rerun `./install-omarchy.sh` as your desktop account.
 A module installed on disk does not establish that the currently running
 kernel has the capability. The installer checks the live driver.
 
+## Two Linux installations or restored system snapshots
+
+Touch ID state is shared hardware state; independent host archives are not
+independent fingerprint stores. Cloning the account mapping and keybags can let
+both installations authenticate to the same T2 while retaining different saved
+generations. A warm boot can hide this until the next cold load.
+
+If startup reports `installation-inventory-conflict`, preserve both stores and
+journals and stop automatic Touch ID startup on the stale installation. Do not
+reset enrollment or restore an older filesystem snapshot as a biometric repair.
+Identify the latest completed, account-bound user/master save before attempting
+a cold restore. Root access to a second installation does not by itself prove
+its archives belong to the selected account. See the
+[reference investigation](RECOVERY_RELEASE_GATE.md#firmware-log-follow-up).
+
 ## applesmc reports `response-received:3` after reboot
 
 The publisher is loaded and has received a firmware response. EFMS result 3
@@ -87,45 +102,77 @@ in place across a retry. Reboot only after preparation reports success.
 
 ## fprintd dependency failure after a cold bridgeOS boot
 
+Recovery could not restore the reference machine's saved fingerprints after a
+cold reset. Whether those fingerprints can be recovered remains unknown; see
+the [recovery findings](RECOVERY_RELEASE_GATE.md). Keep the saved files and
+journals intact before attempting further recovery. The commands below have
+not been shown to restore those fingerprints.
+
+If the post-reboot service reports `pending-biometric-mutation`, run
+`sudo t2-touchid-manage status`. Its `native_state_recovery_pending_count`
+and `native_state_recovery_pending_phases` fields identify an unfinished
+native-state recovery even when enrollment, rename, and deletion counts are
+zero. Older diagnostics reported this failure as `reason: null` and omitted
+native recovery from status. Preserve that journal and resume the existing
+recovery under the installer hold described below; rerunning normal setup
+does not complete it. A `cold-restart-prepared` recovery requires a different
+Linux boot and an independently verified cold T2 surface before it can proceed.
+Do not remove the journal or accept fingerprint loss merely to clear the gate.
+Normal setup now validates the native recovery journal before releasing the
+service hold. An unfinished or invalid journal keeps automatic services paused
+and reports the pending phase; reinstalling userspace cannot complete that
+hardware transaction. Once explicit recovery reports `complete` or
+`already-complete`, normal setup can release the hold.
+
 If `t2-native-first-run.service` and `t2-biometric-ready.service` pass but
 `t2-touchid-post-reboot.service` reports `external-deletion-reconciliation`,
 inspect that service's journal. The automatic management child previously
 mistook a cold unloaded Catacomb for an external fingerprint deletion and
 stopped with “SEP Catacomb is not clean after the external deletion.”
 
-The exact recoverable generation has an absent Catacomb, empty live inventories,
+The recognized restore candidate has an absent Catacomb, empty live inventories,
 and only a clean master component. A cold T2 reports that master at state 1
 (unloaded); after an abrupt host exit bridgeOS can retain it at state 3
 (securely loaded) while the selected-user component is absent. State 1 remains
-the ordinary guarded cold-load path. State 3 is different: bridgeOS rejects a
-direct saved-user load until the missing master/user components are admitted at
-the pre-client protocol boundary.
+the ordinary guarded cold-load path. State 3 is different: a direct saved-user
+load has failed on the reference machine. Recreating missing components at the
+pre-client boundary has also failed to restore the enrollment; that is not a
+qualified preservation procedure.
 
 Normal startup therefore fails closed with
 `retained-master-recovery-required`; it does not replay a rejected load or
 mistake the empty inventory for an external deletion. Preserve private state
-and journals, then run the explicit recovery under the installer's persistent
-service hold:
+and journals under the installer's persistent service hold:
 
 ```bash
 ./install-omarchy.sh --prepare-native-recovery
-sudo t2-touchid-manage recover-native-state \
-  --acknowledge-retained-master-recovery
-./install-omarchy.sh
+sudo t2-touchid-manage status
 ```
 
-This recovery fails closed if bridgeOS rejects the saved selected-user
-Catacomb. It preserves the enrolled local archive and stops before creating or
-persisting an empty generation. A normal install or upgrade never opts into
-fingerprint loss. If preserving the existing enrollment has proven impossible
-and the operator explicitly accepts deleting its local association and
-reenrolling, resume with both acknowledgements:
+The generic `--acknowledge-retained-master-recovery` acknowledgement no longer
+permits component recreation/removal. Those steps can invalidate the T2
+generation while leaving host archives intact, so the separate fingerprint-loss
+acknowledgement is now required **before** them as well as before empty
+reprovision. Cold readback and saved-generation load continuations retain their
+existing checks. A normal install or upgrade never opts into fingerprint loss.
+
+Only if the operator explicitly accepts possible loss and reenrollment may the
+generation-changing path proceed with both acknowledgements. This is not a
+remedy for the unresolved persistence defect:
 
 ```bash
 sudo t2-touchid-manage recover-native-state \
   --acknowledge-retained-master-recovery \
   --acknowledge-fingerprint-loss-and-reenrollment
 ```
+
+The historical `CANONICAL_USER_LOAD_REPLY_REJECTED` milestone does not by itself
+prove a firmware rejection: older code used it for malformed replies and
+unexpected callbacks too. Such status-less records remain readable but cannot
+authorize empty reprovision, even with the loss flag. Current recovery records
+the validated nonzero firmware status for explicit rejections and records an
+unknown outcome for malformed replies. Neither outcome is replayed. Missing
+historical evidence must not be fabricated by editing the journal.
 
 The recovery requires the exact stable state-3 master-only surface and unchanged
 mapped Linux authority. It durably records intent before the pre-client
@@ -149,20 +196,17 @@ Such a journal is redirected through one more cold boundary and never replays
 the rejected command. A Linux reboot that leaves bridgeOS warm does not satisfy
 either gate.
 
-On bridgeOS 23P6068 the canonical-master `0x40` load can return a nonzero reply
-while independently moving the exact cold master from state 1 to state 3. The
-journal treats the reply as terminal until a later stable read proves precisely
-that master-only transition with zero identities and groups. It then records
-that the load was not replayed and proceeds to the matching saved user once.
-An unchanged state-1 master or any additional component remains blocked.
-This is the narrow production form of the recorded compatibility repair; it
-does not admit a loaded user containing an identity. A rejected or
-transport-ambiguous command is never replayed. Foreign, grouped, changed,
-nonempty, or otherwise ambiguous state remains blocked for evidence-based
-recovery.
+On bridgeOS 23P6068 a rejected canonical-master `0x40` load can still expose
+an empty master in state 3. Firmware logs recovered status `0x8002`, which
+Apple's host implementation classifies as a corrupt Catacomb. The state-3
+readback does not prove the saved master loaded. Recovery therefore stops after
+a rejected master and refuses legacy `CANONICAL_MASTER_REPLY_RECONCILED`
+continuations before another device command. Old journals remain readable;
+no command is replayed and no history is rewritten to manufacture success.
 
-If the canonical user is then explicitly rejected, the enrolled archive does
-not belong to the master generation retained by bridgeOS. Recovery does not
+If the canonical user is then explicitly rejected, the saved archive has not
+been restored. A master/user generation mismatch is a hypothesis; the rejection
+alone does not establish the cause or prove permanent loss. Recovery does not
 repeat either rejected load, does not try an older backup blindly, and stops
 with the enrolled archive preserved. Only the separate
 `--acknowledge-fingerprint-loss-and-reenrollment` option permits the following
@@ -171,9 +215,18 @@ surface, that explicitly destructive path admits a fresh empty selected-user
 component at the pre-client boundary, exports the resulting user/master pair,
 normalizes the master enrollment count to zero, and atomically commits both
 components while preserving the prior generation in the private backup store.
-The Linux account/keybag authority is unchanged, but the old fingerprint is
-unrecoverable and `t2touch enroll` is required after installation finishes. Any
+The Linux account/keybag authority is unchanged, but the old enrollment is
+removed from the active Linux archive and `t2touch enroll` is required after
+installation finishes. This does not establish why the old load failed. Any
 different live surface remains blocked.
+
+Both the direct cold canonical-master path and the older derived-master
+redirect path can reach that explicitly rejected user boundary. Recovery
+recognizes their exact journal prefixes separately. Older code recognized
+only the redirect path and incorrectly reported the direct path as an
+ambiguous command outcome, even with the fingerprint-loss acknowledgement.
+The repair does not replay either rejected load or relax the empty-surface
+readback, account binding, or fingerprint-loss acknowledgement.
 
 Each recovery invocation uses a separate root-private activation-journal file
 while retaining the recovery operation ID inside that journal. A completed
@@ -183,16 +236,19 @@ activation history still stops the command before biometric recovery dispatch.
 
 ## Another operating system changed the enrolled fingerprints
 
-Startup validates the configured account's keybag and activation authority. It
-then compares independently collected per-user and global T2 inventories with
-the saved Linux inventory. A new or replaced fingerprint within that authorized
-account is reconciled regardless of which operating system enrolled it.
+Startup validates the configured account's keybag and activation authority and
+compares independently collected per-user/global T2 inventories with the saved
+Linux inventory. A mismatching nonempty live inventory now stops startup with
+`installation-inventory-conflict`. Preserve the saved generations and establish
+which installation owns the current state before further recovery.
 
-The reconciler preserves surviving neutral handles, assigns available handles
-to newly observed identities, and saves the current opaque user/master Catacombs.
-It does not enroll, delete, reload an old fingerprint, or change the account or
-keybag. A private component backup and a durable journal precede the save.
-Inventory changes during the save prevent success from being reported.
+Earlier versions automatically saved newly observed identities. On the
+reference machine a second cloned Linux installation had the same protected
+account authority, so that save advanced shared hardware state while the first
+installation retained an older archive. Separate host directories do not create
+independent Touch ID stores. Automatic startup no longer chooses a persistence
+owner this way. Explicit recovery persistence retains its account checks,
+private backups, journaled save, and independent inventory readback.
 
 An interrupted save remains blocking with its recovery evidence intact. Only an
 intent that demonstrably stopped before dispatch can close automatically: the
@@ -357,13 +413,15 @@ after restoration. Keep the backups until the desktop is verified usable.
 ## Touch ID stops working after suspend
 
 Deep sleep can leave the T2 network transport unusable even when services
-still appear active. The installer supplies a systemd sleep policy selecting
-`s2idle`; deep-sleep recovery is not supported. A reboot is the known recovery
-boundary for an unusable transport. Do not substitute USB or PCI rebinds.
+still appear active. `s2idle` has also failed to wake the MacBookPro16,1 host.
+Neither mode is qualified here. T2Touch no longer selects a sleep mode and
+retires its unchanged older override; review [the migration](SLEEP_POLICY.md)
+before upgrading. A reboot is the known recovery boundary for an unusable
+transport. Do not substitute USB or PCI rebinds.
 
 When reporting a suspend failure, include the selected sleep mode, kernel and
 bridgeOS versions, whether ordinary startup works, and whether the failure
-occurs with the installed s2idle policy. Review diagnostic output for private
+occurs with an operator or distribution sleep override. Review diagnostic output for private
 identifiers before sharing it.
 
 ## Reporting a problem

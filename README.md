@@ -7,6 +7,14 @@ This is an early proof of concept. Keep password authentication enabled and
 available. Full end-to-end validation covers the `MacBookPro16,1` reference model;
 other model and firmware combinations have narrower coverage.
 
+**Recovery may require enrolling your fingerprints again.** On the reference
+machine, recovery could not restore the existing fingerprints after a cold
+reset, although their saved files remained intact. Whether those fingerprints
+can be recovered is still unknown. A reset and fresh enrollment worked, and
+the new enrollment survived a T2 and host reboot. The recovery code involved
+is also present in `v0.0.8`. Read the [recovery findings](docs/RECOVERY_RELEASE_GATE.md)
+before attempting recovery on an installation you rely on.
+
 MacBookPro16,2 with bridgeOS 23P2048 additionally requires explicit creation
 version 4 selection. See the [setup and hardware validation report](docs/MACBOOKPRO16_2.md)
 before installing on that firmware.
@@ -82,6 +90,11 @@ Hyprland's default selection. Remove
 (or the corresponding path under `XDG_CONFIG_HOME`).
 
 ## Everyday commands
+
+Suspend/resume is unqualified on the MacBookPro16,1 reference machine.
+T2Touch leaves sleep mode selection to system policy and retires its unchanged
+legacy s2idle override on upgrade. Read [sleep policy and migration](docs/SLEEP_POLICY.md)
+for the consequences, including the remaining risks of both s2idle and deep.
 
 ```bash
 # Enroll another fingerprint

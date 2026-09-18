@@ -107,6 +107,13 @@ BioLockout state, reconciles local and SEP inventories through a fresh Bridge
 connection, and publishes runtime authority before returning success. Normal
 enrollment therefore completes in the current session.
 
+The verifier can retain its generation-bound AKS/ACM preparation between
+requests. Caller authorization, SEP policy evaluation, fresh Bridge inventory
+attestation, and the biometric result remain request-local. Idle hardware
+ownership is cooperatively releasable to other operations and ends on sleep,
+shutdown, invalidation, or failure. See the
+[verification worker lifecycle](FPRINT_INTEGRATION.md#verification-worker-lifecycle).
+
 Account authority survives changes to the fingerprint set. Later enrollments
 extend the reconciled inventory rather than requiring the first fingerprint
 to remain present. Finger 1 through Finger 5 are stable neutral slots backed by
@@ -184,7 +191,9 @@ uninstaller does not remove the per-user UWSM snippet or restore patched
 Omarchy QML; use the separate
 [desktop rollback procedure](TROUBLESHOOTING.md#undo-the-omarchy-desktop-integration).
 
-The installer selects s2idle through systemd sleep policy. Deep-sleep recovery,
+The installer leaves machine-wide sleep policy to the operator and distribution,
+and safely retires its unchanged legacy override; see [sleep policy](SLEEP_POLICY.md).
+Suspend/resume on the reference machine is unqualified. Deep-sleep recovery,
 cross-macOS persistence of Linux-only fingerprints, multiple Linux users, and
 additional hardware models are outside the demonstrated product scope.
 Validation covers MacBookPro16,1, including the operator’s successful install

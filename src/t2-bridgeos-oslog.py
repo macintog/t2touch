@@ -4,6 +4,7 @@
 
 import argparse
 import asyncio
+from contextlib import aclosing
 import gzip
 import hashlib
 import os
@@ -56,20 +57,25 @@ async def _current_build(scoped_host: str, peer: dict[str, Any], timeout: float)
 
 
 async def _receive_archive(connection: Any, transfer_size: int, output: Path) -> tuple[int, str]:
-    """Receive the one announced archive, removing its stream wrapper."""
+    """Receive the announced gzip, with or without an unconsumed stream wrapper."""
 
     from pymobiledevice3.exceptions import ProtocolError
     from pymobiledevice3.remote.remotexpc import RemoteXPCConnection
+    from pymobiledevice3.remote.xpc_message import XpcWrapper
+
+    if not isinstance(transfer_size, int) or isinstance(transfer_size, bool) or transfer_size <= 0:
+        raise RuntimeError("sysdiagnose archive length is invalid")
 
     async def route_file_chunks(self: Any) -> None:
         try:
             while self._file_chunk_queues:
                 frame = await self._receive_next_data_frame()
-                if "END_STREAM" in frame.flags:
-                    continue
                 queue = self._file_chunk_queues.get(frame.stream_id)
                 if queue is not None:
-                    queue.put_nowait(frame.data)
+                    if frame.data:
+                        queue.put_nowait(frame.data)
+                    if "END_STREAM" in frame.flags:
+                        queue.put_nowait(EOFError("sysdiagnose file stream ended"))
                     continue
                 # This service duplicates its requested reply on stream 3.
                 # The file payload is exclusively on stream 2.
@@ -85,7 +91,6 @@ async def _receive_archive(connection: Any, transfer_size: int, output: Path) ->
                 queue.put_nowait(error)
 
     original_router = RemoteXPCConnection._route_file_chunks
-    RemoteXPCConnection._route_file_chunks = route_file_chunks
     temporary = output.with_name(output.name + ".part")
     descriptor = os.open(
         temporary,
@@ -95,25 +100,52 @@ async def _receive_archive(connection: Any, transfer_size: int, output: Path) ->
     digest = hashlib.sha256()
     payload_size = 0
     prefix = bytearray()
+    prefix_consumed = False
+    RemoteXPCConnection._route_file_chunks = route_file_chunks
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            # The service's FILE_TX count excludes the leading wrapper, while
-            # pymobiledevice3 counts every byte read from stream 2.
-            async for chunk in connection.iter_file_chunks(
+            # receive_response may already consume the stream-2 announcement
+            # while waiting for the control reply. Detect its presence instead
+            # of stripping 24 bytes from an already bare gzip. Stop at FILE_TX's
+            # archive length even if the underlying iterator expects a wrapper.
+            async with aclosing(connection.iter_file_chunks(
                 transfer_size + REMOTE_XPC_WRAPPER_SIZE
-            ):
-                if len(prefix) < REMOTE_XPC_WRAPPER_SIZE:
-                    needed = REMOTE_XPC_WRAPPER_SIZE - len(prefix)
-                    prefix.extend(chunk[:needed])
-                    chunk = chunk[needed:]
-                if chunk:
-                    stream.write(chunk)
-                    digest.update(chunk)
-                    payload_size += len(chunk)
+            )) as chunks:
+                async for chunk in chunks:
+                    if not prefix_consumed:
+                        prefix.extend(chunk)
+                        if len(prefix) < 3:
+                            continue
+                        if prefix[:3] == b"\x1f\x8b\x08":
+                            chunk = bytes(prefix)
+                        else:
+                            if len(prefix) < REMOTE_XPC_WRAPPER_SIZE:
+                                continue
+                            try:
+                                wrapper = XpcWrapper.parse(
+                                    bytes(prefix[:REMOTE_XPC_WRAPPER_SIZE])
+                                )
+                                valid = (
+                                    wrapper.flags.FILE_TX_STREAM_REQUEST
+                                    and wrapper.message.payload is None
+                                )
+                            except Exception as error:
+                                raise RuntimeError("invalid sysdiagnose stream prefix") from error
+                            if not valid:
+                                raise RuntimeError("invalid sysdiagnose stream announcement")
+                            chunk = bytes(prefix[REMOTE_XPC_WRAPPER_SIZE:])
+                        prefix.clear()
+                        prefix_consumed = True
+                    if payload_size + len(chunk) > transfer_size:
+                        raise RuntimeError("sysdiagnose archive exceeds announced length")
+                    if chunk:
+                        stream.write(chunk)
+                        digest.update(chunk)
+                        payload_size += len(chunk)
+                    if payload_size == transfer_size:
+                        break
             stream.flush()
             os.fsync(stream.fileno())
-        if len(prefix) != REMOTE_XPC_WRAPPER_SIZE:
-            raise RuntimeError("sysdiagnose transfer omitted its RemoteXPC wrapper")
         if payload_size != transfer_size:
             raise RuntimeError(
                 f"sysdiagnose payload length mismatch: {payload_size} != {transfer_size}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import fcntl
 import inspect
 import os
@@ -13,6 +14,7 @@ from collections.abc import Callable
 from typing import Iterator, TypeVar, cast
 
 import t2_acm_protocol as protocol
+import t2_performance
 
 
 DEVICE = Path("/dev/t2-acm")
@@ -87,7 +89,15 @@ def _registration_generation(info: bytes | bytearray) -> int:
 
 class ACMDevice:
     def __init__(self, path: Path = DEVICE) -> None:
-        self.fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+        flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            self.fd = os.open(path, flags)
+        except OSError as error:
+            import t2_preparation_lease
+            if (error.errno != errno.EBUSY or path != DEVICE
+                    or not t2_preparation_lease.release_idle_owner()):
+                raise
+            self.fd = os.open(path, flags)
         try:
             info = bytearray(INFO_SIZE)
             fcntl.ioctl(self.fd, T2_ACM_IOC_GET_INFO, info, True)
@@ -96,6 +106,12 @@ class ACMDevice:
             os.close(self.fd)
             self.fd = -1
             raise
+
+    def require_current_generation(self) -> None:
+        info = bytearray(INFO_SIZE)
+        fcntl.ioctl(self.fd, T2_ACM_IOC_GET_INFO, info, True)
+        if _registration_generation(info) != self.generation:
+            raise ACMDeviceError("prepared ACM generation is no longer valid")
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -111,7 +127,7 @@ class ACMDevice:
     def exchange(self, command: bytes | bytearray, response_capacity: int) -> bytes:
         if self.fd < 0:
             raise ACMDeviceError("ACM device is closed")
-        protocol.validate_command(command)
+        opcode = protocol.validate_command(command)
         if not 0 <= response_capacity <= 16384:
             raise ACMDeviceError("invalid response capacity")
         request = bytearray(command)
@@ -133,7 +149,8 @@ class ACMDevice:
             )
         )
         try:
-            fcntl.ioctl(self.fd, T2_ACM_IOC_EXCHANGE, exchange, True)
+            with t2_performance.transport_phase("acm", f"op_{opcode:02x}"):
+                fcntl.ioctl(self.fd, T2_ACM_IOC_EXCHANGE, exchange, True)
             (
                 request_code,
                 request_length,

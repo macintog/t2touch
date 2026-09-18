@@ -733,9 +733,11 @@ def read_private_biolockout_record(path: str) -> bytes:
     return record
 
 
-def export_biolockout_record(sock: socket.socket) -> tuple[bytes, dict]:
+def export_biolockout_record(sock: socket.socket, *, events=None) -> tuple[bytes, dict]:
     """Export current encrypted SEP lockout state without exposing its payload."""
     save_reply, save_events = biometric_command(sock, 0x4A, output_capacity=4096)
+    if events is not None:
+        events.extend(save_events)
     save_output = (
         save_reply[1]
         if isinstance(save_reply, list)
@@ -762,6 +764,47 @@ def export_biolockout_record(sock: socket.socket) -> tuple[bytes, dict]:
         }
     )
     return save_output, summary
+
+
+def next_match_callback(sock, events, cursor):
+    """Consume queued command callbacks before reading another envelope."""
+    if cursor < len(events):
+        return events[cursor], cursor + 1
+    envelope = receive_envelope(sock)
+    if envelope[1] is not False:
+        return None, cursor
+    events.append(envelope[3])
+    send_message(sock, [1, True, envelope[2], [0]])
+    return envelope[3], cursor + 1
+
+
+def reconcile_match_lockout(events, summarize, committed_count, persist, drain,
+                            *, maximum_late_results=256):
+    """Persist every accepted callback, including those received in cleanup."""
+    late_results = 0
+    while True:
+        summaries = [summarize(event) for event in events]
+        accepted = [summary for summary in summaries
+                    if summary.get("event_kind") == "match_result"
+                    and summary.get("host_accepted_result") is True]
+        committed = committed_count()
+        if committed > len(accepted):
+            raise RuntimeError("lockout publication exceeds accepted match results")
+        if committed == len(accepted):
+            return summaries
+        missing = accepted[committed:]
+        late_results += len(missing)
+        if late_results > maximum_late_results:
+            raise RuntimeError("late match results exceeded the reconciliation bound")
+        prior_events = len(events)
+        for summary in missing:
+            persist(summary)
+        if committed_count() != len(accepted):
+            raise RuntimeError("accepted match lockout state was not durably published")
+        if len(events) != prior_events:
+            # An export can itself receive another service callback. Complete
+            # another unchanged quiet-period check before publishing a verdict.
+            drain()
 
 
 def save_biolockout_record(sock: socket.socket, path: str) -> dict:
@@ -3252,7 +3295,6 @@ def main() -> None:
                 persistence_failure = None
                 post_match_biolockout_generations = []
                 touch_timing: dict[str, float] = {}
-
                 def persist_match_result(event_summary: dict) -> None:
                     if (
                         event_summary.get("event_kind") != "match_result"
@@ -3263,7 +3305,8 @@ def main() -> None:
                         )
                     ):
                         return
-                    save_output, save_summary = export_biolockout_record(sock)
+                    with t2_performance.phase("bridge_match", "biolockout_export"):
+                        save_output, save_summary = export_biolockout_record(sock, events=events)
                     generation = len(post_match_biolockout_generations) + 1
                     save_summary["match_result_generation"] = generation
                     if args.save_biolockout_after_match_output:
@@ -3277,7 +3320,8 @@ def main() -> None:
                         save_summary["private_output_written"] = True
                         save_summary["private_output_path"] = destination
                     if biolockout_store is not None:
-                        committed = biolockout_store.commit(save_output)
+                        with t2_performance.phase("bridge_match", "biolockout_commit"):
+                            committed = biolockout_store.commit(save_output)
                         save_summary["linux_store_generation"] = committed.sequence
                         save_summary["linux_store_committed"] = True
                     post_match_biolockout_generations.append(save_summary)
@@ -3295,7 +3339,8 @@ def main() -> None:
                         {"event_kind": "match_armed"},
                         args.live_match_feedback_format,
                     )
-                for initial_event in events:
+                initial_events = tuple(events)
+                for initial_event in initial_events:
                     observed_at = time.monotonic()
                     initial_summary = summarize_event(
                         initial_event,
@@ -3342,6 +3387,9 @@ def main() -> None:
                     if args.match_seconds == 0
                     else time.monotonic() + args.match_seconds
                 )
+                # Exports above can append callbacks. Leave them queued for
+                # the observation loop or bounded post-cancel reconciliation.
+                processed_events = len(initial_events)
                 while (
                     not termination_requested
                     and not terminal_result_seen
@@ -3354,15 +3402,15 @@ def main() -> None:
                         else min(0.25, max(0.1, deadline - time.monotonic()))
                     )
                     try:
-                        envelope = receive_envelope(sock)
+                        callback, processed_events = next_match_callback(
+                            sock, events, processed_events
+                        )
                     except TimeoutError:
                         continue
-                    if envelope[1] is False:
-                        events.append(envelope[3])
-                        send_message(sock, [1, True, envelope[2], [0]])
+                    if callback is not None:
                         observed_at = time.monotonic()
                         event_summary = summarize_event(
-                            envelope[3],
+                            callback,
                             enrolled_identity_records,
                             expected_user_id=args.macos_user_id,
                             selected_identity_record=validation_identity_record,
@@ -3399,11 +3447,12 @@ def main() -> None:
                             break
                 sock.settimeout(args.timeout)
                 try:
-                    cancel_reply, cancel_events = request_with_events(
-                        sock, [3, 0, BIOMETRIC_COMMAND_HEADER.pack(
-                            BIOMETRIC_COMMAND_MAGIC, 12, 1, 0
-                        ), 0]
-                    )
+                    with t2_performance.phase("bridge_match", "cancel"):
+                        cancel_reply, cancel_events = request_with_events(
+                            sock, [3, 0, BIOMETRIC_COMMAND_HEADER.pack(
+                                BIOMETRIC_COMMAND_MAGIC, 12, 1, 0
+                            ), 0]
+                        )
                 except Exception as error:
                     result["match_cleanup_valid"] = False
                     if deferred_failure is None:
@@ -3474,6 +3523,7 @@ def main() -> None:
                         )
             reconciled_gate = targeted_gate or all_match_gate or slot_match_gate
             if reconciled_gate is not None:
+                post_attestation_started = time.monotonic()
                 post_user_reply, post_user_events = biometric_command(
                     sock,
                     0x42,
@@ -3512,8 +3562,11 @@ def main() -> None:
                         else "resolved_slot_match_post_attestation"
                     )
                 ] = post_attestation
-            match_event_summaries = [
-                summarize_event(
+                t2_performance.emit(
+                    "bridge_match", "post_attestation", post_attestation_started
+                )
+            def summarize_match_event(event):
+                return summarize_event(
                     event,
                     enrolled_identity_records,
                     expected_user_id=args.macos_user_id,
@@ -3522,8 +3575,18 @@ def main() -> None:
                     all_match_gate=all_match_gate,
                     slot_match_gate=slot_match_gate,
                 )
-                for event in events
-            ]
+            match_event_summaries = [summarize_match_event(event) for event in events]
+            if (match_started and persistence_failure is None
+                    and (args.save_biolockout_after_match_output or biolockout_store is not None)):
+                try:
+                    match_event_summaries = reconcile_match_lockout(
+                        events, summarize_match_event,
+                        lambda: len(post_match_biolockout_generations),
+                        persist_match_result,
+                        lambda: drain_post_cancel_service_events(sock, events),
+                    )
+                except Exception as error:
+                    deferred_failure = f"late-result bio-lockout reconciliation failed: {error}"
             result["match_events"] = match_event_summaries
             if (
                 args.save_biolockout_after_match_output

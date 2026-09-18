@@ -135,6 +135,57 @@ grant-expiry checks immediately before SEP mutation. `EnrollStart` and named
 deletion reach this adapter only through their explicit worker clients; the
 installed service constructs both clients.
 
+## Verification worker lifecycle
+
+The native resident worker prepares the configured identity at service startup:
+it retains the loaded AKS keybag and owned ACM contexts while idle. Each request
+reloads account/configuration authority and activation material, checks boot and
+AKS/ACM generations, obtains fresh bound operation authorization, and asks SEP
+to evaluate the retained policy again. A match still opens a fresh Bridge
+connection, reconciles local/live inventories, and requires a fresh biometric
+result. No previous caller decision or match verdict authorizes a new request.
+
+A changed binding closes the old preparation. An expired retained SEP policy
+can trigger exactly one full reauthorization before any sensor operation; no
+match is replayed. Other preparation, protocol, or cleanup failures retire the
+worker. Startup preparation failure leaves an imported worker available to
+retry on the next actual request. Startup preparation and runtime projection
+are serialized so they cannot race for the operation lock.
+
+Idle preparation holds neither the operation lock nor a sleep inhibitor. A
+root-only cooperative socket under `/run/t2-touchid/prepared` lets another
+AKS/ACM owner request release after the kernel reports `EBUSY`. The worker
+services that socket only while idle, checks peer credentials, and acknowledges
+only after its contexts and descriptors close. Active verification is never
+interrupted by a handoff. The C AKS helper delegates an `EBUSY` release to
+the same installed module using an absolute, isolated Python invocation with
+empty stdin and a 30-second child deadline, then retries the kernel open once.
+This also covers direct AKS observers and password-fallback consumers.
+Sleep quiescence, daemon shutdown, stdin EOF, and
+failed requests release preparation. An orderly shutdown attempts this cleanup
+before bounded process termination. No persistent state format changes.
+
+A checked cancellation acknowledgement permits reuse after no-touch VerifyStop;
+it proves released Bridge activity, successful cancellation, callback quiescence,
+post-attestation, and durable state for every accepted result. It cannot become
+an authentication verdict. Older single-request workers retain the bounded
+import-only spare behavior described in the
+[earlier evaluation](evaluations/touchid-responsiveness-worker-overlap-2026-09-17.md).
+Prepared workers use one process and do not start a spare.
+
+Callbacks received during BioLockout export, cancellation, draining, or
+post-attestation remain owned by the request. Every accepted result requires a
+durable BioLockout generation before completion. Consistent repeated terminal
+results for the same named finger can complete; conflicting, invalid, or
+unbound repeats fail. Cancellation's 500 ms quiet period remains unchanged.
+
+For syscall attribution, `T2_TOUCHID_PROFILE_IO=1` in the daemon environment
+enables additional `T2_PERF_EVENT` records for AKS and ACM exchanges. These
+contain only the existing timing schema and validated opcode labels, never
+request/response bodies, account identifiers, or credentials. It is off by
+default; remove a temporary service environment override after profiling.
+An ioctl duration includes kernel and SEP work and does not separate them.
+
 ## Mutation worker boundary
 
 Before exposing workers, `t2-native-first-run.service` composes native owners

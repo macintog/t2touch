@@ -9,6 +9,8 @@ import socket
 import struct
 import uuid
 
+import t2_performance
+
 
 MAGIC = 0xB892
 PROTOCOL_VERSION = 1
@@ -36,7 +38,15 @@ def is_biometric_nil_output(value: object) -> bool:
 def receive_exact(sock: socket.socket, length: int) -> bytes:
     chunks = bytearray()
     while len(chunks) < length:
-        chunk = sock.recv(length - len(chunks))
+        try:
+            chunk = sock.recv(length - len(chunks))
+        except TimeoutError as error:
+            if chunks:
+                # A caller may retry an idle wait, but not a consumed frame.
+                # This must not subclass TimeoutError: the match observer and
+                # post-cancel drain intentionally catch idle timeouts.
+                raise ConnectionError("partial BridgeXPC read timed out") from error
+            raise
         if not chunk:
             raise EOFError(f"peer closed after {len(chunks)}/{length} bytes")
         chunks.extend(chunk)
@@ -52,10 +62,19 @@ def receive_frame(sock: socket.socket) -> tuple[int, bytes]:
         raise ValueError(f"unsupported BridgeXPC protocol version {version}")
     if body_length > MAX_FRAME_BODY:
         raise ValueError(f"refusing implausible {body_length}-byte frame")
-    return frame_type, receive_exact(sock, body_length)
+    try:
+        return frame_type, receive_exact(sock, body_length)
+    except TimeoutError as error:
+        # Even with no body bytes yet, the header has already been consumed.
+        raise ConnectionError("BridgeXPC frame body timed out") from error
 
 
 def send_helo(sock: socket.socket, bridge_xpc_version: int) -> None:
+    # Configure once, before HELO and the following small request can queue
+    # behind each other's acknowledgements. This shared path covers both the
+    # probe and connection leases, without applying TCP options to socketpairs.
+    if sock.family in (socket.AF_INET, socket.AF_INET6):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     body = json.dumps(
         {
             "MaxSupportedProtocolVersion": PROTOCOL_VERSION,
@@ -88,14 +107,26 @@ def describe(frame_type: int, body: bytes) -> object:
     return {"unknown_frame_type": frame_type, "body_hex": body.hex()}
 
 
+def _validate_envelope(envelope: object) -> list[object]:
+    if type(envelope) is not list or len(envelope) != 4:
+        raise ValueError("malformed BiometricKit bridge envelope")
+    if type(envelope[0]) is not int or envelope[0] != 1:
+        raise ValueError("unsupported BiometricKit envelope version")
+    if (
+        type(envelope[1]) is not bool
+        or type(envelope[2]) is not str
+        or not envelope[2]
+    ):
+        raise ValueError("malformed BiometricKit envelope routing")
+    return envelope
+
+
 def receive_envelope(sock: socket.socket) -> list[object]:
     frame_type, frame_body = receive_frame(sock)
     envelope = describe(frame_type, frame_body)
     if frame_type != TYPE_MESSAGE:
         raise ValueError(f"expected message frame, received type {frame_type}")
-    if type(envelope) is not list or len(envelope) != 4:
-        raise ValueError("malformed BiometricKit bridge envelope")
-    return envelope
+    return _validate_envelope(envelope)
 
 
 MAX_CALLBACK_EVENTS = MAX_SERVICE_CALLBACKS
@@ -113,16 +144,11 @@ def request_with_events(
         envelope = describe(frame_type, frame_body)
         if frame_type != TYPE_MESSAGE:
             raise ValueError(f"expected message frame, received type {frame_type}")
-        if type(envelope) is not list or len(envelope) != 4:
-            raise ValueError("malformed BiometricKit bridge envelope")
-        if envelope[0] != 1:
-            raise ValueError("unsupported BiometricKit envelope version")
+        envelope = _validate_envelope(envelope)
         if envelope[1] is True:
             if envelope[2] != reply_id:
                 raise ValueError("reply envelope does not match request")
             return envelope[3], events
-        if envelope[1] is not False or not isinstance(envelope[2], str):
-            raise ValueError("malformed BiometricKit service callback")
         event_bytes += len(frame_body)
         if (
             len(events) >= MAX_SERVICE_CALLBACKS
@@ -155,6 +181,7 @@ def biometric_command(
     )
     inner.extend(data)
     try:
-        return request_with_events(sock, [3, 0, bytes(inner), output_capacity])
+        with t2_performance.transport_phase("biometric", f"op_{command:02x}"):
+            return request_with_events(sock, [3, 0, bytes(inner), output_capacity])
     finally:
         inner[:] = b"\x00" * len(inner)

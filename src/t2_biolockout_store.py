@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -118,6 +119,16 @@ class BioLockoutStore:
             os.close(descriptor)
 
     @staticmethod
+    def _name_exists(directory: int, name: str) -> bool:
+        # A single exact-name lookup avoids rescanning every retained result.
+        # Dangling symlinks also occupy a name and must not be overwritten.
+        try:
+            os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+
+    @staticmethod
     def _validate_payload(payload: object) -> bytes:
         if type(payload) is not bytes:
             raise BioLockoutStoreError("bio-lockout generation is not byte data")
@@ -189,6 +200,9 @@ class BioLockoutStore:
         directory = self._open_root()
         pending_names: list[str] = []
         try:
+            # Keep sequence selection and both publications one transaction.
+            # Lock the already validated directory, not a new state file.
+            fcntl.flock(directory, fcntl.LOCK_EX)
             highest_artifact = 0
             for name in os.listdir(directory):
                 match = GENERATION_RE.fullmatch(name)
@@ -207,7 +221,7 @@ class BioLockoutStore:
             pending_names.extend((pending_blob, pending_manifest))
 
             self._write_private_file(directory, pending_blob, payload)
-            if blob_name in os.listdir(directory):
+            if self._name_exists(directory, blob_name):
                 raise BioLockoutStoreError("bio-lockout generation collision")
             os.rename(
                 pending_blob,
@@ -230,7 +244,7 @@ class BioLockoutStore:
                 separators=(",", ":"),
             ).encode("ascii") + b"\n"
             self._write_private_file(directory, pending_manifest, manifest)
-            if manifest_name in os.listdir(directory):
+            if self._name_exists(directory, manifest_name):
                 raise BioLockoutStoreError("bio-lockout manifest collision")
             os.rename(
                 pending_manifest,
@@ -242,9 +256,12 @@ class BioLockoutStore:
             os.fsync(directory)
             return BioLockoutGeneration(sequence, payload, len(payload), digest)
         finally:
-            for pending_name in pending_names:
-                try:
-                    os.unlink(pending_name, dir_fd=directory)
-                except FileNotFoundError:
-                    pass
-            os.close(directory)
+            try:
+                for pending_name in pending_names:
+                    try:
+                        os.unlink(pending_name, dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                # Also release the directory lock when pending cleanup fails.
+                os.close(directory)

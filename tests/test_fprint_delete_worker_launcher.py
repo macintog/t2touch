@@ -60,8 +60,8 @@ class FprintDeleteWorkerLauncherTests(unittest.TestCase):
 
         def connect():
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-            connection.connect(str(endpoint))
             self.peer_pid = os.getpid()
+            connection.connect(str(endpoint))
             connection.recv(1)
             connection.close()
 

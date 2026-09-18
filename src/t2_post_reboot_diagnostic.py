@@ -25,6 +25,8 @@ STAGES = frozenset(
 
 
 CHILD_FAILURE_REASONS = {
+    b"t2-touchid-manage: live identities differ from this installation; preserving saved archives and hardware state; reconcile the authoritative installation before startup": "installation-inventory-conflict",
+    b"t2-touchid-manage: an earlier biometric mutation is unfinished or awaits verification": "pending-biometric-mutation",
     b"t2-touchid-manage: retained master requires explicit native-state recovery": "retained-master-recovery-required",
     b"t2-touchid-manage: restored master Catacomb does not advertise the selected user": "restore-user-not-advertised",
     b"t2-touchid-manage: selected user Catacomb load did not succeed": "restore-user-load-rejected",

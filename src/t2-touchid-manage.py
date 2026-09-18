@@ -793,10 +793,12 @@ def status() -> dict[str, object]:
     delete_phases: dict[str, int] = {}
     sync_phases: dict[str, int] = {}
     external_phases: dict[str, int] = {}
+    native_recovery_phases: dict[str, int] = {}
     rename_pending = 0
     delete_pending = 0
     sync_pending = 0
     external_pending = 0
+    native_recovery_pending = 0
     batch_pending = 0
     batch_phases: dict[str, int] = {}
     rename_post_reboot = 0
@@ -824,6 +826,15 @@ def status() -> dict[str, object]:
         elif entry.kind == "delete-batch" and entry.blocks_new_mutation:
             batch_phases[entry.phase] = batch_phases.get(entry.phase, 0) + 1
             batch_pending += 1
+        elif (
+            entry.kind == t2_native_state_recovery.KIND
+            and entry.blocks_new_mutation
+        ):
+            native_recovery_phases[entry.phase] = (
+                native_recovery_phases.get(entry.phase, 0) + 1
+            )
+            native_recovery_pending += 1
+    pending_count = sum(item.blocks_new_mutation for item in entries)
     return {
         "schema_version": 1,
         "status_only": True,
@@ -839,9 +850,14 @@ def status() -> dict[str, object]:
         ),
         "delete_batch_pending_count": batch_pending,
         "delete_batch_pending_phases": dict(sorted(batch_phases.items())),
+        "native_state_recovery_pending_count": native_recovery_pending,
+        "native_state_recovery_pending_phases": dict(
+            sorted(native_recovery_phases.items())
+        ),
         "post_reboot_pending_count": rename_post_reboot + delete_post_reboot,
         "rename_recovery_candidate": (
             rename_pending == 1
+            and pending_count == 1
             and rename_post_reboot == 0
             and delete_pending == 0
             and sync_pending == 0
@@ -850,13 +866,14 @@ def status() -> dict[str, object]:
         ),
         "delete_recovery_candidate": (
             delete_pending == 1
+            and pending_count == 1
             and delete_post_reboot == 0
             and rename_pending == 0
             and sync_pending == 0
             and external_pending == 0
             and batch_pending == 0
         ),
-        "new_mutation_blocked": any(item.blocks_new_mutation for item in entries),
+        "new_mutation_blocked": pending_count > 0,
         "identifiers_redacted": True,
     }
 
@@ -1657,6 +1674,15 @@ def run_native_state_recovery(
                 "fingerprint_reenrollment_required": reenrollment_required,
                 "identifiers_redacted": True,
             }
+        if history.milestone in {
+            "CANONICAL_MASTER_LOAD_REPLY_REJECTED",
+            "CANONICAL_MASTER_REPLY_RECONCILED",
+        }:
+            raise IdentityManagementError(
+                "canonical master load was rejected; an empty state-3 master "
+                "does not prove the saved archive loaded; preserving state "
+                "before further commands"
+            )
         resumable_canonical_restart = (
             t2_native_state_recovery.canonical_restart_is_resumable(records)
         )
@@ -1668,9 +1694,17 @@ def run_native_state_recovery(
         resumable_empty_reprovision = (
             t2_native_state_recovery.empty_reprovision_is_resumable(records)
         )
+        if (
+            history.milestone == "CANONICAL_USER_LOAD_REPLY_REJECTED"
+            and not resumable_empty_reprovision
+        ):
+            raise IdentityManagementError(
+                "saved-user failure lacks a validated firmware rejection status; "
+                "preserving state for diagnosis, not authorizing empty reprovision"
+            )
         if resumable_empty_reprovision and not allow_fingerprint_loss:
             raise IdentityManagementError(
-                "the saved fingerprint generation is incompatible; preserving it "
+                "the saved fingerprint load was rejected; preserving it "
                 "and stopping before empty reprovision (rerun only if fingerprint "
                 "loss and reenrollment are accepted)"
             )
@@ -1703,6 +1737,38 @@ def run_native_state_recovery(
             raise IdentityManagementError(
                 "native-state recovery has an ambiguous command outcome; do not retry"
             )
+
+    # Component admission/removal can change the SEP generation even when the
+    # host archive is retained. Until preservation across those operations is
+    # qualified, the loss acknowledgement must precede them, not just the final
+    # replacement of the host archive. Keep cold readback/load-only continuations
+    # available; never use an earlier invocation's generic recovery acknowledgement
+    # as consent to recreate components.
+    generation_changing_phases = {
+        "BASELINE_RECONCILED",
+        "PREPARE_MASTER_ACCEPTED",
+        "MISSING_COMPONENTS_POST_STATE_REJECTED",
+        "LOADED_EMPTY_USER_RECONCILED",
+        "REMOVE_EMPTY_USER_ACCEPTED",
+        "REMOVED_USER_RECONCILED",
+        "MASTER_EXPORT_CONFIRMED",
+        "MASTER_SETTLED",
+        "REPREPARE_MASTER_ACCEPTED",
+        "EMPTY_REPROVISION_SURFACE_RECONCILED",
+        "EMPTY_REPROVISION_MASTER_ACCEPTED",
+        "EMPTY_REPROVISION_USER_ACCEPTED",
+        "EMPTY_REPROVISION_CLIENT_SELECTED",
+    }
+    if not allow_fingerprint_loss and (
+        history is None or history.milestone in generation_changing_phases
+    ):
+        raise IdentityManagementError(
+            "native recovery would recreate or remove T2 components and may "
+            "invalidate saved fingerprints; preserving state before dispatch. "
+            "This path is not qualified for fingerprint preservation. "
+            "The separate --acknowledge-fingerprint-loss-and-reenrollment "
+            "option is required"
+        )
 
     with _native_management_lease(
         configuration,
@@ -2086,18 +2152,7 @@ def run_native_state_recovery(
                     apple_user_id=selected.apple_uid,
                     journal_path=journal_path,
                 )
-            if history.milestone == "CANONICAL_MASTER_LOAD_REPLY_REJECTED":
-                history = (
-                    t2_native_state_recovery.reconcile_canonical_master_reply(
-                        lease,
-                        apple_user_id=selected.apple_uid,
-                        journal_path=journal_path,
-                    )
-                )
-            if history.milestone in {
-                "CANONICAL_MASTER_RECONCILED",
-                "CANONICAL_MASTER_REPLY_RECONCILED",
-            }:
+            if history.milestone == "CANONICAL_MASTER_RECONCILED":
                 history = t2_native_state_recovery.load_canonical_user(
                     lease,
                     apple_user_id=selected.apple_uid,
@@ -2269,11 +2324,14 @@ def run_external_delete_reconciliation(
                     # local identities to disguise a failed cold-start proof.
                     raise
                 if configuration.get("authority_mode") == "linux-native" and live.get("per_user_identity_records"):
-                    return t2_external_inventory_sync.reconcile(
-                        local=local, live=live, store=store, lease=lease,
-                        mapping_generation=configuration["mapping_generation"],
-                        backup_root=EXTERNAL_BACKUP_ROOT, mutation_root=MUTATION_ROOT,
-                        collect=t2_bridge_inventory.collect_stable_private_inventory,
+                    # A cloned installation can share account authority while
+                    # retaining an older archive. Saving the other installation's
+                    # live inventory here advances shared SEP state and leaves
+                    # its host archive stale. Startup cannot choose that owner.
+                    raise IdentityManagementError(
+                        "live identities differ from this installation; "
+                        "preserving saved archives and hardware state; "
+                        "reconcile the authoritative installation before startup"
                     )
             else:
                 if (

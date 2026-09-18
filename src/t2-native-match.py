@@ -48,6 +48,8 @@ import t2_aks_transport
 import t2_enrollment_journal
 import t2_fprint_result
 import t2_performance
+import t2_prepared_identity
+import t2_preparation_lease
 import t2_rsd
 import t2_user_activation_operation
 import t2_user_authority
@@ -874,9 +876,8 @@ def _run_probe(
                     continue
             returncode = process.returncode
         else:
-            # The resident helper is single-use. Running the already-imported
-            # probe in that consumed process preserves per-request process
-            # isolation without paying a second Python import cold start.
+            # Reuse imported code; bridge main still owns a fresh connection
+            # and all request-local protocol state for this verification.
             read_fd = -1  # bridge main owns and closes the credential descriptor.
             previous_argv = sys.argv
             previous_signal = signal.getsignal(signal.SIGTERM)
@@ -931,7 +932,11 @@ def _run(
     *,
     result_sink=None,
     bridge_main=None,
+    prepared_identity=None,
+    prepare_only=False,
 ) -> int:
+    if prepare_only and prepared_identity is None:
+        raise NativeMatchError("preparation requires an owned resident session")
     operation_started = time.monotonic()
     phase_started = time.monotonic()
     configuration = _configuration()
@@ -963,8 +968,12 @@ def _run(
             )
             t2_performance.emit("native_match", "endpoint_discovery", phase_started)
             with (
-                t2_aks_transport.AKSActivationTransport() as transport,
-                t2_acm_device.ACMDevice() as acm_device,
+                (t2_aks_transport.AKSActivationTransport()
+                 if prepared_identity is None else prepared_identity.open(
+                     authority, configuration, linux_boot_uuid
+                 )) as transport,
+                (t2_acm_device.ACMDevice() if prepared_identity is None
+                 else prepared_identity.open_acm()) as acm_device,
             ):
                 phase_started = time.monotonic()
                 decision, operation_id = _authorize(
@@ -984,7 +993,11 @@ def _run(
                         "native_match", "activation_secret_load", phase_started
                     )
                     phase_started = time.monotonic()
-                    with t2_user_activation_operation.retain_ready_identity_handle(
+                    retain_identity = (
+                        t2_user_activation_operation.retain_ready_identity_handle
+                        if prepared_identity is None else prepared_identity.retain
+                    )
+                    with retain_identity(
                         journal_path,
                         authority.mapping_set,
                         selected,
@@ -1011,7 +1024,11 @@ def _run(
                         final_policy = None
                         try:
                             phase_started = time.monotonic()
-                            with t2_acm_device.identity_authorized_context(
+                            authorize_identity = (
+                                t2_acm_device.identity_authorized_context
+                                if prepared_identity is None else prepared_identity.authorize
+                            )
+                            with authorize_identity(
                                 acm_device,
                                 selected.apple_uid,
                                 activation_material,
@@ -1059,6 +1076,10 @@ def _run(
                                     raise NativeMatchError(
                                         "native match cancelled before sensor start"
                                     )
+                                if prepare_only:
+                                    # Startup may prepare the identity capability;
+                                    # only an actual request may start the sensor.
+                                    return 0
                                 phase_started = time.monotonic()
                                 result = _run_probe(
                                     configuration,
@@ -1115,6 +1136,7 @@ def _worker_arguments(value: object) -> argparse.Namespace:
     if (
         type(value) is not dict
         or set(value) != fields
+        or type(value["schema_version"]) is not int
         or value["schema_version"] != 1
     ):
         raise NativeMatchError("resident match request schema is invalid")
@@ -1162,8 +1184,22 @@ def _worker_response_line(response: object) -> bytes:
     return payload
 
 
+def _run_prepared_match(arguments, cancellation, captured, bridge_main, session):
+    """Renew an expired capability once, before any sensor operation starts."""
+    for attempt in range(2):
+        try:
+            return _run(arguments, cancellation, result_sink=captured.write,
+                        bridge_main=bridge_main, prepared_identity=session)
+        except t2_prepared_identity.PreparedAuthorizationExpired:
+            # _run closes the invalid session before propagating this precise
+            # pre-match failure. A retry reloads authority and authenticates a
+            # new context; it never substitutes a cached satisfied decision.
+            if attempt or cancellation.is_set() or captured.getvalue():
+                raise
+
+
 def _serve_worker() -> int:
-    """Prepare imported code, then serve one freshly authorized request."""
+    """Serve fresh matches around one generation-bound, releasable identity."""
 
     try:
         from pymobiledevice3.remote import remotexpc as _remote_xpc
@@ -1177,11 +1213,6 @@ def _serve_worker() -> int:
         raise NativeMatchError("resident bridge probe could not be loaded")
     bridge_probe = importlib.util.module_from_spec(bridge_spec)
     bridge_spec.loader.exec_module(bridge_probe)
-    print(
-        json.dumps({"schema_version": 1, "ready": True}, separators=(",", ":")),
-        flush=True,
-    )
-
     current_cancellation: Event | None = None
     previous_signal = signal.getsignal(signal.SIGTERM)
 
@@ -1190,8 +1221,32 @@ def _serve_worker() -> int:
             current_cancellation.set()
 
     signal.signal(signal.SIGTERM, request_cancel)
+    prepared_identity = t2_prepared_identity.PreparedIdentity(close_scope=_sleep_inhibitor)
+    idle_owner = None
     try:
+        current_cancellation = Event()
+        try:
+            _run(argparse.Namespace(), current_cancellation,
+                 prepared_identity=prepared_identity, prepare_only=True)
+            idle_owner = t2_preparation_lease.IdleOwner(prepared_identity.close)
+        except Exception as error:
+            prepared_identity.close()
+            # Startup can race an enrollment or an unavailable endpoint. Keep
+            # the imported worker usable; the next real request retries once.
+            t2_performance.emit("native_match", "startup_preparation_unavailable",
+                                time.monotonic(), "unavailable")
+        finally:
+            current_cancellation = None
+        print(
+            json.dumps({"schema_version": 1, "ready": True, "retained_identity": True}, separators=(",", ":")),
+            flush=True,
+        )
         while True:
+            if idle_owner is not None:
+                readable, _, _ = select.select([sys.stdin.buffer, idle_owner], [], [])
+                if idle_owner in readable:
+                    idle_owner.service()
+                    continue
             line = sys.stdin.buffer.readline(64 * 1024)
             if not line:
                 return 0
@@ -1204,28 +1259,27 @@ def _serve_worker() -> int:
                 arguments = _worker_arguments(request_value)
                 request_id = arguments.request_id
                 request_valid = True
-                returncode = _run(
-                    arguments,
-                    current_cancellation,
-                    result_sink=captured.write,
-                    bridge_main=bridge_probe.main,
-                )
+                returncode = _run_prepared_match(arguments, current_cancellation,
+                    captured, bridge_probe.main, prepared_identity)
                 result = json.loads(captured.getvalue())
                 if returncode != 0 or type(result) is not dict:
                     raise NativeMatchError("resident match result is invalid")
-                terminal = t2_fprint_result.compact_worker_result(
-                    result,
-                    arguments.match_finger_name,
-                    arguments.resolve_any_finger_name,
-                )
-                response = {
-                    "schema_version": 1,
-                    "request_id": request_id,
-                    "ok": True,
-                    "result": terminal,
-                }
+                if result.get("termination_requested") is True:
+                    t2_fprint_result.validate_cancelled_probe_result(
+                        result, arguments.match_finger_name, arguments.resolve_any_finger_name
+                    )
+                    response = {"schema_version": 1, "request_id": request_id,
+                                "ok": True, "cancelled": True}
+                else:
+                    terminal = t2_fprint_result.compact_worker_result(
+                        result, arguments.match_finger_name, arguments.resolve_any_finger_name
+                    )
+                    response = {"schema_version": 1, "request_id": request_id,
+                                "ok": True, "result": terminal}
+                if idle_owner is None:
+                    idle_owner = t2_preparation_lease.IdleOwner(prepared_identity.close)
             except Exception as error:
-                response = {
+                    response = {
                     "schema_version": 1,
                     "request_id": request_id,
                     "ok": False,
@@ -1241,13 +1295,14 @@ def _serve_worker() -> int:
                 )
             sys.stdout.buffer.write(_worker_response_line(response))
             sys.stdout.buffer.flush()
-            if not request_valid:
+            if not request_valid or response["ok"] is not True:
                 return 1
-            # A prepared worker is consumed by one hardware transaction.
-            # fprintd starts a fresh imported replacement after this response,
-            # so process-global AKS/ACM/RemoteXPC state never crosses requests.
-            return 0
     finally:
+        try:
+            prepared_identity.close()
+        finally:
+            if idle_owner is not None:
+                idle_owner.close()
         signal.signal(signal.SIGTERM, previous_signal)
 
 
