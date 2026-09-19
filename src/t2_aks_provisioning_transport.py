@@ -341,8 +341,11 @@ class AKSProvisioningTransport:
             try:
                 response = self._exchange(0x51, request, codec.MAX_BODY_BYTES)
             except AKSProvisioningTransportError as error:
-                if error.sep_status == -3:
-                    return b"mailbox-status:-3"
+                # bridgeOS 17.x reports primary-identity absence with
+                # mailbox status -13 instead of the reference -3
+                # (Linux-only MacBookPro15,2, no retained identity).
+                if error.sep_status in (-3, -13):
+                    return b"mailbox-status:%d" % error.sep_status
                 raise
             if response == struct.pack("<II", 0xFFFFFFFD, 0):
                 return b"body-status:-3"

@@ -513,12 +513,16 @@ static int t2_aks_digest(void *message, size_t length)
 		return -EINVAL;
 	header_size = get_unaligned_le32(message);
 	version = le32_to_cpu(header->version);
-	if ((version == T2_SEP_AKS_HEADER_V1 &&
-	     header_size != T2_SEP_AKS_HEADER_V1_SIZE) ||
+	/* Size selects framing; version selects the codec. v2 framing is
+	 * valid for either version (see reply validation above); a v2 codec
+	 * with v1 framing cannot occur because v2 only appends trailing
+	 * bytes. */
+	if ((version != T2_SEP_AKS_HEADER_V1 &&
+	     version != T2_SEP_AKS_HEADER_V2) ||
 	    (version == T2_SEP_AKS_HEADER_V2 &&
 	     header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
-	    (version != T2_SEP_AKS_HEADER_V1 &&
-	     version != T2_SEP_AKS_HEADER_V2) ||
+	    (header_size != T2_SEP_AKS_HEADER_V1_SIZE &&
+	     header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
 	    length < sizeof(__le32) + header_size)
 		return -EPROTO;
 
@@ -536,6 +540,67 @@ static int t2_aks_digest(void *message, size_t length)
 	if (!ret)
 		ret = crypto_shash_update(desc, (u8 *)header + sizeof(header->digest),
 					 header_size - sizeof(header->digest));
+	if (!ret)
+		ret = crypto_shash_update(desc,
+					 message + sizeof(__le32) + header_size,
+					 length - sizeof(__le32) - header_size);
+	if (!ret)
+		ret = crypto_shash_final(desc, digest);
+	if (!ret)
+		memcpy(header->digest, digest, sizeof(header->digest));
+
+	memzero_explicit(digest, sizeof(digest));
+	kfree(desc);
+	crypto_free_shash(tfm);
+	return ret;
+}
+
+/* bridgeOS 17.x replies are authenticated with the v1 header fields only:
+ * SHA-256 over the bytes after the digest through the END of the v1 header,
+ * then the body starting at the DECLARED header end. The v2
+ * calendar_seconds extension between those boundaries is skipped. Verified
+ * byte-for-byte against a live capability reply; for v1-framed replies both
+ * boundaries coincide, so this equals the request-side rule. Requests are
+ * still verified by the SEP with the contiguous rule, so sending keeps
+ * t2_aks_digest(). */
+static int t2_aks_reply_digest(void *message, size_t length)
+{
+	struct t2_aks_header_v1 *header = message + sizeof(__le32);
+	struct crypto_shash *tfm;
+	struct shash_desc *desc;
+	u8 digest[SHA256_DIGEST_SIZE];
+	u32 header_size;
+	u32 version;
+	int ret;
+
+	if (length < sizeof(__le32) + sizeof(header->digest) + sizeof(header->version))
+		return -EINVAL;
+	header_size = get_unaligned_le32(message);
+	version = le32_to_cpu(header->version);
+	if ((version != T2_SEP_AKS_HEADER_V1 &&
+	     version != T2_SEP_AKS_HEADER_V2) ||
+	    (version == T2_SEP_AKS_HEADER_V2 &&
+	     header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
+	    (header_size != T2_SEP_AKS_HEADER_V1_SIZE &&
+	     header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
+	    length < sizeof(__le32) + header_size)
+		return -EPROTO;
+
+	tfm = crypto_alloc_shash("sha256", 0, 0);
+	if (IS_ERR(tfm))
+		return PTR_ERR(tfm);
+	desc = kmalloc(sizeof(*desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
+	if (!desc) {
+		crypto_free_shash(tfm);
+		return -ENOMEM;
+	}
+	desc->tfm = tfm;
+
+	ret = crypto_shash_init(desc);
+	if (!ret)
+		ret = crypto_shash_update(desc, (u8 *)header + sizeof(header->digest),
+					 T2_SEP_AKS_HEADER_V1_SIZE -
+						sizeof(header->digest));
 	if (!ret)
 		ret = crypto_shash_update(desc,
 					 message + sizeof(__le32) + header_size,
@@ -590,6 +655,7 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 	size_t wire_size;
 	u32 header_size;
 	u32 header_version;
+	u32 reply_header_size;
 	u16 reply_length;
 	s8 reply_status;
 	u8 transaction;
@@ -831,22 +897,35 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 			operation, reply_length, reply.word[1] & 0xffff);
 		return -EPROTO;
 	}
-	if (get_unaligned_le32(sep->ool_out) != header_size ||
+	/* The capability response selects its own framing (sep-architecture.md:
+	 * negotiation begins with v1, "a successful response selects the
+	 * supported version"). bridgeOS 17.x answers the v1-framed probe with
+	 * a v2-sized envelope whose version field still reads 1; v2 only
+	 * extends v1 with trailing bytes, so all shared fields keep their
+	 * offsets. Accept either declared size, require the version to match
+	 * the request, and parse the body at the reply's framing. The digest
+	 * below still authenticates every reply byte. */
+	reply_header_size = get_unaligned_le32(sep->ool_out);
+	if ((reply_header_size != T2_SEP_AKS_HEADER_V1_SIZE &&
+	     reply_header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
 	    get_unaligned_le32(sep->ool_out + sizeof(__le32) + 0x10) !=
 	    header_version) {
 		dev_err(&sep->pdev->dev,
 			"AKS operation %#x returned invalid envelope metadata (size %#x version %#x)\n",
-			operation, get_unaligned_le32(sep->ool_out),
+			operation, reply_header_size,
 			get_unaligned_le32(sep->ool_out + sizeof(__le32) + 0x10));
 		return -EPROTO;
 	}
+	wire_size = sizeof(__le32) + reply_header_size;
+	if (reply_length < wire_size)
+		return -EPROTO;
 
 	{
 		u8 expected[16];
 
 		memcpy(expected, sep->ool_out + sizeof(__le32), sizeof(expected));
 		memset(sep->ool_out + sizeof(__le32), 0, sizeof(expected));
-		ret = t2_aks_digest(sep->ool_out, reply_length);
+		ret = t2_aks_reply_digest(sep->ool_out, reply_length);
 		if (!ret && memcmp(expected,
 				sep->ool_out + sizeof(__le32), sizeof(expected)))
 			ret = -EBADMSG;
@@ -1593,14 +1672,21 @@ static long t2_aks_ioctl(struct file *file, unsigned int command,
 	ret = t2_aks_exchange_locked(sep, exchange.operation, request,
 				     exchange.request_length, &response,
 				     &response_length, &exchange.sep_status);
-	if (exchange.operation == T2_SEP_AKS_GET_PRIMARY_IDENTITY) {
-		if ((ret && exchange.sep_status == -3) ||
-		    (!ret && t2_aks_get_primary_identity_absent_response(
-			     response, response_length)))
-			t2_aks_record_absence_locked(sep, request);
-		else
-			t2_aks_reset_absence_locked(sep);
-	}
+		if (exchange.operation == T2_SEP_AKS_GET_PRIMARY_IDENTITY) {
+			/* bridgeOS 17.x reports primary-identity absence with
+			 * mailbox status -13 instead of the reference -3
+			 * (verified on a Linux-only MacBookPro15,2 with no
+			 * retained user identity). Scoped to this query only:
+			 * -13 on other operations keeps its own meaning. */
+			if ((ret &&
+			     (exchange.sep_status == -3 ||
+			      exchange.sep_status == -13)) ||
+			    (!ret && t2_aks_get_primary_identity_absent_response(
+				     response, response_length)))
+				t2_aks_record_absence_locked(sep, request);
+			else
+				t2_aks_reset_absence_locked(sep);
+		}
 	if (exchange.operation == 0x21)
 		t2_aks_record_password_binding_locked(
 			sep, request, exchange.request_length, response,
@@ -2587,5 +2673,5 @@ static struct pci_driver t2_sep_driver = {
 module_pci_driver(t2_sep_driver);
 
 MODULE_AUTHOR("T2 Touch ID Linux research project");
-MODULE_DESCRIPTION("Staged Apple T2 SEP mailbox and OOL transport");
+MODULE_DESCRIPTION("Staged Apple T2 SEP mailbox and OOL transport r2-strict-20260919");
 MODULE_LICENSE("GPL");
