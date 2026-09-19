@@ -419,6 +419,11 @@ retires its unchanged older override; review [the migration](SLEEP_POLICY.md)
 before upgrading. A reboot is the known recovery boundary for an unusable
 transport. Do not substitute USB or PCI rebinds.
 
+The deep-sleep transport failure is a `t2bce_vhci` driver bug with a
+confirmed cause and upstream fixes pending; the
+[disposition](dispositions/t2bce-stateful-resume-bulk-out.md) records the
+evidence, the pull requests, and an operator-owned workaround with rollback.
+
 When reporting a suspend failure, include the selected sleep mode, kernel and
 bridgeOS versions, whether ordinary startup works, and whether the failure
 occurs with an operator or distribution sleep override. Review diagnostic output for private
