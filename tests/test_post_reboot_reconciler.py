@@ -683,6 +683,7 @@ class PostRebootReconcilerTests(unittest.TestCase):
         uninstall = (root / "uninstall.sh").read_text(encoding="utf-8")
         for required in (
             "Before=fprintd.service",
+            "RemainAfterExit=yes",
             "EnvironmentFile=/etc/t2-touchid.conf",
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",

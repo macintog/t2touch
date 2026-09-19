@@ -391,7 +391,11 @@ install -d -o root -g root -m 0700 \
   /var/lib/t2-touchid/external-reconciliation-backups
 install -d -o root -g root -m 0700 /run/t2-touchid/workers
 install -o root -g root -m 0755 "$source_dir/src/"*.py "$target_dir/src/"
-install -o root -g root -m 0755 "$source_dir/src/t2touch.py" /usr/local/bin/t2touch
+install -o root -g root -m 0755 "$source_dir/src/t2_touchid_cli.py" /usr/local/bin/t2touch
+for command in status list count verify; do
+  install -o root -g root -m 0755 "$source_dir/src/t2-touchid-client.sh" \
+    "/usr/local/sbin/t2-touchid-$command"
+done
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-delete.sh" /usr/local/sbin/t2-touchid-delete
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-purge.sh" /usr/local/sbin/t2-touchid-purge
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-doctor.py" /usr/local/sbin/t2-touchid-doctor
@@ -417,7 +421,6 @@ install -o root -g root -m 0755 "$source_dir/src/t2-touchid-user-broker-gate.py"
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-fprint-status.py" /usr/local/sbin/t2-touchid-fprint-status
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-fprint-enrollment-gate.py" /usr/local/sbin/t2-touchid-fprint-enrollment-gate
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-post-reboot.py" /usr/local/sbin/t2-touchid-post-reboot
-install -o root -g root -m 0755 "$source_dir/src/t2-native-enroll.py" /usr/local/sbin/t2-native-enroll
 install -o root -g root -m 0700 "$source_dir/src/t2-fprint-enrollment-worker.py" /usr/local/sbin/t2-fprint-enrollment-worker
 install -o root -g root -m 0700 "$source_dir/src/t2-fprint-delete-worker.py" /usr/local/sbin/t2-fprint-delete-worker
 install -o root -g root -m 0644 "$source_dir/README.md" "$target_dir/README.md"
@@ -482,6 +485,13 @@ install -o root -g root -m 0755 "$source_dir/src/t2-new-finger-tui-launch.sh" /o
 install -o root -g root -m 0755 "$source_dir/src/t2-match-tui-launch.sh" /opt/t2-touchid/bin/t2-native-match-tui-launch
 install -o root -g root -m 0755 "$source_dir/src/t2-negative-tui-launch.sh" /opt/t2-touchid/bin/t2-native-negative-tui-launch
 install -o root -g root -m 0755 "$source_dir/src/t2-second-finger-tui-launch.sh" /opt/t2-touchid/bin/t2-second-finger-tui-launch
+# Keep research interfaces explicit and outside ordinary PATH lookup.
+for command in t2-native-enroll t2-native-enroll-tui t2-native-match t2-native-provision \
+  t2-native-provision-verify t2-native-provisioning-preflight t2-native-replace \
+  t2-native-replace-activate t2-second-finger-ceremony; do
+  install -o root -g root -m 0755 "$source_dir/src/t2-research-command.sh" \
+    "/opt/t2-touchid/bin/$command"
+done
 remove_legacy_path_research_helpers
 install -o root -g root -m 0644 \
   "$source_dir/systemd/system/fprintd.service" \
@@ -710,7 +720,7 @@ if [[ $authority_mode == linux-native ]]; then
     echo "t2touch userspace is installed. Finish the Omarchy logout step before enrolling."
   else
     echo "t2touch is installed. Log out and sign back in, then enroll a fingerprint with:"
-    echo "  t2touch enroll"
+    echo "  t2-touchid-enroll"
   fi
 else
   echo "Compatibility mode is installed. Run sudo t2-touchid-doctor for its status."

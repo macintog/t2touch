@@ -8,13 +8,13 @@ fprintd-compatible service, not a libfprint driver loaded into the stock daemon.
 
 The [README](../README.md) covers installation and everyday commands.
 [Fprintd integration](FPRINT_INTEGRATION.md) specifies the client and worker
-contracts; the [protocol reference](research/README.md) explains AKS, ACM,
+contracts; the [protocol reference](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/README.md) explains AKS, ACM,
 BridgeXPC, and Catacomb formats.
 
 ## Components and control flow
 
 ```text
-  t2touch CLI / enrollment TUI       sudo / PolicyKit / lock screen
+  t2-touchid-* / enrollment TUI       sudo / PolicyKit / lock screen
                    \                 /
                     fprintd D-Bus API
                             |
@@ -33,8 +33,8 @@ BridgeXPC, and Catacomb formats.
                        Secure Enclave
 ```
 
-- [`src/t2touch.py`](../src/t2touch.py) dispatches enrollment to the direct
-  D-Bus TUI, reads validated neutral inventory through `busctl`, and uses the
+- [`src/t2_touchid_cli.py`](../src/t2_touchid_cli.py) dispatches enrollment to the direct
+  D-Bus TUI, reads validated neutral inventory through the typed D-Bus inventory reader, and uses the
   stock fprintd verification client. Product deletion authorizes its privileged
   helper through pkexec before taking the reader; the helper enters the shared
   journaled deletion path. The lower-level D-Bus named deletion method remains

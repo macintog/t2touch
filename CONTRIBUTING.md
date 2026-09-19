@@ -25,7 +25,7 @@ before choosing an implementation or promising a release.
 Do not turn a read-only task into an authentication or mutation experiment in
 the same change. Hardware-affecting commands must retain their explicit
 acknowledgements and preflight checks. This research restriction does not add
-acknowledgement flags to the installed `t2touch enroll` or `delete` commands;
+acknowledgement flags to the installed `t2-touchid-enroll` or `delete` commands;
 those use the product’s caller authorization and journaled workers.
 
 ## Development setup
@@ -60,7 +60,7 @@ tests and the userspace build do not prove that a module is safe to load.
 
 Start with the [architecture](docs/ARCHITECTURE.md),
 [fprintd contracts](docs/FPRINT_INTEGRATION.md), and
-[protocol research](docs/research/README.md). Keep hardware
+[protocol research](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/README.md). Keep hardware
 claims tied to a named platform, source revision, client boundary, and retained
 redacted evidence.
 

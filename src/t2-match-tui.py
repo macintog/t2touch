@@ -28,6 +28,7 @@ CSI = "\x1b["
 ALT_SCREEN_ON = f"{CSI}?1049h{CSI}?25l"
 ALT_SCREEN_OFF = f"{CSI}?25h{CSI}?1049l"
 MUTATION_ROOT = Path("/var/lib/t2-touchid/mutations")
+NERD_FONT_PATH = Path("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")
 
 
 def _addition_journal() -> Path:
@@ -97,6 +98,9 @@ class TerminalUI:
         self.last_second: int | None = None
         self.color_enabled = "NO_COLOR" not in os.environ
         self.unicode = self._supports_unicode()
+        self.fingerprint_icon = (
+            "󰈷" if self.unicode and NERD_FONT_PATH.is_file() else "◎"
+        )
         self.previous_winch: object = None
 
     @staticmethod
@@ -163,7 +167,11 @@ class TerminalUI:
         art = {
             "standby": ("      ·       ", "    ·   ·     ", "      ·       "),
             "starting": ("      ◌       ", "    ◌   ◌     ", "      ◌       "),
-            "waiting": ("              ", "      ◎       ", "              "),
+            "waiting": (
+                "              ",
+                f"      {self.fingerprint_icon}       ",
+                "              ",
+            ),
             "present": ("     ╭──╮     ", "   ╭─╯  ╰─╮   ", "   ╰─╮  ╭─╯   "),
             "lift": ("      ↑       ", "    ↑ ↑ ↑     ", "      ◉       "),
             "ready": ("      ↻       ", "    ENTER     ", "              "),
@@ -731,7 +739,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--probe",
-        default="/usr/local/sbin/t2-native-match",
+        default="/opt/t2-touchid/bin/t2-native-match",
         help="path to the native match owner",
     )
     parser.add_argument(

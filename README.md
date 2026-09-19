@@ -41,11 +41,15 @@ After installation completes, **log out and sign back in**.
 Enroll a fingerprint, then check and test it:
 
 ```bash
-t2touch enroll
-t2touch status
-t2touch list
-t2touch verify
+t2-touchid-enroll
+t2-touchid-status
+t2-touchid-list
+t2-touchid-verify
 ```
+
+Installed desktop commands follow the `t2-touchid-*` naming convention.
+Existing `t2touch COMMAND` invocations remain compatibility aliases to the same
+implementation. See [command migration and enrollment safeguards](docs/COMMAND_RECONCILIATION.md).
 
 Follow the prompts and wait for the reader-ready message before touching the sensor.
 
@@ -98,39 +102,39 @@ for the consequences, including the remaining risks of both s2idle and deep.
 
 ```bash
 # Enroll another fingerprint
-t2touch enroll
+t2-touchid-enroll
 
 # Show the service and neutral fingerprint slots
-t2touch status
+t2-touchid-status
 
 # List only the enrolled neutral slots, or print their count
-t2touch list
-t2touch count
+t2-touchid-list
+t2-touchid-count
 
 # Emit machine-readable, privacy-safe status
-t2touch status --json
+t2-touchid-status --json
 
 # Test any enrolled fingerprint
-t2touch verify
+t2-touchid-verify
 
 # Delete one fingerprint
-t2touch delete finger-2
+t2-touchid-delete finger-2
 
 # Delete every fingerprint (prompts before authorization)
-t2touch purge
+t2-touchid-purge
 ```
 
 Deletion first opens the system authorization dialog. Authenticate with an
 existing fingerprint or your password; only then does deletion take the reader.
 Cancelling that dialog leaves the fingerprint unchanged.
 
-`t2touch purge` confirms the full scope, obtains a separate fresh system
+`t2-touchid-purge` confirms the full scope, obtains a separate fresh system
 authorization, and deletes the inventory in its recorded slot order. The
 operation is durable rather than atomic: if power, transport, or persistence
 fails after some deletions, it reports incomplete progress and keeps all other
 fingerprint mutations blocked. Run the doctor, then continue the exact recorded
-operation with `t2touch purge --resume`. For noninteractive use, the initial
-command requires `t2touch purge --yes`.
+operation with `t2-touchid-purge --resume`. For noninteractive use, the initial
+command requires `t2-touchid-purge --yes`.
 
 Run deletion commands as the mapped account in an active local desktop session,
 outside SSH. `--yes` skips the confirmation, but still requires authorization.
@@ -230,7 +234,7 @@ not part of the supported administration surface.
 Booting macOS may reconcile SEP from macOS’s own database. Linux-only additions
 therefore are not currently guaranteed to survive a later macOS boot. When
 macOS removes the sole remaining fingerprint, Linux automatically discards its
-stale local inventory entry and permits a new `t2touch enroll`; it does not
+stale local inventory entry and permits a new `t2-touchid-enroll`; it does not
 restore or replace the fingerprint macOS removed. This does not affect
 Linux-only systems.
 
@@ -304,11 +308,12 @@ ready. Keep password fallback available; results on the reference laptop do
 not establish the same behavior on every hardware or desktop combination.
 
 Architecture, protocol provenance, and security boundaries are documented in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The small reusable protocol
-reference is published separately as
-[`t2touch-mini`](https://github.com/macintog/t2touch-mini).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The reusable protocol reference and research are maintained separately in
+[T2 platform research](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/README.md).
+The [research index](docs/research/README.md) links to the revision used by this
+product documentation.
 
 ## License
 
-The integration is licensed under GPL-2.0-only. The separately identified
-research reference subset in `docs/research/` is MIT licensed.
+The integration is licensed under GPL-2.0-only. The separately maintained
+[T2 platform research](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/LICENSE) uses the MIT license.

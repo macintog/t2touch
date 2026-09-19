@@ -471,7 +471,7 @@ operation, handles service-owner loss, and takes touch/lift cues from live
 Standard fprintd clients independently exercise the same service boundary.
 
 Do not implement bulk deletion as an unjournaled loop over the single-delete
-API. The product `t2touch purge` command owns an explicit outer batch journal,
+API. The product `t2-touchid-purge` command owns an explicit outer batch journal,
 records each next handle before calling the reconciled single-delete path, and
 requires a complete matching projection when it resumes. It reports partial
 completion rather than claiming atomic rollback.
@@ -483,7 +483,7 @@ batch journal alone does not establish that client authorization contract.
 
 ### Product deletion authorization ordering
 
-`t2touch delete finger-N` authorizes `/usr/local/sbin/t2-touchid-delete` through
+`t2-touchid-delete finger-N` authorizes `/usr/local/sbin/t2-touchid-delete` through
 pkexec before opening any biometric connection or taking the operation lock.
 The existing identity-management action requires fresh `auth_self` authorization for an active
 local user; it does not retain an authorization cache. The isolated Python
@@ -493,7 +493,7 @@ native configuration, and accepts only one neutral finger handle. It then uses
 exact-inventory, global-lock, mutation-journal and reconciliation checks.
 Terminal cancellation after authorization cannot interrupt that transaction.
 
-`t2touch purge` uses the separate root-owned `t2-touchid-purge` helper and
+`t2-touchid-purge` uses the separate root-owned `t2-touchid-purge` helper and
 `org.t2linux.touchid.purge` action. The CLI asks for destructive confirmation
 before pkexec; the helper then holds one global operation lock and sleep
 inhibitor across the batch. Each child deletion has its ordinary private

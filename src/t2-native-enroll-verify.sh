@@ -12,7 +12,7 @@ if (( EUID != 0 )); then
   exec sudo -n "$0"
 fi
 
-broker=/usr/local/sbin/t2-native-enroll
+broker=/opt/t2-touchid/bin/t2-native-enroll
 [[ -x $broker ]]
 exec 3<<<'test'
 exec "$broker" \

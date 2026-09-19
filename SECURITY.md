@@ -37,7 +37,7 @@ Password fallback remains available. Changing the trade-off would need a
 dedicated PolicyKit PAM path or mutation actions whose implicit authorization
 excludes fingerprint.
 
-The product command `t2touch delete finger-N` obtains fresh PolicyKit
+The product command `t2-touchid-delete finger-N` obtains fresh PolicyKit
 authorization before claiming the reader or taking its operation lock. Its root
 helper validates the original caller and configured account, then uses the same
 journaled deletion and reconciliation machinery. This ordering lets the reader

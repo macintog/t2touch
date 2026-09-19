@@ -25,7 +25,7 @@ class DxAuditAssetTests(unittest.TestCase):
         self.assertIn("installer fills", text.lower())
 
     def test_delete_help_is_singular(self):
-        source = (ROOT / "src/t2touch.py").read_text(encoding="utf-8")
+        source = (ROOT / "src/t2_touchid_cli.py").read_text(encoding="utf-8")
         self.assertIn('help="delete one enrolled fingerprint"', source)
         self.assertIn("return 2", source)
 

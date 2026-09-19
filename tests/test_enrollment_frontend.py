@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+from contextlib import redirect_stderr
 import sys
 import unittest
 from pathlib import Path
@@ -36,7 +38,7 @@ class EnrollmentFrontendTests(unittest.TestCase):
         manage = Path("/safe/t2-touchid-manage")
         parsed = MODULE.parser().parse_args(["recover-outcome"])
         with mock.patch.object(
-            MODULE, "command_path", side_effect=(native, native, manage)
+            MODULE, "command_path", side_effect=(native, manage)
         ):
             self.assertEqual(
                 MODULE.native_invocation(parsed),
@@ -69,26 +71,35 @@ class EnrollmentFrontendTests(unittest.TestCase):
             ["--preflight-only", "--acknowledge-password-fallback-tested"],
         )
 
-    def test_start_preserves_name_and_explicit_acknowledgements(self):
-        self.assertEqual(
-            self.translate(
-                [
-                    "start",
-                    "--name",
-                    "finger-4",
-                    "--acknowledge-password-fallback-tested",
-                    "--acknowledge-live-fingerprint-enrollment",
-                    "--acknowledge-local-catacomb-mutation",
-                ]
-            ),
-            [
-                "--identity-name",
-                "finger-4",
-                "--acknowledge-password-fallback-tested",
-                "--acknowledge-live-fingerprint-enrollment",
-                "--acknowledge-local-catacomb-mutation",
-            ],
-        )
+    def test_desktop_enrollment_uses_fprintd_without_admin_config_or_fallback(self):
+        for arguments in ([], ["start"]):
+            with (
+                self.subTest(arguments=arguments),
+                mock.patch.object(sys, "argv", ["t2-touchid-enroll", *arguments]),
+                mock.patch.object(MODULE, "authority_mode") as authority,
+                mock.patch.object(MODULE, "native_invocation") as native,
+                mock.patch.object(MODULE, "command_invocation") as oracle,
+                mock.patch.object(MODULE.t2_touchid_cli, "main", return_value=1) as desktop,
+            ):
+                self.assertEqual(MODULE.main(), 1)
+                desktop.assert_called_once_with([], command="enroll")
+                authority.assert_not_called()
+                native.assert_not_called()
+                oracle.assert_not_called()
+
+    def test_retired_direct_start_arguments_fail_before_any_dispatch(self):
+        with (
+            mock.patch.object(sys, "argv", ["t2-touchid-enroll", "start",
+                "--name", "finger-4", "--acknowledge-live-fingerprint-enrollment"]),
+            mock.patch.object(MODULE.t2_touchid_cli, "main") as desktop,
+            mock.patch.object(MODULE, "authority_mode") as authority,
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as result,
+        ):
+            MODULE.main()
+        self.assertEqual(result.exception.code, 2)
+        desktop.assert_not_called()
+        authority.assert_not_called()
 
     def test_recover_observed_preserves_name_and_explicit_acknowledgements(self):
         self.assertEqual(

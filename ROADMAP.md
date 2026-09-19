@@ -7,7 +7,7 @@ The [README](README.md#what-has-been-proven) describes the tested scope.
 
 - Omarchy dependency installation, T2 interface detection, and Linux-owned authority setup.
 - Packaged applesmc boot-state prerequisite for kernels that lack the publisher.
-- Percentage-driven enrollment through `t2touch enroll` and standard fprintd clients.
+- Percentage-driven enrollment through `t2-touchid-enroll` and standard fprintd clients.
 - Any-enrolled-finger authentication through fprintd, sudo, PolicyKit, and the lock screen.
 - Five stable neutral slots, lowest-vacancy allocation, and named deletion through an empty inventory.
 - Privacy-safe `status`, `list`, and `count` commands backed by the caller-bound fprintd inventory.

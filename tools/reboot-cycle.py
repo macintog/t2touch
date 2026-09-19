@@ -176,7 +176,11 @@ def require_idle_hardware() -> None:
             command = (entry / "cmdline").read_bytes().replace(b"\0", b" ")
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
-        if b"/usr/local/sbin/t2-native-enroll" in command:
+        if any(owner in command for owner in (
+            b"/usr/local/sbin/t2-native-enroll",  # already-running legacy owner
+            b"/opt/t2-touchid/bin/t2-native-enroll",
+            b"/opt/t2-touchid/src/t2-native-enroll.py",
+        )):
             raise CycleError("a native enrollment owner is still running")
 
 

@@ -732,7 +732,7 @@ class EnrollmentUI:
             elif "data-full" in line:
                 self.terminal_detail = (
                     "All five fingerprint slots are in use. "
-                    "Delete one with `t2touch delete finger-N`."
+                    "Delete one with `t2-touchid-delete finger-N`."
                 )
             else:
                 self.terminal_detail = (

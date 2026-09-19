@@ -6,6 +6,69 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.1.0 - 2026-09-19
+
+This release brings everyday Touch ID commands into one family, makes desktop
+enrollment the default, and archives obsolete installed tools during upgrades.
+It also prevents successful post-reboot reconciliation from running again when
+fprintd starts later in the same boot.
+
+### Changed
+
+- Prefer a fingerprint glyph in the PAM placement prompt and native research
+  terminal views when the expected JetBrains Mono Nerd Font file is installed.
+  Keep the existing Unicode cue when it is absent and the terminal views'
+  ASCII fallback. Clients without suitable font rendering may still show a
+  missing glyph; the placement instruction remains readable.
+- Use `t2-touchid-enroll`, `status`, `list`, `count`, `verify`, `delete`, and
+  `purge` through their full `t2-touchid-*` command names. Existing
+  `t2touch COMMAND` invocations remain compatibility aliases to the same
+  implementation. Inventory JSON and operation exit statuses are unchanged.
+- Run `t2-touchid-enroll` and `t2-touchid-enroll start` through the existing
+  desktop fprintd enrollment interface as the mapped user, without sudo.
+  **The old direct-capture `start` arguments are no longer accepted.** Explicit
+  native research uses the maintained off-PATH interfaces and their existing
+  acknowledgement requirements. Administrative recovery subcommands retain
+  their separate meanings. See [command migration](docs/COMMAND_RECONCILIATION.md).
+- Archive recognized obsolete executables before removing their copies from
+  `/usr/local/sbin`, during both upgrade and uninstall. Preserve and report
+  modified files, ownership conflicts, links, and conflicting archives.
+  Maintained research launchers live under `/opt/t2-touchid/bin`; obsolete
+  test-credential and forensic tools are no longer installed as PATH commands.
+  Archives survive uninstall. See [tool retirement](docs/TOOL_RETIREMENT.md).
+- Maintain protocol research in the separate
+  [T2 platform research](https://github.com/macintog/t2-platform-research)
+  project. Product guides link to an immutable research revision instead of
+  maintaining a duplicate research collection.
+
+### Fixed
+
+- Keep successful post-reboot reconciliation active for the remainder of that
+  boot, so later fprintd dependency starts do not dispatch it again. An initial
+  failure still blocks fprintd; an explicit service restart still reruns the
+  check. This addresses repeat dispatch, not every possible startup failure.
+
+### Known issues and acknowledgements
+
+- A `t2bce` driver issue on MacBookPro16,2 can interrupt communication with
+  the T2 after deep sleep, leaving Touch ID unavailable. Thanks to
+  [@tonibergholm](https://github.com/tonibergholm) for reporting and
+  investigating it in [PR #3](https://github.com/macintog/t2touch/pull/3).
+  See [details and proposed driver fixes](docs/dispositions/t2bce-stateful-resume-bulk-out.md).
+
+### Upgrade and limitations
+
+- Upgrade the complete package with the installer; copying individual command
+  launchers can leave them without the matching shared implementation. Keep
+  password authentication and a recovery terminal available.
+- Version 0.1.0 remains experimental. The reference-machine operator reports
+  several subsequent reboots looking healthy. This adds normal-use stability
+  evidence; additional hardware and suspend/resume remain unqualified.
+- Recovery has not restored the reference machine's old fingerprints, and
+  their recoverability remains unknown. Fresh enrollment previously survived
+  a T2 and host reboot; repeated cold cycles and interrupted recovery remain
+  unqualified. Read the [recovery findings](docs/RECOVERY_RELEASE_GATE.md).
+
 ## 0.0.9 - 2026-09-17
 
 This release makes Touch ID ready sooner, fixes false failures when the same

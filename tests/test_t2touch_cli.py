@@ -13,7 +13,7 @@ from unittest import mock
 
 SOURCE = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
-import t2touch
+import t2_touchid_cli as t2touch
 
 
 class T2TouchCLITests(unittest.TestCase):
@@ -21,6 +21,29 @@ class T2TouchCLITests(unittest.TestCase):
         environment = mock.patch.dict(t2touch.os.environ, {}, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
+
+    def test_canonical_and_compatibility_enroll_share_exact_unprivileged_launcher(self):
+        for arguments, command in ((["enroll"], None), ([], "enroll")):
+            with (
+                self.subTest(command=command),
+                mock.patch.object(t2touch, "configured_user", return_value="mapped"),
+                mock.patch.object(t2touch, "require_current_user") as caller,
+                mock.patch.object(t2touch, "service_ready", return_value=True),
+                mock.patch.object(Path, "is_file", return_value=True),
+                mock.patch.object(t2touch.os, "execv", side_effect=RuntimeError("exec")) as execute,
+                self.assertRaisesRegex(RuntimeError, "exec"),
+            ):
+                t2touch.main(arguments, command=command)
+            caller.assert_called_once_with("mapped")
+            execute.assert_called_once_with(str(t2touch.ENROLL), [str(t2touch.ENROLL), "finger-1"])
+        with (
+            mock.patch.object(t2touch, "configured_user", return_value="mapped"),
+            mock.patch.object(t2touch.os, "geteuid", return_value=0),
+            mock.patch.object(t2touch.os, "execv") as execute,
+            redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(t2touch.main([], command="enroll"), 1)
+            execute.assert_not_called()
 
     def test_root_only_configuration_uses_the_calling_account(self):
         with (

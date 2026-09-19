@@ -154,7 +154,9 @@ class PamAssetTests(unittest.TestCase):
     def test_action_marker_wraps_only_the_live_fingerprint_request(self):
         source = (ROOT / "src/pam_t2touch_action_prompt.c").read_text()
 
+        self.assertIn("󰈷 Place your finger on the fingerprint reader", source)
         self.assertIn("◎ Place your finger on the fingerprint reader", source)
+        self.assertIn("access(nerd_font_path, R_OK) == 0", source)
         self.assertIn('strcmp(rewritten[index].msg, action_prompt) == 0', source)
         self.assertIn("pam_set_item(pamh, PAM_CONV, &context->upstream)", source)
         self.assertIn("live->conv == marked_conversation", source)

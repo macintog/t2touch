@@ -131,8 +131,14 @@ class AKSObserveCommandTests(unittest.TestCase):
     def test_installer_and_uninstaller_own_the_validation_command(self):
         install = (SOURCE.parent / "install.sh").read_text(encoding="utf-8")
         uninstall = (SOURCE.parent / "uninstall.sh").read_text(encoding="utf-8")
+        manifest = json.loads(
+            (SOURCE.parent / "tools/retired-tools.json").read_text(encoding="utf-8")
+        )
         self.assertIn("src/t2-aks-observe-test.py", install)
-        self.assertIn("t2-aks-observe-test", uninstall)
+        self.assertIn('"$source_dir/tools/retire-path-tools.py" --apply', uninstall)
+        retired = manifest["tools"]["t2-aks-observe-test"]
+        self.assertEqual(retired["source"], "src/t2-aks-observe-test.py")
+        self.assertTrue(retired["sha256"])
 
 
 if __name__ == "__main__":

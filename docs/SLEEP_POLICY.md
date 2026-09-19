@@ -67,6 +67,11 @@ quiescence, transport usage, authentication recovery, and installed artifacts.
 Do not unload the pinned SEP transport, or substitute USB/PCI rebinding, to
 recover a broken transport. Reboot is the known recovery boundary.
 
+A contributor reported a deep-sleep transport failure on MacBookPro16,2 and
+traced it to `t2bce_vhci`, with fixes proposed upstream; see the
+[separate disposition](dispositions/t2bce-stateful-resume-bulk-out.md). It
+does not change the ownership or recovery rules above.
+
 Before public reporting, redact kernel/device identifiers and private data.
 Record the actual entered mode, kernel/T2 driver revisions, and which device
 first failed. Do not infer a kernel regression from an update alone, or call a

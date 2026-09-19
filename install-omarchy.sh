@@ -50,5 +50,5 @@ sudo python3 "$source_dir/tools/install-omarchy-lock-ui.py" "${OMARCHY_PATH:-/us
 
 echo
 echo "NEXT STEP"
-echo "Log out and sign back in now, then run: t2touch enroll"
+echo "Log out and sign back in now, then run: t2-touchid-enroll"
 echo "Enrolling in this session can skip the permission prompt."

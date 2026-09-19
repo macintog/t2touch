@@ -1,5 +1,14 @@
 # Repository instructions
 
+## Repository identity
+
+This is the maintained T2Touch fork. Product fixes and pull requests belong in
+this repository and normally target its `main` branch. The older
+`t2-touchid-linux` repository is a provenance reference, not the delivery
+target for T2Touch work. The installed `/opt/t2-touchid` tree is runtime state,
+not a source checkout. Verify the checkout remote and pull-request target before
+writing or submitting a change.
+
 Read and follow [the project scope requirements](docs/PROJECT_SCOPE.md) and
 [contribution guidance](CONTRIBUTING.md) before making changes.
 

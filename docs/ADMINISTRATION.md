@@ -11,8 +11,8 @@ PAM and PolicyKit.
 
 ### Explicit list and count
 
-`t2touch list` returns the complete neutral inventory for the current mapped
-desktop user. `t2touch count` prints the size of that same inventory. Both use
+`t2-touchid-list` returns the complete neutral inventory for the current mapped
+desktop user. `t2-touchid-count` prints the size of that same inventory. Both use
 `ListEnrolledFingers` on the project's fprintd-compatible D-Bus service, so the
 existing sender, account, session, mapping, and live-reconciliation checks stay
 authoritative.
@@ -30,7 +30,7 @@ asynchronous callbacks.
 
 ### Structured status
 
-`t2touch status --json` reports service readiness and the validated redacted
+`t2-touchid-status --json` reports service readiness and the validated redacted
 inventory. When the service is unavailable, the fingerprint count and list are
 `null`; the command does not turn an unavailable inventory into an empty one.
 Human-readable status uses the same result rather than parsing or forwarding
@@ -45,14 +45,14 @@ or incomplete Catacomb transaction also prevents reuse of the older list.
 
 ### Fresh authorization for deletion
 
-The existing `t2touch delete finger-N` behavior already applies the useful
+The existing `t2-touchid-delete finger-N` behavior already applies the useful
 part of `bioutil`'s protected mutation boundary. It obtains fresh PolicyKit
 authorization before taking the reader or mutation lock, then performs one
 journaled deletion with stable live readback and recovery handling.
 
 ### Delete-all with explicit partial-progress semantics
 
-`t2touch purge` addresses account retirement, sensor reset, and replacement of
+`t2-touchid-purge` addresses account retirement, sensor reset, and replacement of
 the complete enrolled set. It prompts before opening PolicyKit, uses a distinct
 fresh-authorized helper, and records the complete initial neutral inventory in
 the shared root-private mutation registry. Each item gets durable outer intent
@@ -68,7 +68,7 @@ reports the deleted count and confirms that no fingerprints remain; purging an
 already empty inventory reports that there is nothing to delete.
 
 Delete-all is resumable rather than described as atomic. An interrupted batch
-blocks unrelated biometric mutations. `t2touch purge --resume` obtains fresh
+blocks unrelated biometric mutations. `t2-touchid-purge --resume` obtains fresh
 authorization, requires the live inventory to equal the recorded remainder,
 and treats a pending item as complete only when that exact handle is the sole
 observed delta. The terminal reports a redacted completed count when available.
@@ -77,7 +77,7 @@ Linux-owned keybag, activation authority, journals, and recovery material.
 
 ## CLI JSON schemas
 
-Both `t2touch status --json` and `t2touch list --json` use `schema_version: 1`.
+Both `t2-touchid-status --json` and `t2-touchid-list --json` use `schema_version: 1`.
 `status` is the service-health view; `list` is inventory only. `service_ready`
 appears on `status` only.
 
@@ -89,7 +89,7 @@ appears on `status` only.
 | `fingerprints` | `{handle, label}` list, or `null` when the service is down | `{handle, label}` list |
 | `identifiers_redacted` | `true` | `true` |
 
-Answering `n` to `t2touch purge` returns exit status `2` so scripts can
+Answering `n` to `t2-touchid-purge` returns exit status `2` so scripts can
 distinguish a declined confirmation from a helper failure.
 
 ## Deliberately excluded behavior
@@ -117,13 +117,14 @@ unchanged.
 
 | Command | Location | Role |
 | --- | --- | --- |
-| `t2touch` | `/usr/local/bin` | Everyday enroll, list, verify, delete, and purge |
+| `t2-touchid-{enroll,status,list,count,verify,delete,purge}` | `/usr/local/sbin` | Canonical desktop commands; run without sudo |
+| `t2touch` | `/usr/local/bin` | Compatibility dispatcher to the same desktop implementation |
 | `t2-touchid-doctor` | `/usr/local/sbin` | Privacy-safe stack report |
 | `t2-touchid-user-map` | `/usr/local/sbin` | Redacted Linux-native account mapping |
 | `t2-native-authority-rebind` | `/usr/local/sbin` | Explicit native authority rebind |
 | `t2-touchid-delete` | `/usr/local/sbin` | pkexec helper for one-slot deletion |
 | `t2-touchid-purge` | `/usr/local/sbin` | pkexec helper for batch deletion |
-| `t2-fprintd-enroll-tui-launch` | `/usr/local/sbin` | Product enrollment TUI used by `t2touch enroll` |
+| `t2-fprintd-enroll-tui-launch` | `/usr/local/sbin` | Product enrollment TUI used by `t2-touchid-enroll` |
 | `t2-touchid-manage` | `/usr/local/sbin` | Admin mutations, adaptive sync, and explicit retained-master recovery |
 | `t2-fprint-enrollment-worker`, `t2-fprint-delete-worker` | `/usr/local/sbin` | Root workers launched by the daemon |
 | `t2-aks-tool` | `/usr/local/sbin` | AKS helper used by PAM and keybag units |
@@ -133,3 +134,25 @@ unchanged.
 | `t2-biometric-ready`, `t2-biometric-port-refresh` | `/usr/local/sbin` | Readiness units |
 | `t2-keybag-load`, `t2-keybag-unlock`, `t2-credential-unlock` | `/usr/local/sbin` | Compatibility-authority units |
 | Research `*-test` helpers and negative/native TUI launchers | `/opt/t2-touchid/bin` | Contributor tools; invoke by absolute path |
+
+## Command reconciliation
+
+The repository/project remains t2touch. Installed commands use the established
+`t2-touchid-*` family; `_t2touch` PAM and `-t2touch` DKMS integration names are
+unchanged. `t2touch COMMAND` remains a compatibility spelling, implemented by
+one shared client, with the same arguments, JSON, and exit statuses.
+
+Run `t2-touchid-enroll` (or `t2-touchid-enroll start`) without sudo. Both use
+fprintd's desktop enrollment TUI. The former direct native/oracle `start`
+options (`--name` and acknowledgement flags) are rejected, not translated.
+The service assigns the lowest vacant neutral slot under its operation lock.
+Explicit `status`, `list`, `preflight`, `verify-post-reboot`, and recovery
+subcommands retain their administrative meanings; `t2-touchid-status` and
+`t2-touchid-list` are the separate unprivileged desktop views.
+
+Delete and purge retain their exact PolicyKit executable paths. An ordinary
+user invocation runs the shared client; after fresh pkexec authorization, root
+execution enters the narrow existing helper, which still validates PKEXEC_UID
+and the protected mapping. Direct sudo invocation is not an alternative.
+Purge confirmation, `--yes`, `--resume`, and partial-progress handling are
+unchanged. See [the reconciliation evidence and release gates](COMMAND_RECONCILIATION.md).

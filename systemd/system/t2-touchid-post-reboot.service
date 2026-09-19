@@ -9,6 +9,9 @@ ConditionPathIsDirectory=/var/lib/t2-touchid/mutations
 
 [Service]
 Type=oneshot
+# Keep the completed boot proof active while fprintd starts. Repeated dependency
+# starts must not run reconciliation against fprintd's live hardware owner.
+RemainAfterExit=yes
 EnvironmentFile=/etc/t2-touchid.conf
 ExecStart=/opt/t2-touchid/.venv/bin/python /opt/t2-touchid/src/t2-touchid-post-reboot.py
 UMask=0077

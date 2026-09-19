@@ -16,9 +16,11 @@ fingerprint management.
 | [Prepared-identity measurements](evaluations/touchid-prepared-identity-2026-09-17.md) | Current reader-readiness gains, repeated-touch correctness, hardware controls, and validation limits. |
 | [Worker-overlap measurements](evaluations/touchid-responsiveness-worker-overlap-2026-09-17.md) | Measured retry-readiness improvement, memory cost, and remaining authorization latency. |
 | [Sleep policy](SLEEP_POLICY.md) | Retiring the legacy sleep override, ownership, and suspend qualification limits. |
+| [Tool retirement](TOOL_RETIREMENT.md) | Ownership-checked cleanup of obsolete installed commands and archival rollback. |
+| [Disposition: T2 transport after deep sleep](dispositions/t2bce-stateful-resume-bulk-out.md) | Reported driver failure, external fix proposals, recovery guidance, and qualification limits. |
 | [Terminal clients](TUI_CONTROL.md) | Contributor tools for exercising the installed service and native backends. |
 | [T1Bridge reference](T1BRIDGE_REFERENCE.md) | Relevant external designs and the differences that matter on T2. |
-| [Protocol research](research/README.md) | SEP, AKS/ACM, storage, and fingerprint lifecycle. |
+| [Protocol research](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/README.md) | SEP, AKS/ACM, storage, and fingerprint lifecycle. |
 | [Sources and credits](PROVENANCE.md) | Implementation provenance, dependencies, and licenses. |
 
 See [Contributing](../CONTRIBUTING.md) for development checks and hardware

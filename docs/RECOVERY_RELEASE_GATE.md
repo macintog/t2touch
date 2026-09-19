@@ -54,6 +54,12 @@ saved archive files remained unchanged, and enrolled- and unenrolled-finger
 checks both passed. Repeated physical power cycles, interrupted writes, and
 use across cloned installations have not been established by that result.
 
+The reference-machine operator subsequently reported several reboots looking
+healthy. This supports normal-use stability after the earlier work. The report
+does not identify the exact installed revision or describe a controlled
+fingerprint-recovery test, so it does not establish recovery of the old
+fingerprints or repeated cold-reset persistence.
+
 One startup reconciliation attempt failed transiently before later attempts
 succeeded. No persistent failed service remained, and verification worked
 without manual service repair. The cause of that transient failure is unknown.

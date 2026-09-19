@@ -15,9 +15,9 @@ derived and validated separately. The completed native implementation imported
 here is recorded by engineering revision
 `d821b087658792b863fef35336c871d494709961` and remains GPL-2.0-only.
 
-The original [research documentation](research/README.md) is available under its
-own [MIT license](research/LICENSE), also in t2touch-mini. Its
-[artifact and tool credits](research/artifacts-and-method.md) identify the analyzed
+The original [research documentation](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/README.md) is maintained separately under its
+own [MIT license](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/LICENSE). Its
+[artifact and tool credits](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/method/sep-artifacts.md) identify the analyzed
 firmware and the open-source tools used. This documentation license does not
 change the license of the inherited implementation.
 

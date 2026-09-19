@@ -28,6 +28,29 @@ MATCH_SPEC.loader.exec_module(match_tui)
 
 
 class NativeEnrollmentTUITests(unittest.TestCase):
+    def test_fingerprint_cue_prefers_nerd_font_and_keeps_unicode_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            font = Path(directory) / "JetBrainsMonoNerdFont-Regular.ttf"
+            for available, expected in ((True, "󰈷"), (False, "◎")):
+                if available:
+                    font.touch()
+                else:
+                    font.unlink()
+                with (
+                    mock.patch.object(tui, "NERD_FONT_PATH", font),
+                    mock.patch.object(match_tui, "NERD_FONT_PATH", font),
+                    mock.patch.object(tui.sys, "stdout", SimpleNamespace(encoding="utf-8")),
+                    mock.patch.object(
+                        match_tui.TerminalUI, "_supports_unicode", return_value=True
+                    ),
+                ):
+                    native = tui.EnrollmentUI()
+                    match = match_tui.TerminalUI(0)
+                self.assertEqual(native.fingerprint_icon, expected)
+                self.assertEqual(match.fingerprint_icon, expected)
+                match.state.mode = "waiting"
+                self.assertIn(expected, "".join(match.sensor_art()))
+
     def test_new_finger_selector_skips_valid_non_enrollment_journals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

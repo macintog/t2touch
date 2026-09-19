@@ -89,34 +89,12 @@ resume_native_recovery() {
   rm -f -- "$state_root/native-recovery-hold"
 }
 
-# Research helpers that used to land on PATH. Fresh installs put them under
-# /opt/t2-touchid/bin; upgrades must delete the leftover sbin copies.
-LEGACY_PATH_RESEARCH_HELPERS=(
-  t2-catacomb-fixture-check
-  t2-aks-observe-test
-  t2-acm-lifecycle-test
-  t2-acm-policy-preflight
-  t2-acm-authorize-test
-  t2-acm-identity-secret-test
-  t2-touchid-enroll-test
-  t2-native-enroll-tui-launch
-  t2-fprintd-preview-tui-launch
-  t2-fprintd-verify-tui-launch
-  t2-sudo-pam-test-launch
-  t2-fprintd-negative-tui-launch
-  t2-fprintd-delete-tui-launch
-  t2-native-new-finger-tui-launch
-  t2-native-match-tui-launch
-  t2-native-negative-tui-launch
-  t2-second-finger-tui-launch
-)
-
+# Archive only recognized historical bytes; preserve locally changed files.
+# This runs after off-PATH replacements have been staged by install.sh.
 remove_legacy_path_research_helpers() {
-  local prefix=${1:-/usr/local/sbin}
-  local name
-  for name in "${LEGACY_PATH_RESEARCH_HELPERS[@]}"; do
-    rm -f -- "$prefix/$name"
-  done
+  local helper_dir
+  helper_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return
+  python3 "$helper_dir/retire-path-tools.py" --apply
 }
 
 # Snapshot product units and recovery holds before this run writes files.

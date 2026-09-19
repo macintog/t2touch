@@ -36,7 +36,7 @@ triggers an automatic fallback.
 Version 4 has a 76-byte minimal request instead of version 5's 88 bytes;
 changing the version word alone is insufficient. The negotiated AKS envelope
 version is separate from this operation-body version. The
-[decoder and dispatcher reference](research/create-v4-j214k.md) documents the
+[decoder and dispatcher reference](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/aks-create-v4-j214k.md) documents the
 wire format and firmware evidence.
 
 ## Recover an interrupted installation

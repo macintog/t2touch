@@ -3,11 +3,16 @@
 #include <security/pam_modules.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static const char data_key[] = "t2touch-action-prompt";
+static const char nerd_font_path[] =
+    "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf";
 static const char action_prompt[] =
     "Place your finger on the fingerprint reader";
-static const char marked_action_prompt[] =
+static const char nerd_action_prompt[] =
+    "󰈷 Place your finger on the fingerprint reader";
+static const char fallback_action_prompt[] =
     "◎ Place your finger on the fingerprint reader";
 
 struct prompt_context {
@@ -21,6 +26,7 @@ static int marked_conversation(int count, const struct pam_message **messages,
     struct prompt_context *context = data;
     struct pam_message *rewritten;
     const struct pam_message **forwarded;
+    const char *marked_prompt;
     int result;
     int index;
 
@@ -35,6 +41,9 @@ static int marked_conversation(int count, const struct pam_message **messages,
         free(forwarded);
         return PAM_BUF_ERR;
     }
+    marked_prompt = access(nerd_font_path, R_OK) == 0
+                        ? nerd_action_prompt
+                        : fallback_action_prompt;
 
     for (index = 0; index < count; index++) {
         if (messages[index] == NULL) {
@@ -46,7 +55,7 @@ static int marked_conversation(int count, const struct pam_message **messages,
         if (rewritten[index].msg_style == PAM_TEXT_INFO &&
             rewritten[index].msg != NULL &&
             strcmp(rewritten[index].msg, action_prompt) == 0)
-            rewritten[index].msg = marked_action_prompt;
+            rewritten[index].msg = marked_prompt;
         forwarded[index] = &rewritten[index];
     }
 

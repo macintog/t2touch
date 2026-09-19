@@ -73,7 +73,7 @@ failed, or unsupported” or blocked an otherwise healthy userspace upgrade.
 Current diagnostics print the result and distinguish those two cases.
 Other failed or unknown replies remain blocking, and result 1 still requires the
 independent service readiness checks before PAM is installed. See the
-[boot-policy reference](research/boot-and-storage.md#publishing-boot-state).
+[boot-policy reference](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/storage/sep-persistence-and-nvme.md#publishing-boot-state).
 
 ## fprintd dependency failure during native first run
 
@@ -216,7 +216,7 @@ component at the pre-client boundary, exports the resulting user/master pair,
 normalizes the master enrollment count to zero, and atomically commits both
 components while preserving the prior generation in the private backup store.
 The Linux account/keybag authority is unchanged, but the old enrollment is
-removed from the active Linux archive and `t2touch enroll` is required after
+removed from the active Linux archive and `t2-touchid-enroll` is required after
 installation finishes. This does not establish why the old load failed. Any
 different live surface remains blocked.
 
@@ -325,7 +325,7 @@ state, which still has no supported end-user migration command.
 ## Fingerprint inventory or enrollment is unavailable
 
 An empty inventory is normal before first enrollment and after deleting the
-final fingerprint. Use `t2touch enroll` from the active local desktop session.
+final fingerprint. Use `t2-touchid-enroll` from the active local desktop session.
 
 If the doctor reports failed readiness or an unfinished operation, preserve
 its diagnostic and report the failure. Do not delete private state or repeat
@@ -347,7 +347,7 @@ deletion leaves an empty inventory that can enroll Finger 1 again.
 
 If recovery still fails, retain the journal and doctor's result. Do not erase
 `/var/lib/t2-touchid`, replace account authority, or repeatedly issue delete.
-Use the product command `t2touch delete finger-N`; it authorizes before taking
+Use the product command `t2-touchid-delete finger-N`; it authorizes before taking
 the reader. Lower-level fprintd deletion clients can hold the reader while
 asking PolicyKit to authenticate, causing fingerprint authorization to fall
 back to a password.
@@ -418,6 +418,11 @@ Neither mode is qualified here. T2Touch no longer selects a sleep mode and
 retires its unchanged older override; review [the migration](SLEEP_POLICY.md)
 before upgrading. A reboot is the known recovery boundary for an unusable
 transport. Do not substitute USB or PCI rebinds.
+
+A contributor traced a deep-sleep transport failure on MacBookPro16,2 to
+`t2bce_vhci` and proposed upstream fixes. The
+[disposition](dispositions/t2bce-stateful-resume-bulk-out.md) summarizes the
+report, external fix proposals, and remaining qualification limits.
 
 When reporting a suspend failure, include the selected sleep mode, kernel and
 bridgeOS versions, whether ordinary startup works, and whether the failure

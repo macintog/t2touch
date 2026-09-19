@@ -83,7 +83,7 @@ PROFILES = {
         "class": "t2-native-enroll",
         "title": "T2-Native-Enrollment",
         "launcher": "/opt/t2-touchid/bin/t2-native-enroll-tui-launch",
-        "backend": b"/usr/local/sbin/t2-native-enroll",
+        "backend": b"/opt/t2-touchid/src/t2-native-enroll.py",
         "ready_title": "PLACE FINGER NOW",
         "terminal_titles": (
             "ENROLLMENT STOPPED",
@@ -95,7 +95,7 @@ PROFILES = {
         "class": "t2-native-match",
         "title": "T2-Native-Match",
         "launcher": "/opt/t2-touchid/bin/t2-native-match-tui-launch",
-        "backend": b"/usr/local/sbin/t2-native-match",
+        "backend": b"/opt/t2-touchid/src/t2-native-match.py",
         "ready_title": "PLACE FINGER NOW",
         "terminal_titles": (
             "OPERATION FAILED",
@@ -108,7 +108,7 @@ PROFILES = {
         "class": "t2-native-negative",
         "title": "T2-Native-Negative-Control",
         "launcher": "/opt/t2-touchid/bin/t2-native-negative-tui-launch",
-        "backend": b"/usr/local/sbin/t2-native-match",
+        "backend": b"/opt/t2-touchid/src/t2-native-match.py",
         "ready_title": "PLACE UNENROLLED FINGER NOW",
         "terminal_titles": (
             "OPERATION FAILED",
@@ -121,7 +121,7 @@ PROFILES = {
         "class": "t2-native-new-finger",
         "title": "T2-Native-New-Finger-Proof",
         "launcher": "/opt/t2-touchid/bin/t2-native-new-finger-tui-launch",
-        "backend": b"/usr/local/sbin/t2-native-match",
+        "backend": b"/opt/t2-touchid/src/t2-native-match.py",
         "ready_title": "PLACE NEW FINGER NOW",
         "terminal_titles": (
             "OPERATION FAILED",

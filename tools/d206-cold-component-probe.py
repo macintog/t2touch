@@ -12,7 +12,7 @@ import sys
 
 
 INSTALLED_SOURCE = Path("/opt/t2-touchid/src")
-INSTALLED_ENROLL = Path("/usr/local/sbin/t2-native-enroll")
+INSTALLED_ENROLL = Path("/opt/t2-touchid/src/t2-native-enroll.py")
 PREFIX = "D206_COLD_COMPONENTS "
 
 

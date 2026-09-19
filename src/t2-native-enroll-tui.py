@@ -25,8 +25,9 @@ CSI = "\x1b["
 ALT_ON = f"{CSI}?1049h{CSI}?25l"
 ALT_OFF = f"{CSI}?25h{CSI}?1049l"
 EVENT_PREFIX = b"T2_ENROLL_EVENT "
-DEFAULT_BROKER = Path("/usr/local/sbin/t2-native-enroll")
+DEFAULT_BROKER = Path("/opt/t2-touchid/bin/t2-native-enroll")
 DEFAULT_ARTIFACT_ROOT = Path("/var/lib/t2-touchid/research-artifacts")
+NERD_FONT_PATH = Path("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")
 MAX_CREDENTIAL_BYTES = 128
 
 
@@ -58,6 +59,9 @@ class EnrollmentUI:
         self.view = View()
         self.color = "NO_COLOR" not in os.environ
         self.unicode = (sys.stdout.encoding or "ascii").lower() != "ascii"
+        self.fingerprint_icon = (
+            "󰈷" if self.unicode and NERD_FONT_PATH.is_file() else "◎"
+        )
 
     def paint(self, text: str, color: str) -> str:
         if not self.color:
@@ -89,8 +93,20 @@ class EnrollmentUI:
             (self.center("LINUX-NATIVE ENROLLMENT", width), "dim"),
             ("", "dim"),
             (self.center("╭──────────────╮" if self.unicode else "+--------------+", width), self.view.color),
-            (self.center("│      ◎       │" if self.unicode else "|      @       |", width), self.view.color),
-            (self.center("│    ◎   ◎     │" if self.unicode else "|    @   @     |", width), self.view.color),
+            (
+                self.center(
+                    f"│      {self.fingerprint_icon}       │"
+                    if self.unicode else "|      @       |", width
+                ),
+                self.view.color,
+            ),
+            (
+                self.center(
+                    f"│    {self.fingerprint_icon}   {self.fingerprint_icon}     │"
+                    if self.unicode else "|    @   @     |", width
+                ),
+                self.view.color,
+            ),
             (self.center("╰──────────────╯" if self.unicode else "+--------------+", width), self.view.color),
             ("", "dim"),
             (self.center(self.view.title, width), self.view.color),

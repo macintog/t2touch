@@ -26,6 +26,7 @@ if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
 import t2_fprint_identity
+import t2_touchid_cli
 
 
 LOCAL_BROKER = Path(__file__).resolve().with_name("t2-touchid-enroll-test.py")
@@ -33,10 +34,8 @@ INSTALLED_BROKER = Path("/opt/t2-touchid/bin/t2-touchid-enroll-test")
 LOCAL_IDENTITIES = Path(__file__).resolve().with_name("t2-touchid-identities.py")
 INSTALLED_IDENTITIES = Path("/usr/local/sbin/t2-touchid-identities")
 LOCAL_NATIVE = Path(__file__).resolve().with_name("t2-native-enroll.py")
-LOCAL_NATIVE_TUI = Path(__file__).resolve().with_name("t2-native-enroll-tui.py")
 LOCAL_MANAGE = Path(__file__).resolve().with_name("t2-touchid-manage.py")
 INSTALLED_NATIVE = INSTALLED_SOURCE / "t2-native-enroll.py"
-INSTALLED_NATIVE_TUI = INSTALLED_SOURCE / "t2-native-enroll-tui.py"
 INSTALLED_MANAGE = Path("/usr/local/sbin/t2-touchid-manage")
 CONFIG = Path("/etc/t2-touchid.conf")
 
@@ -72,7 +71,12 @@ def authority_mode() -> str:
 
 
 def parser() -> argparse.ArgumentParser:
-    value = argparse.ArgumentParser(description=__doc__)
+    value = argparse.ArgumentParser(
+        description="Enroll through fprintd as your desktop user; no arguments starts enrollment.",
+        epilog="Status, preflight and recovery subcommands are administrative operations. "
+               "Direct native/oracle capture is research-only; start no longer accepts "
+               "--name or mutation acknowledgement flags.",
+    )
     commands = value.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="show redacted enrollment state")
     identities = commands.add_parser(
@@ -89,17 +93,7 @@ def parser() -> argparse.ArgumentParser:
         "--acknowledge-password-fallback-tested", action="store_true"
     )
 
-    enroll = commands.add_parser("start", help="enroll one new fingerprint")
-    enroll.add_argument("--name", default="finger-1", type=finger_handle)
-    enroll.add_argument(
-        "--acknowledge-password-fallback-tested", action="store_true"
-    )
-    enroll.add_argument(
-        "--acknowledge-live-fingerprint-enrollment", action="store_true"
-    )
-    enroll.add_argument(
-        "--acknowledge-local-catacomb-mutation", action="store_true"
-    )
+    commands.add_parser("start", help="enroll through the desktop fprintd workflow (default)")
 
     commands.add_parser(
         "verify-post-reboot",
@@ -137,25 +131,6 @@ def broker_arguments(args: argparse.Namespace) -> list[str]:
         if args.acknowledge_password_fallback_tested:
             result.append("--acknowledge-password-fallback-tested")
         return result
-    if args.command == "start":
-        result = ["--identity-name", args.name]
-        for enabled, option in (
-            (
-                args.acknowledge_password_fallback_tested,
-                "--acknowledge-password-fallback-tested",
-            ),
-            (
-                args.acknowledge_live_fingerprint_enrollment,
-                "--acknowledge-live-fingerprint-enrollment",
-            ),
-            (
-                args.acknowledge_local_catacomb_mutation,
-                "--acknowledge-local-catacomb-mutation",
-            ),
-        ):
-            if enabled:
-                result.append(option)
-        return result
     if args.command == "verify-post-reboot":
         return ["--verify-post-reboot"]
     if args.command == "recover-outcome":
@@ -188,7 +163,6 @@ def command_invocation(args: argparse.Namespace) -> tuple[Path, list[str]]:
 
 def native_invocation(args: argparse.Namespace) -> tuple[Path, list[str]]:
     native = command_path(LOCAL_NATIVE, INSTALLED_NATIVE)
-    native_tui = command_path(LOCAL_NATIVE_TUI, INSTALLED_NATIVE_TUI)
     manage = command_path(LOCAL_MANAGE, INSTALLED_MANAGE)
     if args.command == "list":
         return command_path(LOCAL_IDENTITIES, INSTALLED_IDENTITIES), (
@@ -198,26 +172,6 @@ def native_invocation(args: argparse.Namespace) -> tuple[Path, list[str]]:
         return manage, ["status"]
     if args.command == "preflight":
         return native, ["--preflight-add-finger"]
-    if args.command == "start":
-        if not (
-            args.acknowledge_password_fallback_tested
-            and args.acknowledge_live_fingerprint_enrollment
-            and args.acknowledge_local_catacomb_mutation
-        ):
-            raise ValueError("all enrollment acknowledgements are required")
-        import t2_user_authority
-
-        sudo_uid = os.environ.get("SUDO_UID", "")
-        additional = sudo_uid.isdecimal()
-        if additional:
-            try:
-                t2_user_authority.load(int(sudo_uid))
-            except t2_user_authority.UserAuthorityError:
-                additional = False
-        arguments = ["--broker", str(native), "--identity-name", args.name]
-        if additional:
-            arguments.append("--add-finger")
-        return native_tui, arguments
     if args.command == "verify-post-reboot":
         return native, [
             "--post-reboot-verification",
@@ -245,7 +199,10 @@ def native_invocation(args: argparse.Namespace) -> tuple[Path, list[str]]:
 
 
 def main() -> int:
-    args = parser().parse_args()
+    args = parser().parse_args(sys.argv[1:] or ["start"])
+    if args.command == "start":
+        # Do not inspect root-only config or fall back to a native capture.
+        return t2_touchid_cli.main([], command="enroll")
     try:
         selected, translated = (
             native_invocation(args)

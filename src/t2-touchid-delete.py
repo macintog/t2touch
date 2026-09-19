@@ -36,7 +36,7 @@ def delete(finger: str, *, manager_factory=_manager) -> None:
     # PKEXEC_UID is supplied by pkexec's sanitized environment. It is not an
     # authorization token for unprivileged execution: root is mandatory.
     if os.geteuid() != 0:
-        raise DeleteError("run t2touch delete as your normal desktop account")
+        raise DeleteError("run t2-touchid-delete as your normal desktop account")
     uid = os.environ.get("PKEXEC_UID", "")
     if not re.fullmatch(r"[1-9][0-9]{0,9}", uid) or int(uid) >= 2**32 - 1:
         raise DeleteError("authenticated caller is unavailable")

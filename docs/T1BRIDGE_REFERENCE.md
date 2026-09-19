@@ -8,7 +8,7 @@ answers where the protocols agree while preserving the T2-specific evidence
 gates in this repository.
 
 T1Bridge is one member of the public sources listed in the
-[research credits](research/artifacts-and-method.md#research-credits). That
+[research credits](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/method/sep-artifacts.md#research-credits). That
 reference set also distinguishes independent T2 verification and transport
 work from this project's native activation and enrollment contribution.
 
@@ -175,7 +175,7 @@ changes the credential contract.
 Reuse the load/bind/resolve/unlock/release lifetime and the distinction between
 creation material and enrollment authorization. Do not copy T1's secret size,
 payloads, or USB transport. The T2 derivation and request sequence are detailed
-in [identity and authorization](research/identity-and-authorization.md).
+in [identity and authorization](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/aks-identity-and-authorization.md).
 
 ### Standard fingerprint integration
 

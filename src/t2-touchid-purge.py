@@ -35,7 +35,7 @@ def _manager():
 
 def purge(*, resume: bool = False, manager_factory=_manager) -> dict[str, object]:
     if os.geteuid() != 0:
-        raise PurgeError("run t2touch purge as your normal desktop account")
+        raise PurgeError("run t2-touchid-purge as your normal desktop account")
     uid = os.environ.get("PKEXEC_UID", "")
     if not re.fullmatch(r"[1-9][0-9]{0,9}", uid) or int(uid) >= 2**32 - 1:
         raise PurgeError("authenticated caller is unavailable")
@@ -100,7 +100,7 @@ def main() -> int:
             state = ""
         print(
             f"t2touch: purge incomplete ({type(error).__name__}){state}; "
-            "run sudo t2-touchid-doctor, then t2touch purge --resume",
+            "run sudo t2-touchid-doctor, then t2-touchid-purge --resume",
             file=sys.stderr,
         )
         return 1

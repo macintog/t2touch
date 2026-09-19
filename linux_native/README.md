@@ -24,7 +24,7 @@ T1 backend is recorded in [`../docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md)
 The installed native path owns account creation, activation, enrollment,
 reconciliation, and authentication. Archived research identities must not be
 used to seed an installation. See the [product architecture](../docs/ARCHITECTURE.md)
-and [integration contracts](../docs/research/integration-contracts.md) for
+and [integration contracts](https://github.com/macintog/t2-platform-research/blob/423d2b056b69764876097818b3efc74319a7f944/docs/sep/fingerprint-integration.md) for
 service ownership, persistent state, and recovery boundaries.
 
 The MacBookPro16,1 reference system has exercised native creation, enrollment,

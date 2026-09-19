@@ -1,0 +1,595 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "t2-acm-authorize-test": {
+      "sha256": {
+        "5e18a07233fae00c12c351d1dda765a7c4bf4faf92cb2cf58ad5e97d4c72b88c": {
+          "git_blob": "0528e2ecd202572b4f5d205e2acfd4fd0032c333",
+          "repository": "codex/t2touch"
+        },
+        "725adee08553c8cf88519d733ca4e2f5b3d62e3a41b63328dae752237512ded4": {
+          "git_blob": "12624ea25ecd80610af10b48b91c3bc6e2020dd6",
+          "repository": "codex/t2touch"
+        },
+        "c99a6a1d52ab92eec87385daef463e785f2b6943e98420956eadd2fb645105b6": {
+          "git_blob": "2fb249a722bdd0d9b4e57f372440f38c7e9b50c0",
+          "repository": "codex/t2touch"
+        },
+        "dc3d677857e3c5632275946eb4c3ee33e933eed442f08c35a38c40dcf6e7865a": {
+          "git_blob": "900841bdb115c94bdfb9794489453431b4f98a7a",
+          "repository": "codex/t2touch"
+        },
+        "eb9477ef5e6b55e71f2512d3fa7df88157ba43fd68466640b5a5e270ba10411b": {
+          "git_blob": "8a8628027450b5552e848a1d467136c093130a85",
+          "repository": "codex/t2touch"
+        },
+        "f71b05c02d20431255f9a3db02586849b8bca8f69c20cd86c62fe341bd4733f0": {
+          "git_blob": "8546b139377d59f3d734ecd0277f9aa8eb69ddae",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-acm-authorize-test.py"
+    },
+    "t2-acm-identity-secret-test": {
+      "sha256": {
+        "1729fa9de955f9fb09e9141d803845eb2ea9460f9b7c20739ec8fa0a1def0c11": {
+          "git_blob": "eea89cb278227892c5b907e7f9fa73ea65ca21f5",
+          "repository": "codex/t2touch"
+        },
+        "ec866e73a95501c10d84a11f8b2a54bf4f4dd976842c3fa99bc61ff4d9f5adb0": {
+          "git_blob": "727f195a2655b2647093451518a53170db86e2cc",
+          "repository": "codex/t2-touchid-linux"
+        }
+      },
+      "source": "src/t2-acm-identity-secret-test.py"
+    },
+    "t2-acm-lifecycle-test": {
+      "sha256": {
+        "d92e6d3396bf21c699495a9c394600904934035e2528ea8e9662f29c68c991cf": {
+          "git_blob": "e51c5f17729bd7ca2a421c4f07acdd44a3b168c8",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-acm-lifecycle-test.py"
+    },
+    "t2-acm-policy-preflight": {
+      "sha256": {
+        "24f23a16eb27525be3e9e6858a8977ea5f381a5712ec3e94712f3bcd4754bf87": {
+          "git_blob": "fbdd09b4e470783214a39b79ae6661097d116b79",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-acm-policy-preflight.py"
+    },
+    "t2-aks-observe-test": {
+      "sha256": {
+        "68047e59dc9f04af724cd8c21d33086de0cf6140ccc7874a53d3dc710c927314": {
+          "git_blob": "af0f16aaa801b34e8796510f76cc9a9bf1183189",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-aks-observe-test.py"
+    },
+    "t2-catacomb-fixture-check": {
+      "sha256": {
+        "54e291f5fd1d24d1e87f1d4bbb8cb5bb23856edb34c94dfc55efd168e087fdd3": {
+          "git_blob": "fd66bb9833e0615ed98a9b3312dc5fbc35de08d8",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-catacomb-fixture-check.py"
+    },
+    "t2-fprintd-delete-tui-launch": {
+      "sha256": {
+        "bf0e750aa441532a062d9581d3d878a8728828c1e93d50e409e7d7bf371da626": {
+          "git_blob": "3824adb1319ef5df10a700107507dc3f07795352",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-fprintd-delete-tui-launch.sh"
+    },
+    "t2-fprintd-negative-tui-launch": {
+      "sha256": {
+        "95c7138294a3ba6680b19080b698307648840fcf45b035a0644ab52520f62797": {
+          "git_blob": "928940bbe9b48d6c4df252029187d47788e794ee",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-fprintd-negative-tui-launch.sh"
+    },
+    "t2-fprintd-preview-tui-launch": {
+      "sha256": {
+        "eb0f4c86d44c1ae1960148db91bf071500fc41906506444a01d1979fb3d14964": {
+          "git_blob": "1d432e79b6294a4755f9109c1c1f53a4d67d8789",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-fprintd-preview-tui-launch.sh"
+    },
+    "t2-fprintd-verify-tui-launch": {
+      "sha256": {
+        "0dee87b910bc4c092a79f3088a9cf73effc0447f548edcec62e37806b4b90ee6": {
+          "git_blob": "c16c6e60b1fc734be95af8f1d55508682cfdf873",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-fprintd-verify-tui-launch.sh"
+    },
+    "t2-native-enroll": {
+      "sha256": {
+        "02c1bf82e00c5922e62d1cf78c4a9648e6ff0b84d3f03364933b251cec09aebd": {
+          "git_blob": "84fbba991bb71a2805e5f905ce1ec317fa3c6adb",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "1038bec5e9eb31f8b5db37fd1e1ed50fd8e5832d31327d633b2979d17a4a8f3d": {
+          "git_blob": "28f6b35a4519b015a6e53cc0293c3fba25c55230",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "1bf3b60256445bdb12cda67cd7c2fe1003f244376cce3e23cda8ea7310db02e1": {
+          "git_blob": "eca8a2a458c609e4fe5a776183e435d8ded1d95f",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "1dd13770c730ee6fb60dce69f8ba5e83e0f0bcb4a7d42c415504a3f9e4f7982f": {
+          "git_blob": "463105ce54378e145e2e45e3f720ce84d62ffc37",
+          "repository": "codex/t2touch"
+        },
+        "30faea7b7aba132fd1f81790c5abf53af70b67dc44543c1a4b080ab37451c7fb": {
+          "git_blob": "87e0cf78ea943f8c5df05d2bb68f56ed423ea541",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "357f9c77a9b861f8192c29ae09cd5982e01704b3bbf1ac64c17d0d7c3ae2e8fd": {
+          "git_blob": "2b2d58e34fdca517cefc5a97142ce7303031536e",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "3c78eb0a7e6a8b8c76c04b1135db0002bfb19ce063101c4fb4669cc3eb58c3c8": {
+          "git_blob": "6b61e88461b7daf61843fab2bc7bce7f3c7adecb",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "4673ff42fa124ab17ee63e5b7e505433c202c635b316413449180031123e4a1f": {
+          "git_blob": "001ba0a49b5eba455546600ea7e1ec47ba45e6b6",
+          "repository": "codex/t2touch"
+        },
+        "525fb080fb0859462b07e068bee46ef21411928d640847349ef127216b658d7e": {
+          "git_blob": "4c3f06cc9bdb5d9048d8e83b7025e0b626844843",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "54dcbd3ad7f2d6e942cb0b6fc7de63f5a24480724acdf8b68f1f58f02e851026": {
+          "git_blob": "25a5dd4ebfbc2eb23554f398036a1872c72aec7c",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "6352e128466259665858c872b31c075aee38ff54a6c5aaa9638b0602bf0b7bae": {
+          "git_blob": "dbaf0e6d370b874f06075c6f39d9194bdc7bbf96",
+          "repository": "codex/t2touch"
+        },
+        "6ff7564e87bdf9f85111ccd5c99647dbdb67baa8b1d291a3c15ec3623b89bad5": {
+          "git_blob": "875fb96347786b30709cc042e8d49106e240812b",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "733961d5ca7bbeb06bdba0e8dbcf65ac742b5a1e15933edf706d3f51cba1461f": {
+          "git_blob": "832e34a003daadff904d4ab1e94717b8cefb685a",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "7403112992d08b558c5cd35b6fef72a412ca38ad1eb3c134bd00f5f29efafb1f": {
+          "git_blob": "679f6ab2483ed8f9e20d2b4ddbf39b84eda87f1e",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "78079e7dbd292ad9f02aca6838c9b45932cbc1381e36fb59e15f7d363c72c383": {
+          "git_blob": "205d985b25cb9d81c3511b23df6479383e5d3ed8",
+          "repository": "codex/t2touch"
+        },
+        "838aa8ee193b047eb2b84040c1aaa7f9393e6d24ab69412145430d42f42cbab8": {
+          "git_blob": "e45a8ba56b8b4ddb2400a7f24ace70d80eeec4e6",
+          "repository": "codex/t2touch"
+        },
+        "8712818109322de9faccc1aab71e6f69c4c30c62166d4740de8f6bc35ccffb6d": {
+          "git_blob": "1d3a6a17cc3eaf8f432f433af764b29afd500301",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "8c4540062be6a8ad0cdc20091e8dc31ce615abb138f8570744c6aedd51b2630e": {
+          "git_blob": "b2b98c90f37dc933f6ea7d60742ec512c37c2740",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "980c71123f60188e4e11c24140725a3ca4e7c52cce92c68e648f376835a8c71e": {
+          "git_blob": "c889a8e6cc9ab8af3cf6b02cb93c148131041408",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "b956dfee2dafd5fa5ab5f9c314606c9e50aed1b8b1de2cfddbc8d1eabfe7718b": {
+          "git_blob": "59bfd7019e094f568643e8e675550de3502698f9",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "b996a4783abda6efe5496a4c9f25b1ad0b8671ec410abca060e07778af0d7b56": {
+          "git_blob": "f259a3e9b803c40c551518c2063e85a93bda7882",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "b9be8473fbd743fc40b993e7cca456eb6305eb5c2de7b2526ba36a0828b06b85": {
+          "git_blob": "a3bdf78c0ce4035b95b518fd29268bb85abb343f",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "bc10670e86cc537865a0017a8e554884af08c9e7926b2aa223ec235b04ce4599": {
+          "git_blob": "1c588fb6580d345a0a648621a5423d83e034f09d",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "cd28b4394695d0f2b73ac71bb20e2c02b887024f23948fa5681cb9c39d5b419c": {
+          "git_blob": "4265806f975b0bc01784d56e31d0126791cfcb87",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "e204f67f83e0ab53b25da88c8dec73edc0cd7ae7aa3169daa004a9af7524141d": {
+          "git_blob": "ce9bc0c14dcc39f27b74cc1e6cb2cea2e2cd4e2e",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "e965726b4f90b0358a882f9f1f215a86d7b8a68b1bcebdaddbcbf7fc3781d4d0": {
+          "git_blob": "bd1890737dfeb879962286ccb3392bbed1277827",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "ee63938fcbfa6e7a5f9024eb2a80859f873e3f2febcafe2d39f7f1233a6049df": {
+          "git_blob": "4d91a8b7b7ac3bc4f887b310b7ced9fa36d8a13e",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-native-enroll.py"
+    },
+    "t2-native-enroll-tui": {
+      "sha256": {
+        "47646791d9ae9344dd90fc5874c69e549f0b30171762c7a2cf027466673a04e3": {
+          "git_blob": "38bf522ce26b12324d04f8c86c4a3cf115dfb18d",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "d26b83b77de0c202b508df0a50decabb2fa88e5ef94ee3a0e3e322db9c03a8dd": {
+          "git_blob": "bdfbb502f5925343fb3523aa999dc6466e257beb",
+          "repository": "codex/t2touch"
+        },
+        "d6f6693f369c3a48fb0e56f758a2f1da46b967360d78d5dc70e53b32baf3bf3f": {
+          "git_blob": "98204271ed391b3f89b1e6f5095d4d96c883a3db",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "e564d81a67cbeab178e52289e57523f5178fb9e0c1f04a900ec21f8518261415": {
+          "git_blob": "a069ddf159ee653ae2be7efea550909c60f3496e",
+          "repository": "codex/t2-touchid-linux"
+        }
+      },
+      "source": "src/t2-native-enroll-tui.py"
+    },
+    "t2-native-enroll-tui-launch": {
+      "sha256": {
+        "021fcb67a7cf73ebcae5e7d0c5f0e732a720a70a212b918f6c4c3e1004740aff": {
+          "git_blob": "c0d5b7bfa71391d79cfacf69723917465818363f",
+          "repository": "codex/t2touch"
+        },
+        "79911b0a43a006b2557905de898fa06fd2dabfad2444881627117ede119c8348": {
+          "git_blob": "f1e8bb866e48c6df46a0c123ee0582bfc38c92a7",
+          "repository": "codex/t2-touchid-linux"
+        }
+      },
+      "source": "src/t2-native-enroll-tui-launch.sh"
+    },
+    "t2-native-enroll-verify": {
+      "sha256": {
+        "d154d2d107e641d1bfd49a7ae9f40ac4e2efab292e16424a864d449fd01ab221": {
+          "git_blob": "a40d10446670063b59af9f5b5a86d6e830000efd",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-native-enroll-verify.sh"
+    },
+    "t2-native-match": {
+      "sha256": {
+        "0f25a4118ac979724c0694d0714d3a924866ace55d96fc5a8872e221e0930129": {
+          "git_blob": "3df30968c86c226d04b198e2b5d808fffb1c75a8",
+          "repository": "codex/t2touch"
+        },
+        "1cee8f32b104d9b1eff058bff7029da69c8cbd2662e25880a617e6687d7f128b": {
+          "git_blob": "0d537d9dbc09361f991736828b0c74560a8c99a5",
+          "repository": "codex/t2touch"
+        },
+        "3d25e57d919aa3eaf37324dc15d393dac93f7f3f8d06f5779fb1c615711bb305": {
+          "git_blob": "5eaae0e679e19f46c4944cf2e8327ec66106f830",
+          "repository": "codex/t2touch"
+        },
+        "3e15e0f6ccbdc496f6a79c30e5c11613a79083ffec3cbe66c143635f9b173fae": {
+          "base_git_blob": "0d537d9dbc09361f991736828b0c74560a8c99a5",
+          "deployment_variant": "2026-09-13 legacy PATH copy; only delta unconditionally omits matches_required_identity during saved-public-summary comparison; see docs/TOOL_RETIREMENT.md",
+          "repository": "codex/t2touch"
+        },
+        "3e577ba1ae188999b84d9bcafa9db2b4e81bd21dea187ad29b0ce348dc55d2a0": {
+          "git_blob": "b2f20c0a49ade2bebf6baa2b23f740d2b10b169d",
+          "repository": "codex/t2touch"
+        },
+        "43873d8d989db7669ede10a5cf9b7bfec0f2d5ddc5fdfe24a8c58d878059b847": {
+          "git_blob": "b33a178b03815c0c76f2bcf4cb38bf849c6731b9",
+          "repository": "codex/t2touch"
+        },
+        "5de3c959cc86c8b9de0967fc5bb0236c6809afe0eb7a69a72839a6085531fd20": {
+          "git_blob": "4ba78b0a65913b5f82e27f7a26c77880bbf8d03c",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "8d7aaf6eecad541028eb18e01be628bf87f8f5b81df50574ff2db16ce5a297b7": {
+          "git_blob": "8034dd27144481a0d27e53392688b673d3c50cb1",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "9d5e773b24ced838a060efd94375acf06181264ac7e7cbd8b2a890121eed11d2": {
+          "git_blob": "33462e0ca40659e550df9a5552b17bc282d21e60",
+          "repository": "codex/t2touch"
+        },
+        "9fa1b95a3d27b4c9e242ecdedb673bcf2a77ac17662270124dc6788fb3d750d3": {
+          "git_blob": "c6e2460f7fa6f21ee4fd9b42c0112af90118c70e",
+          "repository": "codex/t2touch"
+        },
+        "e26c54c44355cf8b4e7d0a2eb92cd53db1999e9254c3bd6d985b8c0a387aa5ba": {
+          "git_blob": "d939e0b037805ae6e5dbca36c429ea1a6e72c245",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-native-match.py"
+    },
+    "t2-native-match-tui-launch": {
+      "sha256": {
+        "2f63512ad17194cfa2b690b3128581316a68b535a15114325ae3341aa9105bfe": {
+          "git_blob": "87a5fd07558f85cf0399e3215053adfe37b85b07",
+          "repository": "codex/t2touch"
+        },
+        "7d4d9401c20cf73d9a83bf4aa279451d35584cd355bec0f5ee35edc0277a551f": {
+          "git_blob": "8f3be81e45f5370d34a912f5534580da96ea8d8e",
+          "repository": "codex/t2-touchid-linux"
+        }
+      },
+      "source": "src/t2-match-tui-launch.sh"
+    },
+    "t2-native-negative-tui-launch": {
+      "sha256": {
+        "fcfe711a18b0f493a68850127d87e95f88cbc276e141eecd95b4572cf86cd8eb": {
+          "git_blob": "6c0b1edf26f4bded5fbbbe1df3d85d33aa5ad704",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-negative-tui-launch.sh"
+    },
+    "t2-native-new-finger-tui-launch": {
+      "sha256": {
+        "caeb4b4992c81cfef3754810dfc974848242d53e2f0bf08fbc05b45aeca0d9fc": {
+          "git_blob": "0edb646043ed2a7292ab0ecdd3c5e5996de9d348",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-new-finger-tui-launch.sh"
+    },
+    "t2-native-provision": {
+      "sha256": {
+        "085410144cbd9bedf02c49d7654bdeccede8b1f962dec067186455cb83c13aa1": {
+          "git_blob": "e06f750a42389df95a1aea0a83de0ae15335550d",
+          "repository": "codex/t2touch"
+        },
+        "a50a87e1d4db26d25532da59b86014bb3bf8b6db23d093674b0e7e235fdf2fa9": {
+          "git_blob": "0672271f10c1d303c1afa97c63a93aa4291ddfb2",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "ce93a86d62b267c5565e8d9e7116b6d0ec15980b50578d76a0898de8aa80f3d1": {
+          "git_blob": "b8b764db31989853aef894cdb22af6871952d28f",
+          "repository": "codex/t2-touchid-linux"
+        }
+      },
+      "source": "src/t2-native-provision.py"
+    },
+    "t2-native-provision-verify": {
+      "sha256": {
+        "6ba75f39ce5d40a8a8611646e666c6122586f1a32f399d117a227502646f61b2": {
+          "git_blob": "b98046f5f04c85bf65974518a19c8f475f01da39",
+          "repository": "codex/t2touch"
+        },
+        "99af770fb5374f68a987cb0d4c1f1af5f0dc2a8608d8107c7dbd3d43b21a6c29": {
+          "git_blob": "373d655574b4aff2f3ea0146a9712d92be3d2431",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "d8f3e26efd041ee1ff2064631d7ac40e0b9b93e16d939927cb6f51190d45ef09": {
+          "git_blob": "3a33f36ce5b80a361a89d0d35f2aa62159b6af67",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-native-provision-verify.py"
+    },
+    "t2-native-provisioning-preflight": {
+      "sha256": {
+        "210230536292f7d1aebdb0f8d7aa67d80dee7734b1a5e70f4cd61afb594bb581": {
+          "git_blob": "f03c9516bf914abc52caeb9441a995d1444f308c",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "49564e73109f6c7a639464182b16825fd7651d44b210c99b3386b7d24f086ff8": {
+          "git_blob": "597abaec1b8179111f75d1f52e42240dd9603c94",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "c468e8063a1e878c602477781c20315ec7c4d7ba8ebdd129bb8851615f66b2c2": {
+          "git_blob": "5cb7f28f5e5d2d4d838f31a06bb0a742e54f9821",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-native-provisioning-preflight.py"
+    },
+    "t2-native-replace": {
+      "sha256": {
+        "0c14a14d7354c7215c152bea19135e00dd578766f5c686d752948b5fcc4402e3": {
+          "git_blob": "e1f80f15c67471fc47b7fb8622d54907eacb6ecc",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "50d919d60ccec231bbf89cd620d492cad78589cbb3e19886f340e6e297736f64": {
+          "git_blob": "e6824ec8b6542061fac0595f19b9ca9076270d76",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "55a4ddd523cb4eb39db19c6a255bb2aea5381a63b77b581de634a3da180b769d": {
+          "git_blob": "5249887bab0a5269a9c6d0e7ca7c8e623bb77bf9",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "b716038c1bf4ba33bc1212987ad05573ed4f0eb49ef779bb1e6af8f9a2a201c2": {
+          "git_blob": "973a4ffb0ae5bd5925daae6d7dcfd6d66759e6ff",
+          "repository": "codex/t2touch"
+        },
+        "c842aaecd5b494079121a8bace121d55b54547b6882d8d66b5eb7f43893ca142": {
+          "git_blob": "4edf88b7a7799d32d2b01191194fc2282b2f763e",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "c8dd9d206ae3805c176fe182309c05f9f3d3aee96150346435692f56b6f346c3": {
+          "git_blob": "b0f8e2191d51e9860e0b48671d4bae5660ca1b42",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-native-replace.py"
+    },
+    "t2-native-replace-activate": {
+      "sha256": {
+        "201e9264fca2e45fa94537bf6aafb3576c64b249bb3e01311d9a137a7f9d8b2b": {
+          "git_blob": "c769ea4287239dd677eb7c4166da339251e812e9",
+          "repository": "codex/t2touch"
+        },
+        "2065c981ed7deff548070a4d59b910f169d637574e9da5de5c2134f4c3448720": {
+          "git_blob": "c169fa3b5c847a2e017a498539dba82cfaea6cc7",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "9bc66244a9274a04763de841fc70d1965b641329857d4f8e6af0f2bd845e3b70": {
+          "git_blob": "be42f5eed29c2fc1615f204ddd9cb49fed927c69",
+          "repository": "codex/t2touch"
+        },
+        "9cc833576d9920a66b8802ea69b669290fb9133952f96394bbdb2c883bbf36a6": {
+          "git_blob": "01f7d1c3fa856d24a83ccb8e0a95c59f210cb606",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "c89950c309066b2d0b6424078062a9c206864c7293b6b88cab03c3fc2deea79d": {
+          "git_blob": "7778787b79b1abb7c711b71edd57f2deee8ca294",
+          "repository": "codex/t2-touchid-linux"
+        }
+      },
+      "source": "src/t2-native-replace-activate.py"
+    },
+    "t2-second-finger-ceremony": {
+      "sha256": {
+        "2e74b01eb978ad009dc4bfab54482b23bfccfef9e8547ec0ba29e14b0eb5c814": {
+          "git_blob": "314a4c761f19c8e96d7b68d33b6ad8a810c71eb7",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-second-finger-ceremony.py"
+    },
+    "t2-second-finger-tui-launch": {
+      "sha256": {
+        "99b0e1ab0d15a7cce1c53649b0a53f1f72b387f980c9daab76c4796dc2ae50e4": {
+          "git_blob": "8955b77ece2107340be073aa3f35754f87b4a8d4",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-second-finger-tui-launch.sh"
+    },
+    "t2-sudo-pam-test-launch": {
+      "sha256": {
+        "c00612449b6284f27a2656e7916d08178d2b13b720ed9b1251ca1a2aa122c72a": {
+          "git_blob": "d8067a5d6cd15c29bc7951b47fa78a29b5abe8d8",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-sudo-pam-test-launch.sh"
+    },
+    "t2-touchid-enroll-test": {
+      "sha256": {
+        "11a99c2972d32cfc22d5e8ab49c328cd2d74b511cd272e91125db1fefc1e26c7": {
+          "git_blob": "60ff33b9a72cb0f88e9b7bb4a7dba9478558ef6d",
+          "repository": "codex/t2touch"
+        },
+        "19b1d591c3001609cfff1068cdd48d98954300a50a2ac172ff7001b4ddbd6114": {
+          "git_blob": "0e7a4c64f17fa7f1d569c836ead267d86e36d544",
+          "repository": "codex/t2touch"
+        },
+        "1cc5dcf3a10d13409d2cd0666e21daa58cc2e6221e1ac5801226148625d5e49b": {
+          "git_blob": "cbf6ab8d27580b29845e35d39b710b9da63aef8d",
+          "repository": "codex/t2touch"
+        },
+        "1f0bac733a64edd887336056ad742033f40ac353a1c965b2ffb4739cf3d11bb7": {
+          "git_blob": "e1151e7047b8317203a45c6ccc1daa355b0fa7c6",
+          "repository": "codex/t2touch"
+        },
+        "21039b2dd82e0e7a8eddc3d62339204908c7af7c637372cb9d8fb17970b736fd": {
+          "git_blob": "d2804aaa231fdb5f8c8579c55f1a28dac97ef7cb",
+          "repository": "codex/t2touch"
+        },
+        "555f980ba66cc8a636d2c3bdca520985430d9a4cbd401b1b0c30cdb7f905ee5d": {
+          "git_blob": "6e8168ab4c14f2e72e4303bc438bb942c793ef4e",
+          "repository": "codex/t2touch"
+        },
+        "6fe1d5115429a712b853d75fe054b7daa2f9038da4590f3938c5e143c1e216d7": {
+          "git_blob": "cdf60df03d8fe7b63df2643897f11f5750a21220",
+          "repository": "codex/t2touch"
+        },
+        "860fea33df8ad3ba130343046e0d51313c65332af7b252379329ec9cde54140c": {
+          "git_blob": "6de532326a3fbde1db9b9f1d557dd6e6673f1c34",
+          "repository": "codex/t2touch"
+        },
+        "95907cc309be702217c7227b3ff200321a6c5aca781e9c83a76598628ab03a4c": {
+          "git_blob": "5d110d9f1279c9d93b49f69dc437baae80b34160",
+          "repository": "codex/t2touch"
+        },
+        "96919aece0576235066a6d71aa0cbbdc95f2b2846f21ce7352ae431dbc009b76": {
+          "git_blob": "8648d04af933c100571685f810feffe8cf19b16f",
+          "repository": "codex/t2touch"
+        },
+        "96f0870603797f75cd1ecca63683d3fad15ef1530161239bc39520be7312e635": {
+          "git_blob": "32726e851f8a87f526a05261a63916e91b327950",
+          "repository": "codex/t2touch"
+        },
+        "982c089197cb5ce24cd244eba0de58289ac73930d66dc351de2e12f36d420f62": {
+          "git_blob": "b7e9e1b7f05116e80fbecae931bfc3eebd69dcf3",
+          "repository": "codex/t2touch"
+        },
+        "b512bf7a2717ae9069e3fcf2ff2f3d05bb71509a095f0051d7406f360e2c5fb0": {
+          "git_blob": "334de70c8be7c67dbef0eaa26b0ee71421463229",
+          "repository": "codex/t2touch"
+        },
+        "b9d543434bb47c9cbaf96164254c0af481dd3a60f2faab41291296189b941147": {
+          "git_blob": "dae1adb2b2065223b465f5a06deb95c1ba9a3669",
+          "repository": "codex/t2touch"
+        },
+        "c4aab8fdba230c95bc862f11ae2919f8bc82334aebbee4c7a29710eaed3f5f75": {
+          "git_blob": "090062be08ac0672e54c9d7dbf9a4a5c7b935edc",
+          "repository": "codex/t2touch"
+        },
+        "e4cb42743f38923e1a8d376de4330d4fdc3f890bd45d6abe54d89fe00f8a0e75": {
+          "git_blob": "dc35b374f57167aabd9a4c70d467fdd10b9354a8",
+          "repository": "codex/t2touch"
+        },
+        "ea8f0c9083de5986a2735484a9941b887c7a3874ab9e18b6339f1cebe0c593ed": {
+          "git_blob": "b2bb7bc5e5e0d29a9908d52c58304be447b038c7",
+          "repository": "codex/t2touch"
+        },
+        "f7f1eea758e961fe1df50d1045f790b16e442ec78dde6ee36ac013a6604cb053": {
+          "git_blob": "b632088a80e29a9aac4ff0efd464f5d9e17a8fea",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-touchid-enroll-test.py"
+    },
+    "t2-xart-mmio-discriminator": {
+      "sha256": {
+        "a6fedfb1aafdaaa568061980b07e5087586bb5fce9b37c9ed61f74cfcde30895": {
+          "git_blob": "522385707f31a64a8e6eeb431c78dc2ca8b83db9",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "e02c76073b36382000a6948d4a7b8ba97ce932aff5380c66f5b1e5230bfbc42f": {
+          "git_blob": "2b22c03d6c3e4c8275385f343f40729550918577",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-xart-mmio-discriminator.py"
+    },
+    "t2-xart-post-repair": {
+      "sha256": {
+        "6b37c321f0382d334dc6b665bc19a3835a78ef9ef5a30ac783cd34b0a549b480": {
+          "git_blob": "99ecc4624dabd34ce461b518b4ed41c7d4155d3a",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "abfb61671eb248999ad166843f82d7949e92c6962007b8166d883162b5db620a": {
+          "git_blob": "8ac615fe2a586878d5f1a59f8555e1220ed3e961",
+          "repository": "codex/t2-touchid-linux"
+        },
+        "d159d4c5385ebeddd1f29a98712166f1f323432e2273ad5b8cccd11b49d5efd4": {
+          "git_blob": "51592020d0706d7e7efa2cb7391e2b4c5b0f5831",
+          "repository": "codex/t2touch"
+        }
+      },
+      "source": "src/t2-xart-post-repair.py"
+    }
+  }
+}

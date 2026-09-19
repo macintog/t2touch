@@ -279,7 +279,7 @@ class InstallerTests(unittest.TestCase):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         wrapper = (ROOT / "install-omarchy.sh").read_text(encoding="utf-8")
         self.assertIn("T2TOUCH_OMARCHY_WRAPPER=1", wrapper)
-        self.assertIn("Log out and sign back in now, then run: t2touch enroll", wrapper)
+        self.assertIn("Log out and sign back in now, then run: t2-touchid-enroll", wrapper)
         self.assertIn("NEXT STEP", wrapper)
         self.assertNotIn(
             "t2touch is ready. Enroll a fingerprint with:",
@@ -342,13 +342,14 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn(
             "/usr/local/sbin/t2-fprintd-negative-tui-launch", installer
         )
-        self.assertIn("t2-catacomb-fixture-check", uninstaller)
-        self.assertIn("t2-sudo-pam-test-launch", uninstaller)
+        self.assertIn('"$source_dir/tools/retire-path-tools.py" --apply', uninstaller)
+        self.assertNotIn("t2-catacomb-fixture-check", uninstaller)
         self.assertIn("remove_legacy_path_research_helpers", installer)
 
     def test_uninstall_removes_native_enroll_and_mbp162_override(self):
         uninstaller = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
-        self.assertIn("t2-native-enroll", uninstaller)
+        self.assertIn('"$source_dir/tools/retire-path-tools.py" --apply', uninstaller)
+        self.assertIn('"t2-native-enroll"', (ROOT / "tools/retired-tools.json").read_text())
         self.assertIn("t2-sep-prerequisite-ready", uninstaller)
         self.assertIn("t2-sep-create-version.conf", uninstaller)
 
@@ -536,31 +537,6 @@ printf 'prior_recovery_hold=%s\n' "$prior_recovery_hold"
         self.assertTrue((unit_root / "t2-bridge-network.service").exists())
         self.assertFalse(log.exists())
         self.assertNotIn("is-active", completed.stdout)
-
-    def test_upgrade_removes_legacy_path_research_helpers(self):
-        helper = ROOT / "tools/installer-services.sh"
-        with tempfile.TemporaryDirectory() as directory:
-            prefix = Path(directory)
-            leftover = prefix / "t2-catacomb-fixture-check"
-            leftover.write_text("old-path-copy\n", encoding="utf-8")
-            keep = prefix / "t2-acm-preflight"
-            keep.write_text("product-helper\n", encoding="utf-8")
-            completed = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    'source "$1"; remove_legacy_path_research_helpers "$2"',
-                    "installer-test",
-                    str(helper),
-                    str(prefix),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertFalse(leftover.exists())
-            self.assertTrue(keep.exists())
 
     def test_activation_journal_tmpfiles_are_installed_and_removed(self):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
