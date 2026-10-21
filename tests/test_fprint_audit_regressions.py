@@ -115,6 +115,7 @@ class Evidence:
 
 class Projection:
     complete = True
+    match_mode = "name"
     finger_names = ("finger-1", "finger-2")
 
 

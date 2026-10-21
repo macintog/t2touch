@@ -28,8 +28,35 @@ class FprintRuntimeTests(unittest.TestCase):
     def test_incomplete_projection_invents_no_compatibility_identity(self):
         view = runtime.parse_projection(projection())
         self.assertEqual(view.listed_fingers, ())
+        self.assertEqual(view.match_mode, "name")
         with self.assertRaises(runtime.FprintRuntimeError):
             runtime.resolve_match(view, "finger-1")
+
+    def test_compatibility_fallback_uses_only_reconciled_slots(self):
+        view = runtime.parse_projection(
+            projection(count=2), compatibility_fallback=True
+        )
+        self.assertEqual(view.listed_fingers, ("finger-1", "finger-2"))
+        self.assertFalse(view.complete)
+        self.assertEqual(view.match_mode, "slot")
+        self.assertTrue(runtime.resolve_match(view, "finger-2").match_all)
+
+    def test_complete_compatibility_projection_keeps_name_mode(self):
+        view = runtime.parse_projection(
+            projection(("finger-1",), count=1, complete=True),
+            compatibility_fallback=True,
+        )
+        self.assertEqual(view.listed_fingers, ("finger-1",))
+        self.assertTrue(view.complete)
+        self.assertEqual(view.match_mode, "name")
+
+    def test_duplicate_only_projection_does_not_gain_synthetic_handles(self):
+        value = projection(count=2)
+        value["unassigned_identity_count"] = 0
+        value["duplicate_finger_name_count"] = 1
+        view = runtime.parse_projection(value, compatibility_fallback=True)
+        self.assertEqual(view.listed_fingers, ())
+        self.assertEqual(view.match_mode, "name")
 
     def test_complete_projection_lists_names_but_authenticates_against_all(self):
         view = runtime.parse_projection(

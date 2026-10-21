@@ -18,10 +18,11 @@ class RuntimeProjection:
     finger_names: tuple[str, ...]
     reconciled_identity_count: int
     complete: bool
+    match_mode: str = "name"
 
     @property
     def listed_fingers(self) -> tuple[str, ...]:
-        return self.finger_names if self.complete else ()
+        return self.finger_names if self.complete or self.match_mode == "slot" else ()
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,9 @@ def _integer(value: object, field: str) -> int:
     return value
 
 
-def parse_projection(value: object) -> RuntimeProjection:
+def parse_projection(
+    value: object, *, compatibility_fallback: bool = False
+) -> RuntimeProjection:
     """Parse only the exact redacted projection emitted by our collector."""
 
     expected_keys = {
@@ -100,11 +103,13 @@ def parse_projection(value: object) -> RuntimeProjection:
     ):
         # Incomplete projections deliberately expose no partial name list.
         raise FprintRuntimeError("incomplete fprint projection is inconsistent")
-    return RuntimeProjection(
-        names,
-        identity_count,
-        complete,
-    )
+    if compatibility_fallback and not complete and unassigned == identity_count:
+        names = tuple(
+            t2_fprint_identity.handle(slot)
+            for slot in range(1, identity_count + 1)
+        )
+        return RuntimeProjection(names, identity_count, False, "slot")
+    return RuntimeProjection(names, identity_count, complete)
 
 
 def resolve_match(view: object, requested_finger: object) -> MatchRequest:
@@ -118,6 +123,10 @@ def resolve_match(view: object, requested_finger: object) -> MatchRequest:
         if not view.reconciled_identity_count:
             raise FprintRuntimeError("no fingerprints are enrolled")
         return MatchRequest("any", None, True)
+    if view.match_mode == "slot":
+        if requested_finger not in view.finger_names:
+            raise FprintRuntimeError("requested finger is not enrolled")
+        return MatchRequest(requested_finger, None, True)
     if view.complete:
         if requested_finger not in view.finger_names:
             raise FprintRuntimeError("requested finger is not enrolled")

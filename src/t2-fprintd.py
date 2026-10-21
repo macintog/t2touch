@@ -137,6 +137,14 @@ def resolved_any_finger_from_result(result: object) -> str | None:
     return t2_fprint_result.resolved_any_finger_from_probe_result(result)
 
 
+def resolved_slot_finger_from_result(
+    result: object, identity_count: int
+) -> str | None:
+    return t2_fprint_result.resolved_slot_finger_from_probe_result(
+        result, identity_count
+    )
+
+
 def desktop_user_unit_command(unit: object) -> tuple[str, ...] | None:
     """Return a command bound to the configured desktop user's live bus.
 
@@ -547,7 +555,12 @@ class T2Backend:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RuntimeError("fprint projection returned malformed JSON") from error
         try:
-            return t2_fprint_runtime.parse_projection(value)
+            return t2_fprint_runtime.parse_projection(
+                value,
+                compatibility_fallback=(
+                    authority.origin == COMPATIBILITY_AUTHORITY
+                ),
+            )
         except t2_fprint_runtime.FprintRuntimeError as error:
             raise RuntimeError("fprint projection failed validation") from error
 
@@ -594,7 +607,9 @@ class T2Backend:
         async with self.operation_lock:
             if getattr(self, "system_sleeping", False):
                 raise RuntimeError("system sleep transition is active")
-            return (await self.enrollment_projection()).listed_fingers
+            projection = await self.enrollment_projection()
+            self.last_listed_projection = projection
+            return projection.listed_fingers
 
     async def discover(self) -> int:
         if self.port is not None:
@@ -622,13 +637,25 @@ class T2Backend:
         port: int,
         target_finger: str | None = None,
         resolve_any_finger: bool = False,
+        resolve_any_identity_slot: bool = False,
         live_feedback: Callable[[dict], None] | None = None,
         prepare_only: bool = False,
     ) -> dict:
         if type(prepare_only) is not bool or (
-            prepare_only and (target_finger is not None or resolve_any_finger)
+            prepare_only and (
+                target_finger is not None
+                or resolve_any_finger
+                or resolve_any_identity_slot
+            )
         ):
             raise RuntimeError("invalid compatibility projection preparation")
+        if sum(
+            selector is not None and selector is not False
+            for selector in (
+                target_finger, resolve_any_finger, resolve_any_identity_slot
+            )
+        ) > 1:
+            raise RuntimeError("compatibility match identity selectors conflict")
         authority = self.runtime_authority()
         if authority.origin != COMPATIBILITY_AUTHORITY:
             raise RuntimeError("compatibility Catacomb authority changed")
@@ -680,6 +707,8 @@ class T2Backend:
                 command.extend(["--match-finger-name", target_finger])
             if resolve_any_finger:
                 command.append("--resolve-any-finger-name")
+            if resolve_any_identity_slot:
+                command.append("--resolve-any-identity-slot")
         process = await asyncio.create_subprocess_exec(
             *command,
             start_new_session=True,
@@ -1349,12 +1378,20 @@ class T2Backend:
         self,
         target_finger: str | None = None,
         resolve_any_finger: bool = False,
+        resolve_any_identity_slot: bool = False,
         live_feedback: Callable[[dict], None] | None = None,
     ) -> tuple[str, dict]:
-        if target_finger is not None and resolve_any_finger:
-            raise RuntimeError("named and resolved-any matching conflict")
+        if sum(
+            selector is not None and selector is not False
+            for selector in (
+                target_finger, resolve_any_finger, resolve_any_identity_slot
+            )
+        ) > 1:
+            raise RuntimeError("match identity selectors conflict")
         authority = self.runtime_authority()
         if authority.origin == NATIVE_AUTHORITY:
+            if resolve_any_identity_slot:
+                raise RuntimeError("native authority does not use slot matching")
             try:
                 result = await self._run_native_match(
                     target_finger, resolve_any_finger, live_feedback
@@ -1368,10 +1405,16 @@ class T2Backend:
             port = await self.discover()
             # Never replay authentication after an ambiguous transport failure.
             result = await self._run_probe(
-                port, target_finger, resolve_any_finger, live_feedback
+                port,
+                target_finger=target_finger,
+                resolve_any_finger=resolve_any_finger,
+                resolve_any_identity_slot=resolve_any_identity_slot,
+                live_feedback=live_feedback,
             )
         else:
             raise RuntimeError("configured T2 authority origin is unsupported")
+        if resolve_any_identity_slot:
+            raise RuntimeError("slot verification requires an identity count")
         if resolve_any_finger:
             verdict = (
                 "verify-match"
@@ -1411,6 +1454,22 @@ class T2Backend:
                 )
             except t2_fprint_runtime.FprintRuntimeError as error:
                 raise RuntimeError("requested fprint identity is unavailable") from error
+            if view.match_mode == "slot":
+                authority = self.runtime_authority()
+                if authority.origin != COMPATIBILITY_AUTHORITY:
+                    raise RuntimeError("slot presentation requires compatibility authority")
+                port = await self.discover()
+                result = await self._run_probe(
+                    port,
+                    resolve_any_identity_slot=True,
+                    live_feedback=live_feedback,
+                )
+                selected = resolved_slot_finger_from_result(
+                    result, view.reconciled_identity_count
+                )
+                verdict = "verify-match" if selected is not None else "verify-no-match"
+                self.schedule_feedback(verdict)
+                return verdict, result
             return await self.verify(
                 target_finger=None,
                 resolve_any_finger=True,
@@ -1923,7 +1982,15 @@ class FprintDevice(ServiceInterface):
             )
         # Reuse this caller's presentation list once in its next VerifyStart.
         # This never replaces the native match's live authority/reconciliation.
-        self.listed_presentation = (current_dbus_sender(), self.enrolled_fingers)
+        projection = getattr(self.backend, "last_listed_projection", None)
+        if (
+            not isinstance(projection, t2_fprint_runtime.RuntimeProjection)
+            or projection.listed_fingers != self.enrolled_fingers
+        ):
+            projection = t2_fprint_runtime.RuntimeProjection(
+                self.enrolled_fingers, len(self.enrolled_fingers), True
+            )
+        self.listed_presentation = (current_dbus_sender(), projection)
         return list(self.enrolled_fingers)
 
     @method()
@@ -1961,8 +2028,11 @@ class FprintDevice(ServiceInterface):
             listed = self.listed_presentation
             self.listed_presentation = None
             if listed is not None and listed[0] == self.claimed_sender:
-                names = tuple(listed[1])
-                view = t2_fprint_runtime.RuntimeProjection(names, len(names), True)
+                if isinstance(listed[1], t2_fprint_runtime.RuntimeProjection):
+                    view = listed[1]
+                else:
+                    names = tuple(listed[1])
+                    view = t2_fprint_runtime.RuntimeProjection(names, len(names), True)
             else:
                 async with self.backend.operation_lock:
                     view = await self.backend.runtime_projection()
@@ -2049,7 +2119,13 @@ class FprintDevice(ServiceInterface):
             # evidence collected before it is not authority to publish now.
             await self._require_claim_owner()
             if verdict == "verify-match":
-                selected = resolved_any_finger_from_result(result)
+                selected = (
+                    resolved_slot_finger_from_result(
+                        result, projection.reconciled_identity_count
+                    )
+                    if projection.match_mode == "slot"
+                    else resolved_any_finger_from_result(result)
+                )
                 if selected is None:
                     raise RuntimeError("matched any-finger result has no identity")
                 self._emit_claimed("VerifyFingerMatched", "s", [selected])

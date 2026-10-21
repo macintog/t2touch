@@ -6,6 +6,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Present unassigned compatibility fingerprints through reconciled neutral
+  slots and require stable inventory and match attestations before accepting
+  a slot result. Native matching continues to require its normal authority.
+
 ## 0.1.0 - 2026-09-19
 
 This release brings everyday Touch ID commands into one family, makes desktop

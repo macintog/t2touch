@@ -171,6 +171,77 @@ def resolved_any_finger_from_probe_result(result: object) -> str | None:
     raise RuntimeError("resolved-any T2 match result has no terminal identity")
 
 
+def resolved_slot_finger_from_probe_result(
+    result: object, expected_identity_count: object
+) -> str | None:
+    """Convert one attested reconciled-list slot to its neutral handle."""
+
+    if not isinstance(result, dict):
+        raise RuntimeError("malformed T2 probe result")
+    gate = result.get("resolved_slot_match_gate")
+    post = result.get("resolved_slot_match_post_attestation")
+    expected_gate = {
+        "schema_version", "identity_count", "all_identities_selected",
+        "same_connection_inventory_stable", "local_live_reconciled",
+        "slot_scope", "identifiers_redacted",
+    }
+    expected_post = {
+        "schema_version", "identity_state_unchanged",
+        "local_components_unchanged", "per_user_inventory_unchanged",
+        "global_inventory_unchanged", "identifiers_redacted",
+    }
+    if (
+        type(expected_identity_count) is not int
+        or not 1 <= expected_identity_count <= MAX_ENROLLED_IDENTITIES
+        or type(gate) is not dict
+        or set(gate) != expected_gate
+        or gate.get("schema_version") != 1
+        or gate.get("identity_count") != expected_identity_count
+        or gate.get("all_identities_selected") is not True
+        or gate.get("same_connection_inventory_stable") is not True
+        or gate.get("local_live_reconciled") is not True
+        or gate.get("slot_scope") != "current-reconciled-list"
+        or gate.get("identifiers_redacted") is not True
+        or type(post) is not dict
+        or set(post) != expected_post
+        or post.get("schema_version") != 1
+        or post.get("identity_state_unchanged") is not True
+        or post.get("local_components_unchanged") is not True
+        or post.get("per_user_inventory_unchanged") is not True
+        or post.get("global_inventory_unchanged") is not True
+        or post.get("identifiers_redacted") is not True
+    ):
+        raise RuntimeError("resolved-slot T2 match attestation is incomplete")
+    verdict = verdict_from_probe_result(result)
+    events = result.get("match_events")
+    terminal = [
+        event for event in events
+        if type(event) is dict and event.get("event_kind") == "match_result"
+    ]
+    if len(terminal) != 1:
+        raise RuntimeError("resolved-slot T2 match has no unique terminal result")
+    event = terminal[0]
+    if verdict == "verify-no-match":
+        if (
+            event.get("matched") is not False
+            or event.get("matches_enrolled_identity") is not False
+            or event.get("matched_identity_slot_present") is not False
+            or "matched_identity_slot" in event
+        ):
+            raise RuntimeError("resolved-slot T2 no-match result is ambiguous")
+        return None
+    slot = event.get("matched_identity_slot")
+    if (
+        event.get("matched") is not True
+        or event.get("matches_enrolled_identity") is not True
+        or event.get("matched_identity_slot_present") is not True
+        or type(slot) is not int
+        or not 1 <= slot <= expected_identity_count
+    ):
+        raise RuntimeError("resolved-slot T2 match result is incomplete")
+    return f"finger-{slot}"
+
+
 def compact_worker_result(
     result: object,
     target_finger: str | None,

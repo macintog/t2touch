@@ -55,6 +55,45 @@ def resolved_match_result(finger_name="finger-1"):
     }
 
 
+def resolved_slot_result(*, matched=True, slot=1, count=1):
+    event = {
+        "event_kind": "match_result",
+        "result_valid": True,
+        "matched": matched,
+        "matches_enrolled_identity": matched,
+        "host_accepted_result": True,
+        "matched_identity_slot_present": matched,
+    }
+    if matched:
+        event.update(
+            no_match=False,
+            matched_identity_slot=slot,
+        )
+    else:
+        event.update(no_match=True, no_match_image_quality=False)
+    return {
+        "match_cleanup_valid": True,
+        "resolved_slot_match_gate": {
+            "schema_version": 1,
+            "identity_count": count,
+            "all_identities_selected": True,
+            "same_connection_inventory_stable": True,
+            "local_live_reconciled": True,
+            "slot_scope": "current-reconciled-list",
+            "identifiers_redacted": True,
+        },
+        "resolved_slot_match_post_attestation": {
+            "schema_version": 1,
+            "identity_state_unchanged": True,
+            "local_components_unchanged": True,
+            "per_user_inventory_unchanged": True,
+            "global_inventory_unchanged": True,
+            "identifiers_redacted": True,
+        },
+        "match_events": [event],
+    }
+
+
 class FakeBackend:
     def __init__(self, verdict="verify-match"):
         self.verdict = verdict
@@ -435,6 +474,34 @@ class DeviceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             device.enrolled_fingers,
             ("finger-1", "finger-2"),
+        )
+
+    async def test_compatibility_slot_listing_and_verify_report_same_handle(self):
+        backend = FakeBackend()
+        backend.projection = MODULE.t2_fprint_runtime.RuntimeProjection(
+            ("finger-1",), 1, False, "slot"
+        )
+        backend.last_listed_projection = backend.projection
+        backend.list_fingers = AsyncMock(return_value=("finger-1",))
+        backend.verify_fprint = AsyncMock(
+            return_value=("verify-match", resolved_slot_result())
+        )
+        device = make_device(backend)
+        matched = []
+        device.VerifyFingerMatched = matched.append
+        device.VerifyStatus = lambda _result, _done: None
+
+        listed = await MODULE.FprintDevice.ListEnrolledFingers.__wrapped__(
+            device, MODULE.LINUX_USER
+        )
+        await claim(device)
+        await verify_start(device, "finger-1")
+        await device.verify_task
+
+        self.assertEqual(listed, ["finger-1"])
+        self.assertEqual(matched, ["finger-1"])
+        backend.verify_fprint.assert_awaited_once_with(
+            "finger-1", mock.ANY, projection=backend.projection
         )
 
     async def test_verify_start_refreshes_projection_before_named_match(self):
@@ -1608,6 +1675,43 @@ class VerdictTests(unittest.TestCase):
             with self.subTest(), self.assertRaises(RuntimeError):
                 MODULE.resolved_any_finger_from_result(candidate)
 
+    def test_resolved_slot_returns_only_attested_neutral_handle(self):
+        self.assertEqual(
+            MODULE.resolved_slot_finger_from_result(
+                resolved_slot_result(slot=2, count=2), 2
+            ),
+            "finger-2",
+        )
+        self.assertIsNone(
+            MODULE.resolved_slot_finger_from_result(
+                resolved_slot_result(matched=False, count=2), 2
+            )
+        )
+
+    def test_resolved_slot_rejects_malformed_or_extra_authority(self):
+        cases = []
+        wrong_count = resolved_slot_result(slot=1, count=2)
+        cases.append((wrong_count, 1))
+        out_of_range = resolved_slot_result(slot=2, count=1)
+        cases.append((out_of_range, 1))
+        bad_gate = resolved_slot_result()
+        bad_gate["resolved_slot_match_gate"]["extra"] = True
+        cases.append((bad_gate, 1))
+        bad_post = resolved_slot_result()
+        bad_post["resolved_slot_match_post_attestation"][
+            "identity_state_unchanged"
+        ] = False
+        cases.append((bad_post, 1))
+        duplicate = resolved_slot_result()
+        duplicate["match_events"].append(dict(duplicate["match_events"][0]))
+        cases.append((duplicate, 1))
+        ambiguous_negative = resolved_slot_result(matched=False)
+        ambiguous_negative["match_events"][0]["matched_identity_slot"] = 1
+        cases.append((ambiguous_negative, 1))
+        for candidate, count in cases:
+            with self.subTest(), self.assertRaises(RuntimeError):
+                MODULE.resolved_slot_finger_from_result(candidate, count)
+
     def test_missing_or_explicit_no_match_fails_closed(self):
         with self.assertRaises(RuntimeError):
             MODULE.verdict_from_result(
@@ -2015,6 +2119,39 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(arguments[authority + 1], "1000")
         self.assertNotIn("--load-catacomb-archive", arguments)
 
+    async def test_compatibility_probe_selects_name_or_slot_mode_exclusively(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.linux_uid = 1000
+        backend.project_dir = Path("/opt/t2-touchid")
+        backend.catacomb_root = Path("/var/lib/t2-touchid/catacomb")
+        backend.biolockout_state_dir = Path("/var/lib/t2-touchid/biolockout")
+        backend.match_seconds = 15
+        backend.process = None
+        backend.process_owner = None
+        backend.runtime_authority = mock.Mock(
+            return_value=mock.Mock(
+                origin=MODULE.COMPATIBILITY_AUTHORITY,
+                selected=mock.Mock(apple_uid=501),
+            )
+        )
+        backend._collect_process = AsyncMock(return_value=(b"{}", b""))
+        process = mock.Mock(returncode=0)
+        with mock.patch.object(
+            MODULE.asyncio,
+            "create_subprocess_exec",
+            AsyncMock(return_value=process),
+        ) as spawn:
+            await backend._run_probe(50001, resolve_any_finger=True)
+            await backend._run_probe(50001, resolve_any_identity_slot=True)
+
+        name_arguments = spawn.await_args_list[0].args
+        slot_arguments = spawn.await_args_list[1].args
+        self.assertIn("--resolve-any-finger-name", name_arguments)
+        self.assertNotIn("--resolve-any-identity-slot", name_arguments)
+        self.assertIn("--resolve-any-identity-slot", slot_arguments)
+        self.assertNotIn("--resolve-any-finger-name", slot_arguments)
+        self.assertNotIn("--match-finger-name", slot_arguments)
+
     def test_adaptive_sync_service_is_static_and_default_off(self):
         root = MODULE_PATH.parents[1]
         unit = (
@@ -2146,6 +2283,51 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await backend.verify_fprint("any")
         backend.verify.assert_awaited_once_with(
             target_finger=None, resolve_any_finger=True, live_feedback=None
+        )
+
+    async def test_compatibility_slot_view_uses_slot_resolution(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.operation_lock = asyncio.Lock()
+        backend.runtime_authority = mock.Mock(
+            return_value=mock.Mock(origin=MODULE.COMPATIBILITY_AUTHORITY)
+        )
+        backend.discover = AsyncMock(return_value=50001)
+        backend._run_probe = AsyncMock(return_value=resolved_slot_result())
+        backend.schedule_feedback = mock.Mock()
+        view = MODULE.t2_fprint_runtime.RuntimeProjection(
+            ("finger-1",), 1, False, "slot"
+        )
+
+        verdict, result = await backend.verify_fprint(
+            "finger-1", projection=view
+        )
+
+        self.assertEqual(verdict, "verify-match")
+        self.assertIs(result, backend._run_probe.return_value)
+        backend._run_probe.assert_awaited_once_with(
+            50001,
+            resolve_any_identity_slot=True,
+            live_feedback=None,
+        )
+        backend.schedule_feedback.assert_called_once_with("verify-match")
+
+    async def test_complete_compatibility_view_keeps_name_resolution(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.operation_lock = asyncio.Lock()
+        backend.runtime_authority = mock.Mock(
+            return_value=mock.Mock(origin=MODULE.COMPATIBILITY_AUTHORITY)
+        )
+        backend.verify = AsyncMock(return_value=("verify-no-match", {}))
+        view = MODULE.t2_fprint_runtime.RuntimeProjection(
+            ("finger-1",), 1, True
+        )
+
+        await backend.verify_fprint("finger-1", projection=view)
+
+        backend.verify.assert_awaited_once_with(
+            target_finger=None,
+            resolve_any_finger=True,
+            live_feedback=None,
         )
 
     async def test_concurrent_inventory_reads_share_only_inflight_work(self):

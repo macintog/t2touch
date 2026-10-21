@@ -402,6 +402,8 @@ def summarize_event(
                         summary["matches_enrolled_identity"] = False
                         summary["host_accepted_result"] = True
                         summary["result_valid"] = not result_ignored
+                        if slot_match_gate is not None:
+                            summary["matched_identity_slot_present"] = False
                     else:
                         identity_record = result_data[:20]
                         expected_identity = (
