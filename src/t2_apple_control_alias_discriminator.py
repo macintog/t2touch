@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import t2_apple_control_discriminator as keybag_discriminator
 import t2_mutation_journal as journal
@@ -27,6 +27,19 @@ MATCHED_MILESTONES = (
     "APPLE_CONTROL_KEYBAG_UNLOAD_INTENT",
     "APPLE_CONTROL_KEYBAG_HANDLE_RELEASED",
     "APPLE_CONTROL_DISCRIMINATOR_COMPLETE",
+)
+
+BOUND_MILESTONES = (
+    "APPLE_CONTROL_ALIAS_BASELINE",
+    "APPLE_CONTROL_ALIAS_PRESTATE_OBSERVED",
+    "APPLE_CONTROL_ALIAS_KEYBAG_LOAD_INTENT",
+    "APPLE_CONTROL_ALIAS_HANDLE_OBSERVED",
+    "APPLE_CONTROL_ALIAS_BIND_INTENT",
+    "APPLE_CONTROL_ALIAS_BOUND_OBSERVED",
+    "APPLE_CONTROL_ALIAS_KEYBAG_UNLOAD_INTENT",
+    "APPLE_CONTROL_ALIAS_HANDLE_RELEASED",
+    "APPLE_CONTROL_ALIAS_PERSISTED",
+    "APPLE_CONTROL_ALIAS_COMPLETE",
 )
 
 
@@ -46,6 +59,13 @@ class AliasDiscriminatorTransport(Protocol):
 
 @dataclass(frozen=True, repr=False)
 class MatchedKeybagProof:
+    operation_id: str
+    linux_boot_uuid: str
+    runtime_generation: str
+
+
+@dataclass(frozen=True, repr=False)
+class BoundAliasProof:
     operation_id: str
     linux_boot_uuid: str
     runtime_generation: str
@@ -203,6 +223,189 @@ def read_matched_keybag_proof(
             "keybag discriminator proof is incomplete or inconsistent"
         )
     return MatchedKeybagProof(operation_id, prior_boot, runtime)
+
+
+def read_bound_alias_proof(
+    path: Path,
+    evidence: keybag_discriminator.OracleEvidence,
+    matched_proof: MatchedKeybagProof,
+) -> BoundAliasProof:
+    """Validate a complete clean ``bound-and-persisted`` alias journal."""
+    try:
+        records = journal.read(path)
+    except (OSError, journal.JournalError) as error:
+        raise AppleControlAliasDiscriminatorError(
+            "bound alias proof is unavailable"
+        ) from error
+    if tuple(record.get("milestone") for record in records) != BOUND_MILESTONES:
+        raise AppleControlAliasDiscriminatorError(
+            "alias journal did not complete the clean bound path"
+        )
+    operation_id = _uuid(records[0].get("operation_id"), "alias operation ID")
+    if any(record.get("operation_id") != operation_id for record in records):
+        raise AppleControlAliasDiscriminatorError("alias operation ID changed")
+    baseline = _exact(
+        records[0].get("evidence"),
+        {
+            "operation_kind", "origin", "import_operation_id",
+            "matched_keybag_operation_id", "mapping_generation",
+            "linux_boot_uuid", "runtime_generation", "linux_uid", "apple_uid",
+            "bag_uuid", "keybag_sha256", "special_alias", "mapping_enabled",
+            "operation_scope", "reconciled_prestate_operation_id",
+        },
+        "bound alias baseline",
+    )
+    runtime = _uuid(baseline["runtime_generation"], "alias runtime generation")
+    boot = _uuid(baseline["linux_boot_uuid"], "alias Linux boot UUID")
+    if baseline["reconciled_prestate_operation_id"] is not None:
+        raise AppleControlAliasDiscriminatorError(
+            "clean bind proof must be a first-attempt bind"
+        )
+    prestate = _exact(
+        records[1].get("evidence"),
+        {
+            "runtime_generation", "alias_absent", "bag_uuid_matches",
+            "state_observed",
+        },
+        "bound alias pre-state evidence",
+    )
+    load = _exact(
+        records[2].get("evidence"),
+        {"runtime_generation", "keybag_sha256", "mutation_possible"},
+        "bound alias load intent",
+    )
+    handle_record = _exact(
+        records[3].get("evidence"),
+        {"runtime_generation", "handle", "double_read_equal", "bag_uuid_matches"},
+        "bound alias handle evidence",
+    )
+    bind_intent = _exact(
+        records[4].get("evidence"),
+        {"runtime_generation", "handle", "special_alias", "mutation_possible"},
+        "bound alias bind intent",
+    )
+    bound = _exact(
+        records[5].get("evidence"),
+        {
+            "runtime_generation", "bag_uuid_matches", "state_observed",
+            "command_status", "command_raised",
+        },
+        "bound alias observation",
+    )
+    unload = _exact(
+        records[6].get("evidence"),
+        {"runtime_generation", "handle", "mutation_possible"},
+        "bound alias unload intent",
+    )
+    released = _exact(
+        records[7].get("evidence"),
+        {"runtime_generation", "command_status"},
+        "bound alias release evidence",
+    )
+    persisted = _exact(
+        records[8].get("evidence"),
+        {"runtime_generation", "bag_uuid_matches", "state_observed"},
+        "bound alias persistence evidence",
+    )
+    complete = _exact(
+        records[9].get("evidence"),
+        {
+            "runtime_generation", "outcome", "alias_bound_by_operation",
+            "alias_persisted", "handle_released", "mapping_promoted",
+        },
+        "bound alias completion evidence",
+    )
+    handle = handle_record["handle"]
+    status = bound["command_status"]
+    raised = bound["command_raised"]
+    boolean_fields = {
+        "mapping_enabled", "alias_absent", "bag_uuid_matches", "state_observed",
+        "mutation_possible", "double_read_equal", "command_raised",
+        "alias_bound_by_operation", "alias_persisted", "handle_released",
+        "mapping_promoted",
+    }
+    integer_fields = {"linux_uid", "apple_uid", "special_alias", "handle"}
+    for record in records:
+        for key, value in record["evidence"].items():
+            if (key in boolean_fields and type(value) is not bool) or (
+                key in integer_fields and type(value) is not int
+            ):
+                raise AppleControlAliasDiscriminatorError("bound alias evidence type is invalid")
+    if (
+        baseline["operation_kind"] != "apple-control-alias-discriminator"
+        or boot == matched_proof.linux_boot_uuid
+        or runtime == matched_proof.runtime_generation
+        or baseline["origin"] != keybag_discriminator.ORIGIN
+        or baseline["import_operation_id"] != evidence.import_operation_id
+        or baseline["matched_keybag_operation_id"] != matched_proof.operation_id
+        or baseline["mapping_generation"] != evidence.mapping_generation
+        or baseline["linux_uid"] != evidence.linux_uid
+        or baseline["apple_uid"] != evidence.apple_uid
+        or baseline["bag_uuid"] != evidence.bag_uuid
+        or baseline["keybag_sha256"] != evidence.keybag_sha256
+        or baseline["special_alias"] != -evidence.apple_uid
+        or baseline["mapping_enabled"] is not False
+        or baseline["operation_scope"]
+        != "observe-load-verify-bind-read-unload-read"
+        or prestate != {
+            "runtime_generation": runtime,
+            "alias_absent": True,
+            "bag_uuid_matches": False,
+            "state_observed": False,
+        }
+        or load != {
+            "runtime_generation": runtime,
+            "keybag_sha256": evidence.keybag_sha256,
+            "mutation_possible": True,
+        }
+        or type(handle) is not int
+        or not 1 <= handle <= 0x7FFFFFFF
+        or handle_record != {
+            "runtime_generation": runtime,
+            "handle": handle,
+            "double_read_equal": True,
+            "bag_uuid_matches": True,
+        }
+        or bind_intent != {
+            "runtime_generation": runtime,
+            "handle": handle,
+            "special_alias": -evidence.apple_uid,
+            "mutation_possible": True,
+        }
+        or type(raised) is not bool
+        or (raised and status is not None)
+        or (
+            not raised
+            and (type(status) is not int or not -(1 << 31) <= status < (1 << 32))
+        )
+        or bound["bag_uuid_matches"] is not True
+        or bound["runtime_generation"] != runtime
+        or bound["state_observed"] is not True
+        or unload != {
+            "runtime_generation": runtime,
+            "handle": handle,
+            "mutation_possible": True,
+        }
+        or released != {"runtime_generation": runtime, "command_status": 0}
+        or type(released["command_status"]) is not int
+        or persisted != {
+            "runtime_generation": runtime,
+            "bag_uuid_matches": True,
+            "state_observed": True,
+        }
+        or complete != {
+            "runtime_generation": runtime,
+            "outcome": "bound-and-persisted",
+            "alias_bound_by_operation": True,
+            "alias_persisted": True,
+            "handle_released": True,
+            "mapping_promoted": False,
+        }
+    ):
+        raise AppleControlAliasDiscriminatorError(
+            "bound alias proof is incomplete or inconsistent"
+        )
+    return BoundAliasProof(operation_id, boot, runtime)
 
 
 def require_later_boot(proof: MatchedKeybagProof, linux_boot_uuid: str) -> str:
@@ -383,6 +586,7 @@ def run(
     transport: AliasDiscriminatorTransport,
     operation_id: str | None = None,
     reconciled_prestate_operation_id: str | None = None,
+    while_bound: Callable[[], None] | None = None,
 ) -> AliasDiscriminatorResult:
     """Run the one allowed alias bind and its read-back sequence."""
     current_boot = require_later_boot(matched_proof, linux_boot_uuid)
@@ -500,6 +704,10 @@ def run(
             "command_status": bind_status,
             "command_raised": bind_raised,
         })
+
+        if while_bound is not None:
+            stage = "bound-operation"
+            while_bound()
 
         stage = "unload"
         _append(journal_path, operation_id, "APPLE_CONTROL_ALIAS_KEYBAG_UNLOAD_INTENT", {

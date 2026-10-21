@@ -49,7 +49,9 @@ class FakeAKS(transport.AKSActivationTransport):
             return bytearray(struct.pack("<II", 0, 9))
         if operation == 0x06:
             return bytearray(struct.pack("<II", 0, 16) + uuid.UUID(int=2).bytes)
-        if operation in {0x04, 0x05, 0x0D}:
+        if operation == 0x04:
+            return bytearray(struct.pack("<IIQ", 7, 3, 0x100))
+        if operation in {0x05, 0x0D}:
             if operation == 0x05 and self.fail_unload:
                 raise transport.AKSActivationTransportError("ambiguous unload")
             return bytearray(4)
@@ -258,6 +260,24 @@ class AKSActivationTransportTests(unittest.TestCase):
         self.assertEqual(request[40:48], struct.pack("<Q", 0x100))
         self.assertEqual(len(request), 48)
         self.assertEqual(capacity, 12)
+
+    def test_raw_alias_unlock_uses_kernel_lock_state_reply_shape(self) -> None:
+        device = FakeAKS()
+        password = bytearray(b"test")
+        self.assertEqual(device.unlock_alias(-501, memoryview(password)), 7)
+        operation, request, capacity = device.requests[-1]
+        self.assertEqual(operation, 0x04)
+        self.assertEqual(capacity, 16)
+        self.assertEqual(struct.unpack_from("<IQiII", request), (0, 1, -501, 0, 4))
+        self.assertEqual(request[24:], b"test")
+
+    def test_raw_alias_unlock_rejects_non_lock_state_reply(self) -> None:
+        device = FakeAKS()
+        with mock.patch.object(device, "_exchange", return_value=bytearray(4)):
+            with self.assertRaisesRegex(
+                transport.AKSActivationTransportError, "wrong length"
+            ):
+                device.unlock_alias(-501, memoryview(bytearray(b"test")))
 
     def test_alias_uuid_and_state_blob_can_be_reconciled_read_only(self) -> None:
         device = FakeAKS()

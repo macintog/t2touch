@@ -421,6 +421,7 @@ install -o root -g root -m 0755 "$source_dir/src/t2-touchid-user-broker-gate.py"
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-fprint-status.py" /usr/local/sbin/t2-touchid-fprint-status
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-fprint-enrollment-gate.py" /usr/local/sbin/t2-touchid-fprint-enrollment-gate
 install -o root -g root -m 0755 "$source_dir/src/t2-touchid-post-reboot.py" /usr/local/sbin/t2-touchid-post-reboot
+install -o root -g root -m 0755 "$source_dir/src/t2-touchid-migrate-compatibility.py" /usr/local/sbin/t2-touchid-migrate-compatibility
 install -o root -g root -m 0700 "$source_dir/src/t2-fprint-enrollment-worker.py" /usr/local/sbin/t2-fprint-enrollment-worker
 install -o root -g root -m 0700 "$source_dir/src/t2-fprint-delete-worker.py" /usr/local/sbin/t2-fprint-delete-worker
 install -o root -g root -m 0644 "$source_dir/README.md" "$target_dir/README.md"
@@ -723,6 +724,9 @@ if [[ $authority_mode == linux-native ]]; then
     echo "  t2-touchid-enroll"
   fi
 else
-  echo "Compatibility mode is installed. Run sudo t2-touchid-doctor for its status."
+  echo "Compatibility (macOS-control-oracle) mode is installed."
+  echo "If fingerprint sign-in is not ready, inspect and complete the transition with:"
+  echo "  sudo t2-touchid-migrate-compatibility status"
+  echo "  sudo t2-touchid-doctor"
 fi
 clear_prepared_transport_update

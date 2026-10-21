@@ -322,6 +322,152 @@ This validates the complete imported Linux-native authority and binds its
 unchanged history to the current local account. It does not apply to macOS
 state, which still has no supported end-user migration command.
 
+## A working compatibility install lost fingerprint sign-in
+
+A completed compatibility label rename changes the imported user Catacomb.
+The original import archives and disabled mapping must remain intact. Runtime
+authority accepts one completed rename only when its private journal anchors
+the exact original backup, unchanged account and identity metadata, unchanged
+unrelated components, and the committed user-file hash. The rename's authority
+generation must match the completed compatibility proof chain. Incomplete,
+torn, multiple, or unrelated mutation histories remain blocked; this is not
+general support for further compatibility mutations. Do not reimport or delete
+journals to work around this refusal. Validate checkout status before updating
+the installed authority readers or restarting services. This continuation has
+synthetic coverage. One MacBookPro15,2 completed the capacity-fix recovery,
+label migration, automatic keybag unlock after Linux reboot, post-reboot
+rename reconciliation, a fingerprint match, and fingerprint-on-sudo. macOS
+worked after recovery; macOS behavior after the label rename and negative
+authentication controls remain unverified. This observation does not qualify
+other hardware or firmware.
+
+An installation that predates the Linux-native lifecycle uses
+`T2_TOUCHID_AUTHORITY_MODE=macos-control-oracle`. Current startup requires a
+complete hardware proof chain for that mode: an imported keybag, a matched
+keybag-UUID discriminator, either a clean first-attempt alias bind or an
+ambiguous alias-bind retry with a reconciled state capture, and a completed
+later-boot alias unlock. An installation created before
+those proofs were recorded fails `t2-keybag-load.service` with
+`compatibility authority is invalid`, and `fprintd.service` then fails with a
+dependency error. `sudo t2-touchid-doctor` reports both failed units and the
+`compatibility-transition` phase.
+
+Inspect the missing step without touching the SEP:
+
+```bash
+sudo t2-touchid-migrate-compatibility status
+```
+
+The report names the current phase and the exact command to run next. Each
+hardware stage must run on a later Linux boot than the one before it, so the
+sequence is normally:
+
+```bash
+sudo t2-touchid-migrate-compatibility import \
+  --linux-user <linux-user> --apple-uid <apple-uid> \
+  --keybag-archive <keybags.tar.gz> \
+  --catacomb-archive <catacomb.tar.gz> \
+  --acknowledge-macos-control-oracle
+# reboot
+sudo t2-touchid-migrate-compatibility discriminate \
+  --linux-user <linux-user> --acknowledge-one-shot-sep-discriminator
+# reboot
+sudo t2-touchid-migrate-compatibility bind \
+  --linux-user <linux-user> --acknowledge-one-shot-sep-alias-binding
+# For a clean bound-and-persisted result, skip reconcile.
+# Run reconcile only when status requests needs-alias-reconciliation.
+# reboot
+sudo t2-touchid-migrate-compatibility reconcile \
+  --linux-user <linux-user> --acknowledge-one-shot-read-only-alias-reconciliation
+```
+
+The archives are the private keybag and Catacomb captures exported from macOS;
+the import stage does not run without its acknowledgement flag.
+
+This helper is research-grade. Its stages are the same maintained one-shot
+modules, but the end-to-end transition has not been verified on hardware.
+The compatibility proof chain accepts a clean first-attempt `bound-and-persisted`
+bind without reconciliation. The former standalone `unlock` stage is disabled:
+kernel operation `0x04` requires the loaded keybag handle and alias binding to
+remain active on the same transport owner, but the old staged workflow unloaded
+the handle before opening a new unlock transport. Do not invoke that old command
+or create an unlock journal manually. A normal atomic activation command remains
+future work; `status` fails closed without suggesting the broken one-shot path.
+The ambiguous-bind path continues to require read-only reconciliation.
+If an unlock journal exists but does not prove success, status reports
+`alias-unlock-recovery-required`. Preserve that journal: rebooting does not
+reset the one-shot operation. A `bound-and-persisted` result proves persistence
+after handle unload in that session, not across reboot. The normal keybag
+loader requires completed authority and cannot bootstrap an incomplete chain.
+
+For a validated clean first bind followed by exactly a pre-state-only failed
+unlock (no password dispatch), status offers one explicit `recover` command.
+On a later boot than that failure, it requires an absent alias, loads and checks
+the imported keybag, binds and checks the alias, unlocks while the temporary
+handle remains active, then unloads and checks persistence. Three new exclusive
+recovery journals link the original history to the new observations; the
+original journals are retained. No reboot is required between the recovery bind
+and unlock.
+
+```bash
+sudo t2-touchid-migrate-compatibility recover \
+  --linux-user <linux-user> --password-prompt \
+  --acknowledge-one-shot-alias-recovery \
+  --acknowledge-research-mac-and-macos-recovery
+```
+
+The hidden prompt requests the password for the imported macOS keybag. Recovery
+is restricted to an explicitly designated research Mac with a working macOS
+recovery path; the separate acknowledgement flag records this precondition.
+Older checkout revisions requested a 4-byte response for raw AKS operation
+`0x04`, while the kernel ABI requires the 16-byte lock-state response. The
+kernel rejected that shape before password dispatch. Preserve journals from
+such a failure; do not treat it as evidence of an incorrect password.
+`--password-stdin` is also available. Except for the exact historical
+response-capacity generation described below, any existing recovery artifact or
+failure that crossed the unlock mutation boundary prevents another command. A
+present alias (even a matching one), mismatched keybag, ambiguous handle release,
+failed unlock, or incomplete journal stops recovery. Do not delete artifacts to
+repeat it. Successful recovery must validate the entire linked proof chain
+before status reports `complete`.
+
+One historical candidate recovery could itself reach an exact terminal failure:
+its parent stopped at `unlock`, its bind completed after unloading the keybag,
+and its unlock command raised because operation `0x04` advertised only four
+response bytes. Only that exact immutable chain is eligible for the distinct
+capacity-fix continuation shown by `status`:
+
+```bash
+sudo t2-touchid-migrate-compatibility recover-capacity-fix \
+  --linux-user <linux-user> --password-prompt \
+  --acknowledge-one-shot-capacity-fix \
+  --acknowledge-known-predispatch-capacity-defect \
+  --acknowledge-research-mac-and-macos-recovery
+```
+
+This is not a generic retry. It requires a new boot and runtime, an absent alias,
+and no capacity-fix artifacts. It binds the exact imported keybag, performs one
+unlock dispatch while the handle remains active, then unloads and reads back.
+The extra pre-dispatch acknowledgement records that the operator verified the
+old installed client used the known four-byte response implementation; the
+failure journal by itself cannot distinguish that local rejection from every
+possible transport exception.
+Any new artifact, including a dangling symlink or terminal failure journal,
+permanently removes the command from `status`.
+
+**macOS coexistence:** recovery uses the existing imported keybag and derived
+alias. It does not reset or erase the SEP, provision a Linux-native user, change
+the password, modify partitions, write Catacomb data, or enroll/delete
+fingerprints. It is still a hardware-mutating research operation, tested with
+fake transports only. macOS boot, login, and Touch ID must be verified on the
+actual machine before claiming dual-boot compatibility; a successful Linux
+unit test is not that verification. Keep password fallback and macOS recovery
+available. On failure, preserve evidence and stop; there is no automatic
+rollback or repeated recovery attempt.
+Keep `/var/lib/t2-touchid` and the exported archives intact while diagnosing.
+Do not edit or delete proof journals to force progress. Once `status` reports
+`complete`, rerun `./install-omarchy.sh` so the stack installs PAM.
+
 ## Fingerprint inventory or enrollment is unavailable
 
 An empty inventory is normal before first enrollment and after deleting the

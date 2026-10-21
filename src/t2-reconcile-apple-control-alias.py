@@ -57,7 +57,7 @@ def main() -> int:
         reconciliation.require_later_boot(bind_proof, boot)
         journal_path = oracle / "apple-control-alias-reconciliation.jsonl"
         capture_path = oracle / "apple-control-alias-state.der"
-        if journal_path.exists() or capture_path.exists():
+        if os.path.lexists(journal_path) or os.path.lexists(capture_path):
             raise reconciliation.AppleControlAliasReconciliationError(
                 "alias reconciliation artifacts already exist"
             )

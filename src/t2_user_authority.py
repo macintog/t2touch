@@ -300,8 +300,11 @@ def load_compatibility(
 ) -> RuntimeUserAuthority:
     """Build runtime authority from the immutable Apple-control proofs.
 
-    The protected mapping stays disabled on disk. Compatibility authority is
-    enabled only in memory; caller-bound mutation policy remains mandatory.
+    Two authority shapes are accepted: the ambiguous-bind plus read-only
+    reconciliation path, and a clean ``bound-and-persisted`` alias bind that
+    never required reconciliation.  The protected mapping stays disabled on
+    disk.  Compatibility authority is enabled only in memory; caller-bound
+    mutation policy remains mandatory.
     """
 
     if os.geteuid() != 0:
@@ -312,6 +315,7 @@ def load_compatibility(
         import t2_apple_control_alias_discriminator as alias_discriminator
         import t2_apple_control_alias_reconciliation as alias_reconciliation
         import t2_apple_control_alias_unlock as alias_unlock
+        import t2_apple_control_alias_recovery as alias_recovery
         import t2_apple_control_discriminator as keybag_discriminator
 
         evidence = keybag_discriminator.read_oracle_import(
@@ -321,17 +325,52 @@ def load_compatibility(
         matched = alias_discriminator.read_matched_keybag_proof(
             oracle_root / "apple-control-discriminator.jsonl", evidence
         )
-        bind = alias_reconciliation.read_ambiguous_bind_proof(
-            oracle_root, evidence, matched
-        )
-        reconciled = alias_reconciliation.read_reconciled_alias_proof(
-            oracle_root, evidence, bind
-        )
-        unlocked = alias_unlock.read_completed_unlock_proof(
-            oracle_root / "apple-control-alias-unlock.jsonl",
-            evidence,
-            reconciled,
-        )
+        reconciled = None
+        bound = None
+        try:
+            bind = alias_reconciliation.read_ambiguous_bind_proof(
+                oracle_root, evidence, matched
+            )
+            reconciled = alias_reconciliation.read_reconciled_alias_proof(
+                oracle_root, evidence, bind
+            )
+        except alias_reconciliation.AppleControlAliasReconciliationError:
+            bound = alias_discriminator.read_bound_alias_proof(
+                oracle_root / "apple-control-alias-discriminator.jsonl",
+                evidence,
+                matched,
+            )
+            if any(
+                os.path.lexists(oracle_root / name)
+                for name in (
+                    "apple-control-alias-discriminator-2.jsonl",
+                    "apple-control-alias-reconciliation.jsonl",
+                    "apple-control-alias-state.der",
+                )
+            ):
+                raise UserAuthorityError(
+                    "clean compatibility authority conflicts with reconciliation artifacts"
+                )
+        proof = reconciled if reconciled is not None else bound
+        recovered = None
+        capacity_fixed = None
+        try:
+            unlocked = alias_unlock.read_completed_unlock_proof(
+                oracle_root / "apple-control-alias-unlock.jsonl", evidence, proof,
+            )
+        except alias_unlock.AppleControlAliasUnlockError:
+            if bound is None:
+                raise
+            try:
+                recovered = alias_recovery.read_completed_recovery(
+                    oracle_root, evidence, matched, bound
+                )
+                unlocked = recovered.unlocked
+            except alias_recovery.AliasRecoveryError:
+                capacity_fixed = alias_recovery.read_completed_capacity_fix(
+                    oracle_root, evidence, matched, bound
+                )
+                unlocked = capacity_fixed.unlocked
         disabled_set = t2_user_mapping.load(state_root / "users.json")
     except (OSError, ValueError, RuntimeError) as error:
         raise UserAuthorityError(
@@ -352,11 +391,24 @@ def load_compatibility(
         "disabled_mapping_generation": disabled_set.generation,
         "import_operation_id": evidence.import_operation_id,
         "keybag_operation_id": matched.operation_id,
-        "bind_operation_id": bind.operation_id,
-        "reconciliation_operation_id": reconciled.operation_id,
-        "state_blob_sha256": reconciled.state_blob_sha256,
         "unlock_operation_id": unlocked.operation_id,
     }
+    if reconciled is not None:
+        binding["bind_operation_id"] = bind.operation_id
+        binding["reconciliation_operation_id"] = reconciled.operation_id
+        binding["state_blob_sha256"] = reconciled.state_blob_sha256
+    else:
+        binding["bind_operation_id"] = bound.operation_id
+    if recovered is not None:
+        binding["recovery_operation_id"] = recovered.operation_id
+        binding["failed_unlock_operation_id"] = recovered.failed_unlock_operation_id
+        binding["recovery_bind_operation_id"] = recovered.bind_operation_id
+    if capacity_fixed is not None:
+        binding["capacity_fix_operation_id"] = capacity_fixed.operation_id
+        binding["failed_recovery_operation_id"] = (
+            capacity_fixed.failed_recovery_operation_id
+        )
+        binding["capacity_fix_bind_operation_id"] = capacity_fixed.bind_operation_id
     generation = hashlib.sha256(
         json.dumps(
             binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -416,6 +468,11 @@ def load_compatibility(
                 binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True
             ).encode("ascii")
         ).hexdigest()
+    if (
+        evidence.rename_mapping_generation is not None
+        and evidence.rename_mapping_generation != generation
+    ):
+        raise UserAuthorityError("compatibility rename belongs to another authority")
     mapping_set = t2_user_mapping.UserMappingSet(
         generation, (selected,), disabled_set.schema_version
     )
@@ -430,7 +487,14 @@ def load_compatibility(
             selected.bag_uuid,
             True,
         ),
-        oracle_root / "apple-control-alias-unlock.jsonl",
+        oracle_root
+        / (
+            alias_recovery.CAPACITY_JOURNAL
+            if capacity_fixed is not None
+            else alias_recovery.JOURNAL
+            if recovered is not None
+            else "apple-control-alias-unlock.jsonl"
+        ),
         keybag_discriminator.ORIGIN,
     )
 

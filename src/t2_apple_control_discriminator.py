@@ -59,6 +59,97 @@ class OracleEvidence:
     bag_uuid: str
     keybag_path: str
     keybag_sha256: str
+    catacomb_backup_sha256: str | None = None
+    rename_mapping_generation: str | None = None
+
+
+def _read_completed_label_change(
+    state_root: Path, provenance: dict[str, Any], components: dict[str, bytes]
+) -> str:
+    """Accept only one completed rename anchored to the exact original import."""
+    from dataclasses import replace
+    import t2_catacomb_codec as codec
+    import t2_catacomb_local
+    import t2_identity_rename_journal as rename
+
+    mutation_root = state_root / "mutations"
+    info = mutation_root.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise AppleControlDiscriminatorError("rename journal directory is unsafe")
+    entries = list(mutation_root.iterdir())
+    if len(entries) != 1:
+        raise AppleControlDiscriminatorError("compatibility requires one exact rename journal")
+    path = entries[0]
+    payload = _private_bytes(path, 8 * 1024 * 1024)
+    lines = payload.splitlines(keepends=True)
+    if not payload.endswith(b"\n") or len(lines) > 4096:
+        raise AppleControlDiscriminatorError("compatibility rename journal is incomplete")
+    history = rename.validate_history(journal.validate_records(lines))
+    if path.name != f"{history.operation_id}.jsonl" or history.phase not in {
+        rename.IdentityRenamePhase.RECONCILED,
+        rename.IdentityRenamePhase.POST_REBOOT_VERIFIED,
+    }:
+        raise AppleControlDiscriminatorError("compatibility rename is incomplete")
+    apple_uid = provenance["apple_uid"]
+    user_name = f"user_{apple_uid:08x}.cat"
+    backup_name = f'{provenance["catacomb_backup_sha256"]}.tar.gz'
+    original_host, original = t2_catacomb_local.read_backup_components(
+        state_root / "backups" / backup_name, apple_uid
+    )
+    baseline = history.baseline
+    baseline_hashes = {
+        item["name"]: item["sha256"] for item in baseline["host_components"]
+    }
+    if (
+        baseline_hashes != provenance["catacomb_component_sha256"]
+        or len(baseline["host_components"]) != len(baseline_hashes)
+        or baseline["backup_references"] != [{
+            "reference": backup_name,
+            "sha256": provenance["catacomb_backup_sha256"],
+        }]
+        or baseline["apple_uid"] != apple_uid
+        or baseline["caller_linux_uid"] != provenance["linux_uid"]
+        or baseline["target_linux_uid"] != provenance["linux_uid"]
+        or baseline["account_uuid"] != provenance["account_uuid"]
+        or baseline["bag_uuid"] != provenance["bag_uuid"]
+        or baseline["master_enrollment_count"] != original_host["master_enrollment_count"]
+    ):
+        raise AppleControlDiscriminatorError("rename baseline differs from import")
+    staged = dict(history.persistence.staged_files)
+    if staged != {user_name: hashlib.sha256(components[user_name]).hexdigest()}:
+        raise AppleControlDiscriminatorError("rename committed component differs")
+    for name, data in components.items():
+        if name != user_name and data != original[name]:
+            raise AppleControlDiscriminatorError("rename changed an unrelated component")
+    before = codec.decode_user_catacomb(original[user_name], apple_uid)
+    after = codec.decode_user_catacomb(components[user_name], apple_uid)
+    if (
+        before.account_uuid != after.account_uuid
+        or before.keybag_uuid != after.keybag_uuid
+        or len(before.identities) != len(after.identities)
+        or baseline["identity_records"] != [
+            {"user_id": item.user_id, "uuid": item.uuid, "entity": item.entity}
+            for item in before.identities
+        ]
+    ):
+        raise AppleControlDiscriminatorError("rename changed the identity authority")
+    targets = 0
+    for old, new in zip(before.identities, after.identities):
+        if old.uuid == history.target_identity_uuid and old.entity == history.target_entity:
+            targets += 1
+            if (
+                hashlib.sha256(old.name.encode("utf-8")).hexdigest()
+                != history.previous_name_sha256
+                or hashlib.sha256(new.name.encode("utf-8")).hexdigest()
+                != history.new_name_sha256
+                or replace(old, name=new.name) != new
+            ):
+                raise AppleControlDiscriminatorError("rename label evidence differs")
+        elif old != new:
+            raise AppleControlDiscriminatorError("rename changed another identity")
+    if targets != 1:
+        raise AppleControlDiscriminatorError("rename target is not unique")
+    return baseline["mapping_generation"]
 
 
 @dataclass(frozen=True)
@@ -245,13 +336,23 @@ def read_oracle_import(state_root: Path, linux_uid: int) -> OracleEvidence:
         ).read_committed_components()
     except t2_catacomb_store.CatacombStoreError as error:
         raise AppleControlDiscriminatorError("local Catacomb is invalid") from error
+    rename_generation = None
     if {
         name: hashlib.sha256(data).hexdigest() for name, data in components.items()
     } != component_hashes:
-        raise AppleControlDiscriminatorError("local Catacomb changed after import")
+        try:
+            rename_generation = _read_completed_label_change(
+                state_root, provenance, components
+            )
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            raise AppleControlDiscriminatorError(
+                "local Catacomb change has no exact completed rename proof"
+            ) from error
     return OracleEvidence(
         operation_id, mapping_set.generation, selected.linux_uid,
         selected.apple_uid, bag_uuid, selected.keybag_path, keybag_sha256,
+        backup_digest,
+        rename_generation,
     )
 
 

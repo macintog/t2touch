@@ -122,6 +122,7 @@ unchanged.
 | `t2-touchid-doctor` | `/usr/local/sbin` | Privacy-safe stack report |
 | `t2-touchid-user-map` | `/usr/local/sbin` | Redacted Linux-native account mapping |
 | `t2-native-authority-rebind` | `/usr/local/sbin` | Explicit native authority rebind |
+| `t2-touchid-migrate-compatibility` | `/usr/local/sbin` | Guided transition of a legacy macOS-export compatibility install (research) |
 | `t2-touchid-delete` | `/usr/local/sbin` | pkexec helper for one-slot deletion |
 | `t2-touchid-purge` | `/usr/local/sbin` | pkexec helper for batch deletion |
 | `t2-fprintd-enroll-tui-launch` | `/usr/local/sbin` | Product enrollment TUI used by `t2-touchid-enroll` |

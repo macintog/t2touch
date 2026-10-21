@@ -23,6 +23,7 @@ STATE = Path("/run/t2-touchid/keybag.env")
 PORT_CACHE = Path("/var/lib/t2-touchid/biometric-port")
 CREDENTIAL = Path("/etc/credstore.encrypted/t2-touchid-password")
 ACM_PREFLIGHT = Path("/usr/local/sbin/t2-acm-preflight")
+MIGRATION_HELPER = Path("/usr/local/sbin/t2-touchid-migrate-compatibility")
 MEM_SLEEP = Path("/sys/power/mem_sleep")
 POLKIT_RULES_DIRS = (
     Path("/etc/polkit-1/rules.d"),
@@ -344,6 +345,35 @@ def acm_transport_check(enabled: bool) -> Check:
     return Check("fail", "acm-transport", "registration preflight failed")
 
 
+def compatibility_transition_check(config: dict[str, str]) -> Check:
+    user = config.get("T2_TOUCHID_USER", "")
+    if not user:
+        return Check("warn", "compatibility-transition", "mapped user unknown")
+    if not MIGRATION_HELPER.exists():
+        return Check(
+            "warn", "compatibility-transition", "migration helper not installed"
+        )
+    try:
+        result = run(
+            str(MIGRATION_HELPER), "status", "--linux-user", user, timeout=10.0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return Check("warn", "compatibility-transition", "helper did not run")
+    if result.returncode != 0:
+        return Check("warn", "compatibility-transition", "status unavailable")
+    try:
+        summary = json.loads(result.stdout)
+        phase = str(summary["phase"])
+    except (ValueError, KeyError, TypeError):
+        return Check("warn", "compatibility-transition", "status unreadable")
+    if phase == "complete":
+        return Check("pass", "compatibility-transition", "proof chain complete")
+    next_command = str(summary.get("next_command") or "see documentation")
+    return Check(
+        "fail", "compatibility-transition", f"{phase}; run: {next_command}"
+    )
+
+
 def collect() -> list[Check]:
     checks: list[Check] = []
 
@@ -449,6 +479,8 @@ def collect() -> list[Check]:
             checks.append(Check("warn", "keybag-runtime-state", "not readable; run as root"))
         except (OSError, UnicodeError):
             checks.append(Check("fail", "keybag-runtime-state", "unreadable or malformed"))
+
+        checks.append(compatibility_transition_check(config))
 
     try:
         credential_ok = private_regular_file(CREDENTIAL) and CREDENTIAL.stat().st_size > 0

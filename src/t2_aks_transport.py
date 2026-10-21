@@ -655,10 +655,11 @@ class AKSActivationTransport:
                 "<IQiII", request, 0, 0, self.session, special_alias, 0, len(password)
             )
             request[24 : 24 + len(password)] = password
-            response = self._exchange(0x04, request, 4)
-            if len(response) != 4:
+            response = self._exchange(0x04, request, 16)
+            if len(response) != 16:
                 raise AKSActivationTransportError("unlock reply has wrong length")
-            return struct.unpack("<I", response)[0]
+            status, _lock_state, _flags = struct.unpack("<IIQ", response)
+            return status
         finally:
             _zero(request)
             _zero(response)

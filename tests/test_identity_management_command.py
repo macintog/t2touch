@@ -394,6 +394,7 @@ class IdentityManagementCommandTests(unittest.TestCase):
             {
                 "apple_uid": 501,
                 "host_components": backup_host["host_components"],
+                "baseline_version": 1,
             },
         )
         self.assertEqual(host["archive_sha256"], "a" * 64)

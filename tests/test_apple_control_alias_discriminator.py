@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 import uuid
+import copy
+from unittest import mock
 
 SOURCE = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE))
@@ -15,6 +17,8 @@ import t2_apple_control_alias_discriminator as alias_discriminator
 import t2_apple_control_discriminator as keybag_discriminator
 import t2_mutation_journal
 import t2_user_readiness
+import t2_compatibility_transition as transition
+import t2_apple_control_alias_unlock as unlock
 
 
 def identifier(value: int) -> str:
@@ -142,6 +146,75 @@ class AppleControlAliasDiscriminatorTests(unittest.TestCase):
             )
         self.assertEqual(transport.calls, [])
         self.assertFalse(self.alias_journal.exists())
+
+    def test_clean_bind_reader_refuses_standalone_unlock_without_active_handle(self):
+        oracle = self.root / "oracle"
+        oracle.mkdir(mode=0o700)
+        self.alias_journal = oracle / "apple-control-alias-discriminator.jsonl"
+        self.keybag_journal.rename(oracle / "apple-control-discriminator.jsonl")
+        (self.root / "users.json").write_text("{}")
+        self.run_once(AliasTransport(self.evidence.bag_uuid))
+        proof = alias_discriminator.read_bound_alias_proof(
+            self.alias_journal, self.evidence, self.proof
+        )
+        self.assertEqual(proof.operation_id, identifier(31))
+        with mock.patch.object(transition, "_evidence", return_value=self.evidence):
+            status = transition.inspect(
+                linux_uid=1000, linux_user="tester", state_root=self.root
+            )
+            self.assertEqual(status.phase, transition.UNLOCK_RECOVERY_REQUIRED)
+            self.assertIsNone(status.next_command)
+            with mock.patch.object(transition.t2_aks_transport, "AKSActivationTransport") as hardware:
+                for stage in (transition.bind, transition.reconcile):
+                    with self.assertRaisesRegex(transition.CompatibilityTransitionError, "run unlock"):
+                        stage(linux_uid=1000, state_root=self.root)
+                hardware.assert_not_called()
+                password = bytearray(b"test")
+                with self.assertRaisesRegex(
+                    transition.CompatibilityTransitionError, "active keybag handle"
+                ):
+                    transition.unlock(
+                        linux_uid=1000, password=password, state_root=self.root
+                    )
+                self.assertEqual(password, bytearray(4))
+                hardware.assert_not_called()
+
+    def test_clean_bind_reader_rejects_inconsistent_evidence(self):
+        self.run_once(AliasTransport(self.evidence.bag_uuid))
+        original = t2_mutation_journal.read(self.alias_journal)
+        mutations = [
+            (0, "linux_boot_uuid", self.proof.linux_boot_uuid),
+            (0, "runtime_generation", self.proof.runtime_generation),
+            (0, "reconciled_prestate_operation_id", identifier(99)),
+            (0, "linux_uid", 1001),
+            (0, "matched_keybag_operation_id", identifier(99)),
+            (1, "alias_absent", False),
+            (2, "keybag_sha256", "c" * 64),
+            (3, "handle", True),
+            (4, "handle", 11),
+            (5, "runtime_generation", identifier(99)),
+            (5, "command_status", True),
+            (5, "command_raised", True),
+            (6, "handle", 11),
+            (7, "command_status", 1),
+            (8, "bag_uuid_matches", False),
+            (9, "mapping_promoted", True),
+        ]
+        for index, key, value in mutations:
+            with self.subTest(index=index, key=key):
+                records = copy.deepcopy(original)
+                records[index]["evidence"][key] = value
+                with mock.patch.object(t2_mutation_journal, "read", return_value=records):
+                    with self.assertRaises(alias_discriminator.AppleControlAliasDiscriminatorError):
+                        alias_discriminator.read_bound_alias_proof(
+                            self.alias_journal, self.evidence, self.proof
+                        )
+        for records in (original[:-1], list(reversed(original))):
+            with mock.patch.object(t2_mutation_journal, "read", return_value=records):
+                with self.assertRaises(alias_discriminator.AppleControlAliasDiscriminatorError):
+                    alias_discriminator.read_bound_alias_proof(
+                        self.alias_journal, self.evidence, self.proof
+                    )
 
     def test_preexisting_alias_stops_without_load_or_bind(self) -> None:
         transport = AliasTransport(self.evidence.bag_uuid)

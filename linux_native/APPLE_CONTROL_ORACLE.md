@@ -62,6 +62,17 @@ second alias read-back. Its independent fixed journal prevents replay. It does
 not unlock the alias, enable the mapping, start authentication services, change
 PAM, or request a biometric operation.
 
+A clean first-attempt `bound-and-persisted` journal is also accepted as alias
+authority. Its reader requires the exact ten milestones, one operation ID,
+import and matched-keybag bindings, distinct boot/runtime generations, absent
+pre-state, consistent handle, successful release, and persisted matching alias.
+It skips reconciliation but still requires a later-boot unlock proof. Runtime
+authority uses the bind operation ID directly; the historical unlock baseline
+field `reconciliation_operation_id` carries that bind ID on this path. The
+reconciled path retains its existing authority-generation inputs unchanged.
+This reader and transition have hardware-free regression coverage; end-to-end
+fingerprint authentication through the clean path is not yet hardware-verified.
+
 If bind read-back is ambiguous after the positive handle is proven released,
 `t2_apple_control_alias_reconciliation.py` validates both immutable attempt
 journals and permits only a later-boot read-only closure. It double-reads the
@@ -79,7 +90,7 @@ alias handle intact; exact membership, duplicate, encoding, bounds, UUID, and
 handle checks remain fail-closed. No hardware retry was needed.
 
 The next compatibility-only discriminator is a separate later-boot password
-unlock of that already-reconciled alias. It validates the entire immutable
+unlock of that cleanly bound or already-reconciled alias. It validates the entire immutable
 proof before accepting bounded wipeable password input, journals intent before
 one unlock dispatch, and independently reads alias UUID/state afterward. It
 does not load or bind a keybag, promote the mapping, start services, change
@@ -88,6 +99,47 @@ PAM, or request biometrics. The reference oracle credential is literally
 written into the operation journal.
 
 ## Reference import result
+
+### Pre-state-only unlock recovery
+
+`t2_apple_control_alias_recovery.py` handles one narrowly defined bootstrap gap:
+the clean first bind completed, but a later unlock stopped at pre-state without
+password dispatch, and no recovery artifacts exist. On a still later boot and
+fresh runtime, it reuses the imported keybag for an absent-alias bind and unlock
+in the same session. This does not assume an alias persists across reboot.
+
+The exclusive `apple-control-alias-recovery.jsonl` envelope binds the import,
+matched-keybag, original bind, failed unlock, recovery bind and recovery unlock
+operation IDs. The latter two retain the existing strict journal formats in
+`apple-control-alias-recovery-bind.jsonl` and
+`apple-control-alias-recovery-unlock.jsonl`. The original failed unlock remains
+untouched. Recovery authority requires exact completion of all three new
+journals, with matching boot/runtime for the new bind and unlock and distinct
+boot/runtime from the failed attempt. The generation additionally incorporates
+the recovery, failed-unlock and recovery-bind operation IDs. Existing direct
+clean/reconciled authority generations do not change.
+
+The new stage does not relax normal unlock reboot checks: the historical bind
+remains its authority, while the envelope additionally proves a new binding in
+the recovery session. A present alias prevents load/bind/unlock. Every operation
+has durable intent in its child journal; any ambiguous result blocks reuse.
+No reset, erase, native provisioning, Catacomb write, or biometric mutation is
+part of this flow. It is restricted to an explicitly designated research Mac
+with a working macOS recovery path. Hardware risk is limited in command scope, not eliminated:
+tests use synthetic journals and fake transport, and live Linux authentication
+and continued macOS boot/login/Touch ID are pending operator verification.
+
+The one historical recovery generation affected by both the old four-byte
+operation `0x04` response capacity and unload-before-unlock ordering has one
+separate continuation. `apple-control-alias-capacity-fix.jsonl` and its distinct
+bind/unlock children are accepted only after exact validation of the failed
+recovery parent, completed bind child, and five-record rejected unlock child.
+The continuation requires a later boot, a runtime distinct from every prior
+relevant runtime, and an absent alias. Its corrected transaction unlocks while
+the loaded handle is active, then unloads and verifies persistence. It permits
+one bind, unlock, and unload dispatch and has no replay path.
+
+### Original control capture
 
 On the MacBookPro16,1 control generation, the transaction committed one unique
 saved keybag represented by two identical capture views, three Catacomb

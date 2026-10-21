@@ -6,6 +6,68 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- Add an explicit one-shot compatibility `recover` stage for a clean bind
+  followed by an exact pre-state-only unlock failure. It restores an absent
+  alias from the existing imported keybag and unlocks in the same session,
+  retaining the original journals and validating three new linked journals.
+  A hidden password prompt avoids sudo timestamp/pipeline failures. Recovery
+  does not reset, erase, reprovision, or alter macOS fingerprint data; live
+  Linux authentication and macOS coexistence remain unverified. The command
+  requires acknowledgement that the Mac is designated for research and has a
+  working macOS recovery path.
+- Add the research-grade `t2-touchid-migrate-compatibility` helper and a
+  matching `compatibility-transition` doctor check. They report, and drive with
+  explicit acknowledgements, the apple-control oracle stage sequence so an
+  existing `macos-control-oracle` installation whose proof chain predates the
+  Linux-native lifecycle can be brought back to a complete authority across
+  the required later boots. Every stage reuses the maintained one-shot module
+  that already owns it. The end-to-end transition is not yet verified on
+  hardware.
+
+### Fixed
+
+- Preserve compatibility authority after one completed label-only rename,
+  requiring its private immutable journal, exact import backup and component
+  hashes, unchanged account and identity metadata, and matching runtime
+  authority generation. Torn or incomplete histories fail without repair.
+  Further mutation chains are not accepted by this narrow continuation.
+- Declare the imported baseline version when management reads its current
+  local Catacomb snapshot through the enrollment finalizer's strict reader.
+- Select the compatibility baseline backup by its validated import digest,
+  allowing unrelated retained backups without deleting or choosing between
+  them by age. Archive ownership and hash checks remain mandatory.
+- Validate completed compatibility runtime authority in the management helper,
+  instead of rejecting its deliberately disabled import mapping. The protected
+  mapping remains unchanged; management still requires its capability checks
+  and mutation acknowledgements. One compatibility label migration, Linux
+  reboot persistence, and fingerprint-on-sudo were verified on MacBookPro15,2;
+  macOS behavior after that label migration remains unverified.
+- Disable the standalone compatibility unlock transition, which could not meet
+  the kernel's same-owner active-handle requirement, and require an explicit
+  installed-client pre-dispatch-defect acknowledgement for its narrowly scoped
+  historical capacity-fix continuation.
+- Request and parse the kernel-required 16-byte lock-state response for raw AKS
+  operation `0x04`. The previous 4-byte response capacity was rejected by the
+  kernel before password dispatch, making every raw alias unlock appear as an
+  ambiguous raised command followed by a still-locked read-back.
+- Add a distinct one-shot `recover-capacity-fix` continuation for only the exact
+  failed recovery produced by that response-capacity defect and the former
+  unload-before-unlock ordering. It preserves that complete failed generation,
+  uses three new exclusive journals, and unlocks while the rebound keybag handle
+  remains active before unloading it.
+- Report an existing unsuccessful compatibility unlock journal as
+  `alias-unlock-recovery-required`, with no misleading unlock retry command.
+  Offer recovery only for the exact supported pre-state-only history and only
+  before any recovery artifact exists.
+- Accept a fully validated first-attempt `bound-and-persisted` alias journal
+  followed by a later-boot unlock as compatibility authority. Status now
+  advances a clean bind to unlock, and repeated bind/reconcile commands direct
+  the operator to unlock before opening transport. Existing reconciled authority
+  generations are preserved. Verified with hardware-free tests; fingerprint
+  authentication through this clean path remains unverified on hardware.
+
 ## 0.1.0 - 2026-09-19
 
 This release brings everyday Touch ID commands into one family, makes desktop

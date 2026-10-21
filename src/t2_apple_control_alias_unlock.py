@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""One-shot password-unlock discriminator for the reconciled Apple alias."""
+"""One-shot password-unlock discriminator for the reconciled Apple alias.
+
+The unlock stage consumes any authority proof that carries its operation ID,
+Linux boot UUID, and AKS runtime generation: a reconciled alias proof from the
+ambiguous-bind path, or a clean bound alias proof.  The journal baseline field
+``reconciliation_operation_id`` keeps its historical name on both paths and
+carries the bind operation ID when no reconciliation happened.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-import t2_apple_control_alias_reconciliation as reconciliation
 import t2_apple_control_discriminator as keybag_discriminator
 import t2_mutation_journal as journal
 import t2_user_readiness
@@ -23,6 +29,12 @@ class AliasUnlockTransport(Protocol):
 
     def observe_alias(self, special_alias: int) -> t2_user_readiness.AliasEvidence: ...
     def unlock_alias(self, special_alias: int, password: memoryview) -> int: ...
+
+
+class AliasUnlockAuthorityProof(Protocol):
+    operation_id: str
+    linux_boot_uuid: str
+    runtime_generation: str
 
 
 @dataclass(frozen=True)
@@ -120,7 +132,7 @@ def _ready(lock_state: int) -> bool:
 
 
 def require_later_boot(
-    proof: reconciliation.ReconciledAliasProof,
+    proof: AliasUnlockAuthorityProof,
     linux_boot_uuid: str,
 ) -> str:
     boot = _uuid(linux_boot_uuid, "Linux boot UUID")
@@ -134,9 +146,14 @@ def require_later_boot(
 def read_completed_unlock_proof(
     path: Path,
     evidence: keybag_discriminator.OracleEvidence,
-    proof: reconciliation.ReconciledAliasProof,
+    proof: AliasUnlockAuthorityProof,
 ) -> AliasUnlockProof:
-    """Validate the immutable successful compatibility unlock journal."""
+    """Validate the immutable successful compatibility unlock journal.
+
+    ``proof.operation_id`` fills the journal baseline's
+    ``reconciliation_operation_id`` field on every path; on a clean bind it
+    is the bind operation ID.
+    """
 
     try:
         records = journal.read(path)
@@ -260,13 +277,13 @@ def run(
     *,
     journal_path: Path,
     evidence: keybag_discriminator.OracleEvidence,
-    proof: reconciliation.ReconciledAliasProof,
+    proof: AliasUnlockAuthorityProof,
     linux_boot_uuid: str,
     transport: AliasUnlockTransport,
     password: bytearray,
     operation_id: str | None = None,
 ) -> AliasUnlockResult:
-    if not isinstance(password, bytearray) or not 1 <= len(password) <= 1024:
+    if not isinstance(password, bytearray) or not 1 <= len(password) <= 1023:
         raise AppleControlAliasUnlockError(
             "alias unlock password must use bounded wipeable storage"
         )

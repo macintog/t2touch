@@ -9,6 +9,7 @@ Module.symvers
 modules.order
 src/t2-aks-tool
 src/t2-pam-fingerprint-prompt
+src/t2-recovery-usb-observer
 src/pam_t2touch_action_prompt.so
 .venv/
 *.tar.gz
@@ -27,6 +28,7 @@ macSteps.md
 .DS_Store
 
 # Local review and session artifacts are not product source.
+/continue.md
 /audit/
 /audit-security/
 /t2touch-audit-*.zip

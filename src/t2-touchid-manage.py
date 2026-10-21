@@ -71,6 +71,7 @@ import t2_native_caller_authorization
 import t2_user_activation_journal
 import t2_user_activation_operation
 import t2_user_authority
+import t2_apple_control_discriminator
 import t2_user_mapping
 import t2_user_policy
 import t2_user_readiness
@@ -177,6 +178,24 @@ def runtime_configuration() -> dict[str, object]:
         mapping_generation = mapping_set.generation
         mapping_enabled = selected[0].enabled
         mapping_capabilities = selected[0].capabilities
+    if values["T2_TOUCHID_AUTHORITY_MODE"] == "macos-control-oracle":
+        try:
+            authority = t2_user_authority.load_compatibility(linux_uid)
+        except t2_user_authority.UserAuthorityError as error:
+            raise IdentityManagementError(
+                "compatibility management authority is invalid"
+            ) from error
+        if (
+            authority.selected.apple_uid != int(apple_text)
+            or authority.selected.special_bag_alias != int(special_text)
+        ):
+            raise IdentityManagementError(
+                "compatibility authority differs from runtime configuration"
+            )
+        mapping_generation = authority.mapping_set.generation
+        protected_mapping_present = True
+        mapping_enabled = authority.selected.enabled
+        mapping_capabilities = authority.selected.capabilities
     return {
         "linux_user": values["T2_TOUCHID_USER"],
         "linux_uid": linux_uid,
@@ -686,7 +705,25 @@ def current_host_and_local(
     t2_catacomb_codec.UserCatacomb,
     Path,
 ]:
-    backup = select_backup()
+    if configuration.get("authority_mode") == "macos-control-oracle":
+        try:
+            evidence = t2_apple_control_discriminator.read_oracle_import(
+                STATE_ROOT, configuration["linux_uid"]
+            )
+        except t2_apple_control_discriminator.AppleControlDiscriminatorError as error:
+            raise IdentityManagementError(
+                "compatibility baseline provenance is invalid"
+            ) from error
+        digest = evidence.catacomb_backup_sha256
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise IdentityManagementError("compatibility baseline digest is invalid")
+        _private_root_owned(BACKUP_ROOT, directory=True)
+        backup = BACKUP_ROOT / f"{digest}.tar.gz"
+        _private_root_owned(backup, directory=False)
+        if hashlib.sha256(backup.read_bytes()).hexdigest() != digest:
+            raise IdentityManagementError("compatibility baseline backup changed")
+    else:
+        backup = select_backup()
     backup_host, _components = t2_catacomb_local.read_backup_components(
         backup, configuration["apple_uid"]
     )
@@ -698,6 +735,7 @@ def current_host_and_local(
         {
             "apple_uid": configuration["apple_uid"],
             "host_components": backup_host["host_components"],
+            "baseline_version": 1,
         },
     )
     if (
