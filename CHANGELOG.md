@@ -6,6 +6,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- Add `tools/install-pam.sh --sudo-only` to install the backed-up sudo
+  fingerprint stack without changing PolicyKit or lock-screen authentication.
+
 ## 0.1.0 - 2026-09-19
 
 This release brings everyday Touch ID commands into one family, makes desktop

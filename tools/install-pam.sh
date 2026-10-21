@@ -9,10 +9,12 @@ source_dir=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 backup_dir=/var/lib/t2-touchid/pam-backups
 install -d -o root -g root -m 0700 "$backup_dir"
 force_pam=0
+sudo_only=0
 [[ ${T2TOUCH_FORCE_PAM:-0} == 1 ]] && force_pam=1
 while [[ $# -gt 0 ]]; do
   case $1 in
     --force) force_pam=1 ;;
+    --sudo-only) sudo_only=1 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -164,6 +166,18 @@ install_system_auth_hook() {
   mv -f -- "$tmp" "$target"
   trap - RETURN
 }
+
+if (( sudo_only )); then
+  [[ -f /usr/lib/security/pam_t2touch_action_prompt.so ]] || {
+    echo "Install pam_t2touch_action_prompt.so before enabling sudo fingerprint prompts." >&2
+    exit 1
+  }
+  install_one sudo "$source_dir/pam/sudo" check
+  install_one sudo "$source_dir/pam/sudo"
+  echo "sudo PAM template installed; original is in $backup_dir."
+  echo "Password authentication remains available as a fallback."
+  exit 0
+fi
 
 install_system_auth_hook check
 install_one sudo "$source_dir/pam/sudo" check
