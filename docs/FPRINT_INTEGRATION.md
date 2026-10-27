@@ -31,7 +31,10 @@ The repository implements the verification path:
    collection. Native presentation metadata may remain cached while protected
    account authority, committed Catacomb metadata, and mutation-journal metadata
    are unchanged. Separate administrative mutations invalidate reuse on the next
-   access; compatibility authority always collects fresh state.
+   access; compatibility authority always collects fresh state. A system sleep
+   transition stops an in-progress read from publishing but does not itself
+   discard completed native metadata, so resume warmup can prepare the verifier
+   without first repeating the hardware inventory.
 2. The same caller may pass its single-use list projection to its next
    `VerifyStart`. Without that projection, verification collects one. Release,
    enrollment, and deletion invalidate this presentation state.

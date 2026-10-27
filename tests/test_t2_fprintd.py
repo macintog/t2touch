@@ -1659,7 +1659,8 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
         backend.system_sleeping = False
         backend.inventory_generation = 0
-        backend.inventory_projection = object()
+        projection = object()
+        backend.inventory_projection = projection
         backend.inventory_authority_token = object()
         backend.native_worker_warm_task = None
         backend.native_worker_sleep_task = None
@@ -1670,14 +1671,139 @@ class BackendRecoveryTests(unittest.IsolatedAsyncioTestCase):
         backend.system_sleep_changed(True)
         sleep_task = backend.native_worker_sleep_task
         self.assertTrue(backend.system_sleeping)
-        self.assertIsNone(backend.inventory_projection)
+        self.assertEqual(backend.inventory_generation, 1)
+        self.assertIs(backend.inventory_projection, projection)
         await sleep_task
         backend._quiesce_hardware_for_sleep.assert_awaited_once_with(1)
 
         backend.system_sleep_changed(False)
         await asyncio.sleep(0)
         self.assertFalse(backend.system_sleeping)
+        self.assertEqual(backend.inventory_generation, 2)
         backend.warm_runtime.assert_awaited_once_with()
+
+    def sleep_cache_backend(self):
+        backend = MODULE.T2Backend.__new__(MODULE.T2Backend)
+        backend.system_sleeping = False
+        backend.sleep_generation = 0
+        backend.inventory_generation = 0
+        backend.inventory_projection = None
+        backend.inventory_authority_token = None
+        backend.inventory_state_token = None
+        backend.native_worker_warm_task = None
+        backend.native_worker_sleep_task = None
+        backend.runtime_warm_task = None
+        backend.operation_lock = asyncio.Lock()
+        backend._quiesce_hardware_for_sleep = AsyncMock()
+        backend._inventory_state_token = mock.Mock(return_value=("state-a",))
+        authority = mock.Mock(
+            origin=MODULE.NATIVE_AUTHORITY,
+            mapping_set=mock.Mock(generation="mapping-a"),
+            selected=mock.Mock(
+                linux_account_generation="account-a",
+                keybag_sha256="keybag-a",
+                apple_uid=501,
+                account_uuid="account-uuid-a",
+                bag_uuid="bag-uuid-a",
+            ),
+        )
+        backend.runtime_authority = mock.Mock(return_value=authority)
+        return backend, authority
+
+    async def test_sleep_cycle_reuses_presentation_only_while_tokens_match(self):
+        backend, authority = self.sleep_cache_backend()
+        backend.warm_runtime = AsyncMock()
+        before = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        after = MODULE.t2_fprint_runtime.RuntimeProjection(
+            ("finger-1", "finger-2"), 2, True
+        )
+        backend._collect_runtime_projection = AsyncMock(side_effect=(before, after))
+
+        with mock.patch.object(MODULE.t2_performance, "emit"):
+            self.assertIs(await backend.runtime_projection(), before)
+            backend.system_sleep_changed(True)
+            await backend.native_worker_sleep_task
+            with self.assertRaisesRegex(RuntimeError, "sleep transition"):
+                await backend.runtime_projection()
+            backend.system_sleep_changed(False)
+            await backend.runtime_warm_task
+
+            self.assertIs(await backend.runtime_projection(), before)
+            backend._collect_runtime_projection.assert_awaited_once_with(authority)
+
+            # The usual tokens still guard reuse after resume.
+            backend._inventory_state_token.return_value = ("state-b",)
+            self.assertIs(await backend.runtime_projection(), after)
+        self.assertEqual(backend._collect_runtime_projection.await_count, 2)
+
+    async def test_sleep_cycle_refreshes_presentation_after_authority_change(self):
+        backend, authority = self.sleep_cache_backend()
+        backend.warm_runtime = AsyncMock()
+        before = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        after = MODULE.t2_fprint_runtime.RuntimeProjection((), 0, True)
+        backend._collect_runtime_projection = AsyncMock(side_effect=(before, after))
+
+        with mock.patch.object(MODULE.t2_performance, "emit"):
+            self.assertIs(await backend.runtime_projection(), before)
+            backend.system_sleep_changed(True)
+            await backend.native_worker_sleep_task
+            authority.selected.linux_account_generation = "account-b"
+            backend.system_sleep_changed(False)
+            await backend.runtime_warm_task
+            self.assertIs(await backend.runtime_projection(), after)
+        self.assertEqual(backend._collect_runtime_projection.await_count, 2)
+
+    async def test_collection_straddling_sleep_does_not_publish(self):
+        backend, authority = self.sleep_cache_backend()
+        backend.warm_runtime = AsyncMock()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        straddling = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        fresh = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-2",), 1, True)
+        calls = []
+
+        async def collect(selected_authority):
+            calls.append(selected_authority)
+            if len(calls) == 1:
+                entered.set()
+                await release.wait()
+                return straddling
+            return fresh
+
+        backend._collect_runtime_projection = collect
+        with mock.patch.object(MODULE.t2_performance, "emit"):
+            reader = asyncio.create_task(backend.runtime_projection())
+            await asyncio.wait_for(entered.wait(), 1)
+            backend.system_sleep_changed(True)
+            await backend.native_worker_sleep_task
+            backend.system_sleep_changed(False)
+            await backend.runtime_warm_task
+            release.set()
+            self.assertIs(await asyncio.wait_for(reader, 1), straddling)
+            self.assertIsNone(backend.inventory_projection)
+            self.assertIs(await backend.runtime_projection(), fresh)
+        self.assertEqual(calls, [authority, authority])
+
+    async def test_resume_warmup_prepares_worker_without_recollecting(self):
+        backend, authority = self.sleep_cache_backend()
+        projection = MODULE.t2_fprint_runtime.RuntimeProjection(("finger-1",), 1, True)
+        backend._collect_runtime_projection = AsyncMock(return_value=projection)
+        backend._ensure_native_worker = AsyncMock()
+
+        with mock.patch.object(MODULE.t2_performance, "emit") as emit:
+            await backend.warm_runtime()
+            backend._collect_runtime_projection.assert_awaited_once_with(authority)
+            backend._ensure_native_worker.assert_awaited_once_with()
+            backend.system_sleep_changed(True)
+            await backend.native_worker_sleep_task
+            emit.reset_mock()
+            backend.system_sleep_changed(False)
+            await backend.runtime_warm_task
+
+        backend._collect_runtime_projection.assert_awaited_once_with(authority)
+        self.assertEqual(backend._ensure_native_worker.await_count, 2)
+        phases = [call.args[:2] for call in emit.call_args_list]
+        self.assertEqual(phases, [("inventory", "presentation_cache")])
 
     async def test_sleep_quiescence_drains_inflight_inventory_cleanup(self):
         backend = MODULE.T2Backend.__new__(MODULE.T2Backend)

@@ -1103,7 +1103,11 @@ class T2Backend:
         self.sleep_generation = getattr(self, "sleep_generation", 0) + 1
         generation = self.sleep_generation
         self.system_sleeping = sleeping
-        self.invalidate_inventory("system_sleep")
+        # A read straddling this edge must not publish. A completed native
+        # presentation survives: runtime_projection() rechecks its authority
+        # and state tokens before reuse, and native matching still repeats
+        # the live SEP inventory.
+        self.inventory_generation = getattr(self, "inventory_generation", 0) + 1
         if sleeping:
             previous = getattr(self, "native_worker_sleep_task", None)
 

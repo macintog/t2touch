@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Changed
+
+- Keep native fingerprint presentation metadata across system sleep while its
+  account authority, committed Catacomb, and mutation-journal tokens are
+  unchanged. Resume warmup then prepares the verifier without first repeating
+  the hardware inventory. Each match still repeats live SEP inventory
+  reconciliation, and verifier preparation still ends on sleep. One measured
+  lid-close resume reached the lock-screen prompt in 2.42 s, versus 4.34–4.52 s
+  before; see the [evaluation](docs/evaluations/touchid-resume-presentation-cache-2026-10-27.md).
+
 ## 0.1.0 - 2026-09-19
 
 This release brings everyday Touch ID commands into one family, makes desktop
