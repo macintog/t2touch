@@ -100,6 +100,47 @@ If preparation stops before requesting a reboot, resolve the reported failure
 and rerun the same command. Its recovery hold and prepared-update proof remain
 in place across a retry. Reboot only after preparation reports success.
 
+## Native first run reports that the Linux account generation changed
+
+`t2-native-first-run.service` stops with “selected Linux account generation
+changed; confirm the account, then run t2-native-authority-rebind”, and fprintd
+then reports a dependency failure. The account generation includes the local
+passwd database itself, so any rewrite of `/etc/passwd` or `/etc/shadow`
+changes it, for example a package installation whose `systemd-sysusers` hook
+adds system users. T2Touch never rebinds automatically.
+
+Confirm that the mapped UID is still the intended account, then bind the
+unchanged Linux-native authority to it:
+
+```bash
+sudo t2-touchid-user-map status --linux-uid 1000
+sudo t2-native-authority-rebind --linux-uid 1000 \
+  --acknowledge-complete-native-authority-migration
+sudo systemctl start t2-native-first-run.service t2-biometric-ready.service \
+  t2-touchid-post-reboot.service fprintd.service
+sudo t2-touchid-doctor
+```
+
+`status` should report `account-generation-changed` for an enabled mapping.
+The rebind validates the complete protected authority, leaves `users.json` and
+its enrollment history untouched, and records the prior account generation as
+an alias for the current one. On the same installation nothing was migrated, so
+the acknowledgement's complete-authority condition holds as long as
+`/var/lib/t2-touchid` is intact.
+
+Do not use `t2-touchid-user-map rebind-disabled` or `enable-reconciled` for a
+Linux-native authority. They republish `users.json`, while the native
+provisioning and activation journals pin its generation, so first run then
+stops with “protected Linux-native replacement authority does not reconcile”
+and the native rebind refuses because the mapping already carries the current
+generation. There is no command that undoes those writes; preserve the current
+`users.json` and the journals before attempting any recovery.
+
+The rebind record covers one account change. A later rewrite of the passwd
+database leaves it stale: account collection then fails with “native account
+migration binding is invalid”, and the rebind refuses because a record already
+exists. That case has no supported recovery yet.
+
 ## fprintd dependency failure after a cold bridgeOS boot
 
 Recovery could not restore the reference machine's saved fingerprints after a

@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Point Linux-native first run's account-generation error at
+  `t2-native-authority-rebind`. It named the user-map disabled-rebind and live
+  reconciliation, which republishes `users.json` while the native journals pin
+  its generation, so following it left first run failing with “protected
+  Linux-native replacement authority does not reconcile”. Document the native
+  procedure, the warning, and its single-change limit in troubleshooting.
+
 ## 0.1.0 - 2026-09-19
 
 This release brings everyday Touch ID commands into one family, makes desktop

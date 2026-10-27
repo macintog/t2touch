@@ -267,9 +267,12 @@ Upgrades validate Linux account authority, biometric readiness, pending
 mutation reconciliation, and fprintd as separate stages. A failed stage stops
 installation and prints that unit's bounded status. Earlier stages may already
 have completed; the installer does not roll them back. Account-generation
-changes are never rebound automatically: use the redacted mapping status named by the installer, then
-perform the explicit disabled-rebind and live-reconciliation procedure only
-after confirming that the mapped Linux account is still the intended account.
+changes are never rebound automatically: use the redacted mapping status named by the installer, then,
+only after confirming that the mapped Linux account is still the intended account,
+bind a Linux-native authority with `t2-native-authority-rebind`. Other mappings
+use the explicit disabled-rebind and live-reconciliation procedure. See
+[account generation changes](docs/TROUBLESHOOTING.md#native-first-run-reports-that-the-linux-account-generation-changed)
+for the commands and the current single-change limit.
 
 ## Uninstall
 

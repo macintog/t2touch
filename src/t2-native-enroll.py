@@ -212,9 +212,13 @@ def _load_provisioned_authority(
             "protected Linux-native mapping authority does not reconcile"
         )
     if not account.matches_generation(selected.linux_account_generation):
+        # The mapping generation is pinned by the native provisioning and
+        # activation journals, so the user-map rebind (which republishes the
+        # mapping) cannot restore a Linux-native authority. The native account
+        # rebind keeps the mapping intact and aliases the prior generation.
         raise NativeEnrollmentError(
-            "selected Linux account generation changed; explicit disabled "
-            "rebinding and live reconciliation are required"
+            "selected Linux account generation changed; confirm the account, "
+            "then run t2-native-authority-rebind"
         )
 
     provisioning = t2_aks_provisioning.read(PROVISIONING_JOURNAL)

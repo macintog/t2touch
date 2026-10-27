@@ -725,6 +725,44 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             expected_keybag_length=len(keybag),
         )
 
+    def test_account_generation_change_names_the_native_rebind(self) -> None:
+        """The user-map rebind republishes the pinned mapping; point at the native one."""
+
+        keybag = b"native-keybag"
+        with tempfile.TemporaryDirectory() as directory:
+            keybag_path = Path(directory) / "user.kb"
+            keybag_path.write_bytes(keybag)
+            selected = SimpleNamespace(
+                keybag_path=str(keybag_path),
+                keybag_sha256=hashlib.sha256(keybag).hexdigest(),
+                apple_uid=501,
+                linux_account_generation="a" * 64,
+            )
+            mappings = mock.Mock()
+            mappings.resolve.return_value = selected
+            with (
+                mock.patch.object(
+                    native_enroll.t2_user_mapping, "load", return_value=mappings
+                ),
+                mock.patch.object(
+                    native_enroll.t2_linux_account,
+                    "collect",
+                    return_value=native_enroll.t2_linux_account.AccountEvidence(
+                        1000, "b" * 64
+                    ),
+                ),
+                mock.patch.object(
+                    native_enroll,
+                    "_private",
+                    return_value=SimpleNamespace(st_size=len(keybag)),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError,
+                    "account generation changed.*t2-native-authority-rebind",
+                ):
+                    native_enroll._load_provisioned_authority(1000, 501)
+
     def test_terminal_identity_recovery_persists_without_recapture(self) -> None:
         """Protect D196's stable-readback recovery from enrollment replay."""
 

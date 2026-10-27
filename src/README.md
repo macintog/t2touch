@@ -1282,6 +1282,12 @@ It validates the imported E4 authority, derives the current strict local-files
 account generation, and publishes a root-private per-UID migration record. The
 account collector accepts the prior generation only while that record matches
 the exact current account and the complete native authority still validates.
+The same command covers an account-generation change on the same installation,
+such as a package installation rewriting the passwd database. The user-map
+`rebind-disabled` path does not apply to a Linux-native authority: republishing
+`users.json` breaks the mapping generation that the native provisioning and
+activation journals pin. One record covers one change; a later passwd rewrite
+leaves it stale and is not yet handled.
 
 `t2_current_user_authority.py` removes Apple UID/account UUID/bag UUID values
 from the public mapping command line. It reads one exact configured Apple user
