@@ -99,17 +99,16 @@ class NativeAccountRebindTests(unittest.TestCase):
             self.previous,
         )
 
-    def test_rejects_wrong_current_generation_and_changed_authority(self):
+    def test_stale_record_grants_no_alias_and_changed_authority_fails(self):
         self.publish()
-        with self.assertRaisesRegex(
-            rebind.NativeAccountRebindError, "current account"
-        ):
+        self.assertIsNone(
             rebind.resolve(
                 self.uid,
                 "d" * 64,
                 state_root=self.state,
                 authority_loader=self.loader,
             )
+        )
         changed = SimpleNamespace(
             **{
                 **self.authority.__dict__,
@@ -198,6 +197,92 @@ class NativeAccountRebindTests(unittest.TestCase):
             with self.assertRaises(rebind.NativeAccountRebindError):
                 rebind._write_exclusive(path, b"incomplete")
         self.assertFalse(path.exists())
+
+    def test_later_account_change_replaces_stale_record(self):
+        self.publish()
+        path = self.user_root / rebind.MANIFEST_NAME
+        first = json.loads(path.read_text())
+        self.current = "d" * 64
+        result = self.publish()
+        self.assertEqual(
+            result.redacted()["state"],
+            "native-authority-rebound-to-current-account",
+        )
+        second = json.loads(path.read_text())
+        self.assertNotEqual(first["operation_id"], second["operation_id"])
+        self.assertEqual(second["previous_account_generation"], self.previous)
+        self.assertEqual(second["current_account_generation"], self.current)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(
+            sorted(item.name for item in self.user_root.iterdir()),
+            sorted([rebind.MANIFEST_NAME, "user.kb"]),
+        )
+        resolved = [
+            rebind.resolve(
+                self.uid,
+                generation,
+                state_root=self.state,
+                authority_loader=self.loader,
+            )
+            for generation in (self.current, "b" * 64)
+        ]
+        self.assertEqual(resolved, [self.previous, None])
+
+    def test_current_record_is_not_replaced(self):
+        self.publish()
+        path = self.user_root / rebind.MANIFEST_NAME
+        original = path.read_bytes()
+        with self.assertRaisesRegex(
+            rebind.NativeAccountRebindError, "already exists"
+        ):
+            self.publish()
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_stale_record_for_another_authority_is_not_replaced(self):
+        self.publish()
+        path = self.user_root / rebind.MANIFEST_NAME
+        original = path.read_bytes()
+        self.current = "d" * 64
+        self.authority = SimpleNamespace(
+            **{
+                **self.authority.__dict__,
+                "mapping_set": SimpleNamespace(generation="e" * 64),
+            }
+        )
+        with self.assertRaisesRegex(
+            rebind.NativeAccountRebindError, "does not match its complete authority"
+        ):
+            self.publish()
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_malformed_existing_record_blocks_publish(self):
+        path = self.user_root / rebind.MANIFEST_NAME
+        path.write_text(json.dumps({"schema_version": 1}))
+        path.chmod(0o600)
+        with self.assertRaises(rebind.NativeAccountRebindError):
+            self.publish()
+        self.assertEqual(json.loads(path.read_text()), {"schema_version": 1})
+
+    def test_replacement_aborts_when_record_changes_underneath(self):
+        self.publish()
+        path = self.user_root / rebind.MANIFEST_NAME
+        original = path.read_bytes()
+        stale = rebind._manifest(path, self.uid)
+        self.current = "d" * 64
+        with mock.patch.object(
+            rebind,
+            "_manifest",
+            side_effect=[stale, ("f" * 64, self.current, self.mapping_generation)],
+        ):
+            with self.assertRaisesRegex(
+                rebind.NativeAccountRebindError, "changed during replacement"
+            ):
+                self.publish()
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(
+            sorted(item.name for item in self.user_root.iterdir()),
+            sorted([rebind.MANIFEST_NAME, "user.kb"]),
+        )
 
     def test_current_binding_is_rejected(self):
         with self.assertRaisesRegex(

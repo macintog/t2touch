@@ -1286,8 +1286,9 @@ The same command covers an account-generation change on the same installation,
 such as a package installation rewriting the passwd database. The user-map
 `rebind-disabled` path does not apply to a Linux-native authority: republishing
 `users.json` breaks the mapping generation that the native provisioning and
-activation journals pin. One record covers one change; a later passwd rewrite
-leaves it stale and is not yet handled.
+activation journals pin. A later passwd rewrite leaves the record stale: it
+then grants no alias, and the next explicit rebind replaces it atomically only
+while its prior and mapping generations still match the validated authority.
 
 `t2_current_user_authority.py` removes Apple UID/account UUID/bag UUID values
 from the public mapping command line. It reads one exact configured Apple user

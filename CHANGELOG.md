@@ -13,7 +13,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reconciliation, which republishes `users.json` while the native journals pin
   its generation, so following it left first run failing with “protected
   Linux-native replacement authority does not reconcile”. Document the native
-  procedure, the warning, and its single-change limit in troubleshooting.
+  procedure and the warning in troubleshooting.
+- Let `t2-native-authority-rebind` replace its own record after a later account
+  change. A second passwd rewrite (for example another package adding a system
+  user) left the record stale, which made every Linux account assertion fail
+  with “native account migration binding is invalid” and made the rebind refuse
+  because a record existed. A stale record now grants no alias, and the next
+  explicit rebind replaces it atomically for the same intact authority.
 
 ## 0.1.0 - 2026-09-19
 

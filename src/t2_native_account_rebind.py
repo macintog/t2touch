@@ -4,6 +4,8 @@
 The imported mapping and its enrollment history remain byte-for-byte intact.
 This root-owned record makes the prior account generation a compatible alias
 only while the complete protected authority still validates for the same UID.
+A later account change leaves the record stale: it then grants nothing, and a
+new explicit rebind may replace it for the same authority.
 """
 
 from __future__ import annotations
@@ -301,27 +303,9 @@ def _private_digest(path: Path, maximum: int) -> tuple[str, int]:
             os.close(descriptor)
 
 
-def resolve(
-    linux_uid: int,
-    current_generation: str,
-    *,
-    state_root: Path = STATE_ROOT,
-    authority_loader: AuthorityLoader | None = None,
-) -> str | None:
-    """Return the proven prior generation, or None when no rebind exists."""
+def _manifest(path: Path, linux_uid: int) -> tuple[str, str, str]:
+    """Return (previous, rebound, mapping) generations of a well-formed record."""
 
-    linux_uid = _uid(linux_uid)
-    current_generation = _sha256(current_generation, "current account generation")
-    if not isinstance(state_root, Path) or not state_root.is_absolute():
-        raise NativeAccountRebindError("native authority state root is invalid")
-    path = state_root / "users" / str(linux_uid) / MANIFEST_NAME
-    if not os.path.lexists(path):
-        return None
-    if os.geteuid() != ROOT_UID:
-        raise NativeAccountRebindError("native account rebind requires root")
-    _private_directory(state_root)
-    _private_directory(state_root / "users")
-    _private_directory(path.parent)
     document = _read(path)
     fields = {
         "schema_version",
@@ -355,12 +339,40 @@ def resolve(
         or document["origin"] != ORIGIN
         or document["operation_id"] != operation_id
         or document["linux_uid"] != linux_uid
-        or rebound != current_generation
         or previous == rebound
     ):
-        raise NativeAccountRebindError(
-            "native account rebind does not match the current account"
-        )
+        raise NativeAccountRebindError("native account rebind record is invalid")
+    return previous, rebound, mapping_generation
+
+
+def resolve(
+    linux_uid: int,
+    current_generation: str,
+    *,
+    state_root: Path = STATE_ROOT,
+    authority_loader: AuthorityLoader | None = None,
+) -> str | None:
+    """Return the proven prior generation, or None when no rebind applies."""
+
+    linux_uid = _uid(linux_uid)
+    current_generation = _sha256(current_generation, "current account generation")
+    if not isinstance(state_root, Path) or not state_root.is_absolute():
+        raise NativeAccountRebindError("native authority state root is invalid")
+    path = state_root / "users" / str(linux_uid) / MANIFEST_NAME
+    if not os.path.lexists(path):
+        return None
+    if os.geteuid() != ROOT_UID:
+        raise NativeAccountRebindError("native account rebind requires root")
+    _private_directory(state_root)
+    _private_directory(state_root / "users")
+    _private_directory(path.parent)
+    previous, rebound, mapping_generation = _manifest(path, linux_uid)
+    # A later passwd rewrite leaves a well-formed record stale. It then grants
+    # no alias: the account reads as changed again and t2-native-authority-
+    # rebind can replace the record. It never aliases an account it was not
+    # made for; malformed or foreign records still fail closed above.
+    if rebound != current_generation:
+        return None
     authority = _load_authority(linux_uid, state_root, authority_loader)
     if (
         authority.origin != "linux-native-e4"
@@ -415,7 +427,12 @@ def publish(
     account_collector: AccountCollector | None = None,
     authority_loader: AuthorityLoader | None = None,
 ) -> NativeAccountRebindResult:
-    """Publish one explicit rebind after complete native state migration."""
+    """Publish one explicit rebind after complete native state migration.
+
+    A stale record left by a later account change is replaced, but only for the
+    same intact authority: its prior generation and mapping generation must
+    still be the validated authority's.
+    """
 
     if os.geteuid() != ROOT_UID:
         raise NativeAccountRebindError("native account rebind requires root")
@@ -431,8 +448,7 @@ def publish(
     user_root = state_root / "users" / str(linux_uid)
     _private_directory(user_root)
     path = user_root / MANIFEST_NAME
-    if os.path.lexists(path):
-        raise NativeAccountRebindError("native account rebind already exists")
+    stale = _manifest(path, linux_uid) if os.path.lexists(path) else None
     authority = _load_authority(linux_uid, state_root, authority_loader)
     if authority.origin != "linux-native-e4":
         raise NativeAccountRebindError("authority is not Linux-native")
@@ -455,6 +471,14 @@ def publish(
         raise NativeAccountRebindError(
             "native authority account generation is already current"
         )
+    if stale is not None and stale[1] == current_generation:
+        raise NativeAccountRebindError("native account rebind already exists")
+    if stale is not None and (
+        stale[0] != previous or stale[2] != authority.mapping_set.generation
+    ):
+        raise NativeAccountRebindError(
+            "existing native account rebind does not match its complete authority"
+        )
     operation_id = str(uuid.uuid4())
     document = {
         "schema_version": 1,
@@ -468,7 +492,23 @@ def publish(
     encoded = json.dumps(
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("ascii")
-    _write_exclusive(path, encoded)
+    if stale is None:
+        _write_exclusive(path, encoded)
+    else:
+        temporary = user_root / f".{MANIFEST_NAME}.{operation_id}"
+        _write_exclusive(temporary, encoded)
+        try:
+            if _manifest(path, linux_uid) != stale:
+                raise NativeAccountRebindError(
+                    "existing native account rebind changed during replacement"
+                )
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
     directory = os.open(user_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         os.fsync(directory)

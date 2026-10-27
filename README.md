@@ -272,7 +272,7 @@ only after confirming that the mapped Linux account is still the intended accoun
 bind a Linux-native authority with `t2-native-authority-rebind`. Other mappings
 use the explicit disabled-rebind and live-reconciliation procedure. See
 [account generation changes](docs/TROUBLESHOOTING.md#native-first-run-reports-that-the-linux-account-generation-changed)
-for the commands and the current single-change limit.
+for the commands.
 
 ## Uninstall
 

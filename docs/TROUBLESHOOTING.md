@@ -136,10 +136,12 @@ and the native rebind refuses because the mapping already carries the current
 generation. There is no command that undoes those writes; preserve the current
 `users.json` and the journals before attempting any recovery.
 
-The rebind record covers one account change. A later rewrite of the passwd
-database leaves it stale: account collection then fails with “native account
-migration binding is invalid”, and the rebind refuses because a record already
-exists. That case has no supported recovery yet.
+A later rewrite of the passwd database, such as another package adding a system
+user, changes the generation again. The existing rebind record then grants no
+alias, first run reports the change again, and the same rebind command
+replaces the stale record after validating the same intact authority. A record
+that is still current, or one that no longer matches the authority, is left
+unchanged and refused.
 
 ## fprintd dependency failure after a cold bridgeOS boot
 
