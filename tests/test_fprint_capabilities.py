@@ -88,6 +88,18 @@ class FprintCapabilitiesTests(unittest.TestCase):
         self.assertNotIn("CAP_SYS_PTRACE", capabilities)
 
     def test_can_poll_desktop_caller_pidfd(self):
+        # Observed on GitHub's ubuntu-latest runner: the namespace is created
+        # but the probe's ID switch is refused, likely by Ubuntu's restriction
+        # of unprivileged user namespaces.
+        switch = subprocess.run(
+            self.namespace + [sys.executable, "-c",
+                              "import os; os.setgid(1000); os.setuid(1000)"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if switch.returncode:
+            if "PermissionError" not in switch.stderr:
+                self.fail(switch.stderr)
+            self.skipTest("the user namespace cannot switch to uid and gid 1000")
         mask = sum(1 << CAPABILITIES[name] for name in self.capabilities())
         result = subprocess.run(
             self.namespace + [sys.executable, "-c", PROBE, str(mask)],
