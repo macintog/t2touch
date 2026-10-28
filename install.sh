@@ -149,6 +149,7 @@ check_applesmc_prerequisite "$(( active_installed_upgrade || validated_recovery_
 # active_installed_upgrade: that flag requires a matching live transport and
 # every prerequisite to be active, so a stopped, recovery-held, or
 # transport-changing install would be torn down on DKMS failure.
+# shellcheck disable=SC2119 # The optional path arguments are for tests.
 capture_prior_install_state
 
 target_dir=/opt/t2-touchid
@@ -708,6 +709,7 @@ if [[ $authority_mode == linux-native ]]; then
     echo "After reconciling private state, rerun the normal installer to resume setup."
     exit 0
   fi
+  # shellcheck disable=SC2119 # The optional root argument is for tests.
   resume_native_recovery || exit $?
   start_linux_native_touchid_chain || exit $?
   systemctl is-active --quiet fprintd.service || {

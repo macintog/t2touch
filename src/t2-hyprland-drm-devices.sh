@@ -20,7 +20,7 @@ if [ -z "${AQ_DRM_DEVICES+x}" ]; then
                 continue
                 ;;
         esac
-        [ -n "$t2_drm_driver" ] && [ -d "$t2_drm_driver" ] || continue
+        [ -d "$t2_drm_driver" ] || continue
         t2_drm_has_display=no
         for t2_drm_connector in "$t2_drm_entry"-*; do
             [ -r "$t2_drm_connector/status" ] || continue

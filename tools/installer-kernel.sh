@@ -145,6 +145,7 @@ enable_applesmc_next_boot() {
 
 # Read the result attribute, never the module's enable flag. APP0001 is
 # the ACPI SMC identity; older driver layouts expose a platform device.
+# shellcheck disable=SC2120 # The optional root argument is for tests.
 applesmc_boot_result() {
   local sys_root=${1:-/sys} path
   local -a results=()
@@ -180,6 +181,7 @@ check_applesmc_prerequisite() {
     echo "Internal error: active-upgrade allowance must be 0 or 1." >&2
     return 2
   fi
+  # shellcheck disable=SC2119 # The optional root argument is for tests.
   result=$(applesmc_boot_result) || return 2
   case "$result" in
     response-received:1)
