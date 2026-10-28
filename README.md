@@ -3,6 +3,10 @@
 Touch ID integration for Intel Macs with Apple’s T2 chip, using the standard
 Linux `fprintd` interface.
 
+**Don't install or enable T2Touch on a Mac that also runs macOS.** On our
+test Mac, after T2Touch had run, macOS removed the account's Touch ID
+fingerprints and replaced its keybag and login keychain.
+
 This is an early proof of concept. Keep password authentication enabled and
 available. Full end-to-end validation covers the `MacBookPro16,1` reference model;
 other model and firmware combinations have narrower coverage.
