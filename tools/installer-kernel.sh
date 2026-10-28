@@ -237,6 +237,7 @@ prepare_transport_update() {
   fi
   if (( ! verified_installed_upgrade && ! resuming )); then
     echo "Transport replacement requires a healthy or validated completed installation and matching installed module." >&2
+    echo "If first setup never completed, see \"Replacing the transport after an incomplete first setup\" in docs/TROUBLESHOOTING.md." >&2
     return 2
   fi
   # Commit the proof before the destructive step. It cannot be consumed in

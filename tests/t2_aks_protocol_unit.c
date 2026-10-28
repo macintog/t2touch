@@ -92,6 +92,29 @@ int main(void)
 	assert(t2_aks_header_version_after_capabilities(1, 0, 3) == 2);
 	assert(t2_aks_header_version_after_capabilities(2, 1, 1) == 2);
 	assert(t2_aks_header_version_after_capabilities(99, 0, 2) == 1);
+	{
+		size_t digest_size = 0, body_offset = 0;
+
+		assert(t2_aks_reply_envelope_layout(1, 0x48, 1, &digest_size,
+						    &body_offset));
+		assert(digest_size == 0x48 && body_offset == 0x4c);
+		/* MacBookPro16,1 mixed reply: hash v1 header, skip calendar. */
+		assert(t2_aks_reply_envelope_layout(1, 0x50, 1, &digest_size,
+						    &body_offset));
+		assert(digest_size == 0x48 && body_offset == 0x54);
+		assert(t2_aks_reply_envelope_layout(2, 0x50, 2, &digest_size,
+						    &body_offset));
+		assert(digest_size == 0x50 && body_offset == 0x54);
+		assert(!t2_aks_reply_envelope_layout(1, 0x50, 2, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(1, 0x48, 2, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(2, 0x50, 1, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(2, 0x48, 1, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(2, 0x48, 2, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(1, 0x4c, 1, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(1, 0x58, 1, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(3, 0x50, 3, NULL, NULL));
+		assert(!t2_aks_reply_envelope_layout(0, 0x48, 0, NULL, NULL));
+	}
 
 	put_le64(uuid_request + 4, 1);
 	put_le32(uuid_request + 12, (uint32_t)-501);

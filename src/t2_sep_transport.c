@@ -266,6 +266,8 @@ struct t2_aks_header_v2 {
 } __packed;
 
 static_assert(sizeof(struct t2_aks_header_v2) == T2_SEP_AKS_HEADER_V2_SIZE);
+static_assert(T2_AKS_HEADER_V1_SIZE == T2_SEP_AKS_HEADER_V1_SIZE);
+static_assert(T2_AKS_HEADER_V2_SIZE == T2_SEP_AKS_HEADER_V2_SIZE);
 
 static int t2_aks_stamp_verify_platform_data(struct t2_aks_header_v2 *header)
 {
@@ -499,27 +501,19 @@ static int t2_sep_control(struct t2_sep_transport *sep, u8 target_endpoint,
 	return 0;
 }
 
-static int t2_aks_digest(void *message, size_t length)
+/* Write the digest over the header after its digest field and the body. */
+static int t2_aks_digest_layout(void *message, size_t length,
+				size_t digest_header_size, size_t body_offset)
 {
 	struct t2_aks_header_v1 *header = message + sizeof(__le32);
 	struct crypto_shash *tfm;
 	struct shash_desc *desc;
 	u8 digest[SHA256_DIGEST_SIZE];
-	u32 header_size;
-	u32 version;
 	int ret;
 
-	if (length < sizeof(__le32) + sizeof(header->digest) + sizeof(header->version))
-		return -EINVAL;
-	header_size = get_unaligned_le32(message);
-	version = le32_to_cpu(header->version);
-	if ((version == T2_SEP_AKS_HEADER_V1 &&
-	     header_size != T2_SEP_AKS_HEADER_V1_SIZE) ||
-	    (version == T2_SEP_AKS_HEADER_V2 &&
-	     header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
-	    (version != T2_SEP_AKS_HEADER_V1 &&
-	     version != T2_SEP_AKS_HEADER_V2) ||
-	    length < sizeof(__le32) + header_size)
+	if (digest_header_size < sizeof(header->digest) ||
+	    sizeof(__le32) + digest_header_size > body_offset ||
+	    length < body_offset)
 		return -EPROTO;
 
 	tfm = crypto_alloc_shash("sha256", 0, 0);
@@ -535,11 +529,10 @@ static int t2_aks_digest(void *message, size_t length)
 	ret = crypto_shash_init(desc);
 	if (!ret)
 		ret = crypto_shash_update(desc, (u8 *)header + sizeof(header->digest),
-					 header_size - sizeof(header->digest));
+					 digest_header_size - sizeof(header->digest));
 	if (!ret)
-		ret = crypto_shash_update(desc,
-					 message + sizeof(__le32) + header_size,
-					 length - sizeof(__le32) - header_size);
+		ret = crypto_shash_update(desc, message + body_offset,
+					 length - body_offset);
 	if (!ret)
 		ret = crypto_shash_final(desc, digest);
 	if (!ret)
@@ -549,6 +542,29 @@ static int t2_aks_digest(void *message, size_t length)
 	kfree(desc);
 	crypto_free_shash(tfm);
 	return ret;
+}
+
+/* Requests always use the matched 0x48/v1 or 0x50/v2 envelope. */
+static int t2_aks_digest(void *message, size_t length)
+{
+	struct t2_aks_header_v1 *header = message + sizeof(__le32);
+	u32 header_size;
+	u32 version;
+
+	if (length < sizeof(__le32) + sizeof(header->digest) + sizeof(header->version))
+		return -EINVAL;
+	header_size = get_unaligned_le32(message);
+	version = le32_to_cpu(header->version);
+	if ((version == T2_SEP_AKS_HEADER_V1 &&
+	     header_size != T2_SEP_AKS_HEADER_V1_SIZE) ||
+	    (version == T2_SEP_AKS_HEADER_V2 &&
+	     header_size != T2_SEP_AKS_HEADER_V2_SIZE) ||
+	    (version != T2_SEP_AKS_HEADER_V1 &&
+	     version != T2_SEP_AKS_HEADER_V2) ||
+	    length < sizeof(__le32) + header_size)
+		return -EPROTO;
+	return t2_aks_digest_layout(message, length, header_size,
+				    sizeof(__le32) + header_size);
 }
 
 static bool t2_aks_operation_allowed(u8 operation)
@@ -588,8 +604,12 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 	struct t2_sep_message reply;
 	size_t request_length;
 	size_t wire_size;
+	size_t digest_header_size;
+	size_t body_offset;
 	u32 header_size;
 	u32 header_version;
+	u32 reply_header_size;
+	u32 reply_version;
 	u16 reply_length;
 	s8 reply_status;
 	u8 transaction;
@@ -831,13 +851,16 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 			operation, reply_length, reply.word[1] & 0xffff);
 		return -EPROTO;
 	}
-	if (get_unaligned_le32(sep->ool_out) != header_size ||
-	    get_unaligned_le32(sep->ool_out + sizeof(__le32) + 0x10) !=
-	    header_version) {
+	reply_header_size = get_unaligned_le32(sep->ool_out);
+	reply_version = get_unaligned_le32(sep->ool_out + sizeof(__le32) + 0x10);
+	if (!t2_aks_reply_envelope_layout(header_version, reply_header_size,
+					  reply_version, &digest_header_size,
+					  &body_offset) ||
+	    reply_length < body_offset) {
 		dev_err(&sep->pdev->dev,
-			"AKS operation %#x returned invalid envelope metadata (size %#x version %#x)\n",
-			operation, get_unaligned_le32(sep->ool_out),
-			get_unaligned_le32(sep->ool_out + sizeof(__le32) + 0x10));
+			"AKS operation %#x returned invalid envelope metadata (size %#x version %#x length %u)\n",
+			operation, reply_header_size, reply_version,
+			reply_length);
 		return -EPROTO;
 	}
 
@@ -846,7 +869,8 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 
 		memcpy(expected, sep->ool_out + sizeof(__le32), sizeof(expected));
 		memset(sep->ool_out + sizeof(__le32), 0, sizeof(expected));
-		ret = t2_aks_digest(sep->ool_out, reply_length);
+		ret = t2_aks_digest_layout(sep->ool_out, reply_length,
+					   digest_header_size, body_offset);
 		if (!ret && memcmp(expected,
 				sep->ool_out + sizeof(__le32), sizeof(expected)))
 			ret = -EBADMSG;
@@ -854,9 +878,13 @@ static int t2_aks_exchange_locked(struct t2_sep_transport *sep, u8 operation,
 	}
 	if (ret)
 		return ret;
+	if (reply_header_size != header_size)
+		dev_info_once(&sep->pdev->dev,
+			      "AKS accepted mixed reply envelope (size %#x version %#x)\n",
+			      reply_header_size, reply_version);
 
-	*response_body = sep->ool_out + wire_size;
-	*response_body_length = reply_length - wire_size;
+	*response_body = sep->ool_out + body_offset;
+	*response_body_length = reply_length - body_offset;
 	if (operation == T2_SEP_AKS_GET_CAPABILITIES &&
 	    *response_body_length >= 12) {
 		u32 status = get_unaligned_le32(*response_body);

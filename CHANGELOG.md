@@ -6,6 +6,64 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.1.1 - 2026-10-28
+
+This release accepts the mixed AppleKeyStore reply header that some
+MacBookPro16,1 firmware sends, which stopped transport setup. Three journals
+now check a record before appending it. It also adds a MacBookAir9,1 hardware
+report.
+
+### Fixed
+
+- Accept the mixed AppleKeyStore reply envelope that some MacBookPro16,1
+  firmware sends to the version 1 capability query: a 0x50-byte header
+  carrying version 1. Previously negotiation failed with `-EPROTO`, and
+  `/dev/t2-aks` stayed disabled until restart. Only this one layout is added.
+  Every other header mismatch is still rejected, and a reply that fails its
+  integrity check still returns `-EBADMSG`. The first accepted mixed reply
+  logs `AKS accepted mixed reply envelope` once per module load. Thanks to
+  [@hehh2001](https://github.com/hehh2001) for the detailed report in
+  [issue #13](https://github.com/macintog/t2touch/issues/13).
+- Validate Catacomb sync milestones before appending them. Before, a rejected
+  milestone stayed in the journal and made later reads fail. Thanks to
+  [@Vasiliji](https://github.com/Vasiliji) for
+  [PR #6](https://github.com/macintog/t2touch/pull/6).
+- Validate external and batch delete journals before appending to them.
+  Reject torn-tail repair records written by a caller, and repair records with
+  unexpected top-level fields
+  ([PR #7](https://github.com/macintog/t2touch/pull/7)).
+
+### Added
+
+- A [MacBookAir9,1 report](docs/MACBOOKAIR9_1.md) on bridgeOS 23P2048: setup
+  completed with identity-create version 4 after the default version 5
+  failed. Thanks to [@sergeid1](https://github.com/sergeid1) for
+  [PR #5](https://github.com/macintog/t2touch/pull/5).
+- Troubleshooting steps for
+  [replacing the transport after an incomplete first setup](docs/TROUBLESHOOTING.md#replacing-the-transport-after-an-incomplete-first-setup).
+  The installer's refusal message now points to them.
+
+### Upgrade and limitations
+
+- The kernel module changes. On a completed installation, run
+  `./install-omarchy.sh --prepare-transport-update`, restart when it asks,
+  then run `./install-omarchy.sh` again. A first setup that stopped at
+  capability negotiation can't use that path; follow the troubleshooting
+  steps above instead. Nobody has tried them yet on a machine stuck at that
+  point.
+- The mixed-envelope path has not run on hardware: only the reporting
+  firmware sends it. The unchanged reply paths passed a regression check on a
+  MacBookPro16,1 on bridgeOS 23P6068, with an existing enrollment, sudo and
+  password fallback working afterwards.
+- On the firmware reported in issue #13 (`21.16.1069.0.0,0`), first setup
+  still sends identity-create version 5, which nobody has tested there. If
+  first setup stops with an ambiguous or outcome-unknown create, don't retry
+  it or delete `/var/lib/t2-touchid`; report it.
+- **Don't install or enable T2Touch on a Mac that also runs macOS.** On our
+  test Mac, after T2Touch had run, macOS removed the account's Touch ID
+  fingerprints and replaced its keybag and login keychain. This release
+  doesn't change that.
+
 ## 0.1.0 - 2026-09-19
 
 This release brings everyday Touch ID commands into one family, makes desktop

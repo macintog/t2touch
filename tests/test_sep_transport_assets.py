@@ -57,6 +57,17 @@ class SepTransportAssetTests(unittest.TestCase):
         self.assertIn("T2_SEP_RELEASE_TIMEOUT_US", SOURCE)
         self.assertIn("sep->io_deadline_active = true", SOURCE)
 
+    def test_reply_envelope_uses_the_shared_layout_rule(self):
+        exchange = SOURCE.split("static int t2_aks_exchange_locked", 1)[1].split(
+            "static int t2_aks_probe_capabilities", 1
+        )[0]
+        self.assertIn("t2_aks_reply_envelope_layout(header_version", exchange)
+        self.assertIn("reply_length < body_offset", exchange)
+        self.assertIn("digest_header_size, body_offset)", exchange)
+        self.assertIn("*response_body = sep->ool_out + body_offset", exchange)
+        self.assertNotIn("sep->ool_out + wire_size", exchange)
+        self.assertNotIn("t2_aks_digest(sep->ool_out", exchange)
+
     def test_dkms_documents_the_kernel_floor(self):
         self.assertIn("Linux >= 6.12", DKMS)
         self.assertIn("BUILD_EXCLUSIVE_KERNEL=", DKMS)

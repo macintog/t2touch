@@ -337,6 +337,43 @@ t2_aks_header_version_after_capabilities(t2_aks_wire_u32 current_version,
 		T2_AKS_HEADER_VERSION_2 : T2_AKS_HEADER_VERSION_1;
 }
 
+#define T2_AKS_HEADER_V1_SIZE 0x48U
+#define T2_AKS_HEADER_V2_SIZE 0x50U
+
+/*
+ * Reply envelopes: a 32-bit header size, the header, then the body.  The
+ * digest covers the header after its 16-byte digest field and the body.
+ * A v1 request is normally answered 0x48/v1.  Some MacBookPro16,1 firmware
+ * answers it 0x50/v1: a v2-sized header carrying the v1 version, whose
+ * digest covers only the 0x48 v1 header and skips the 8-byte calendar.
+ * A v2 request accepts only 0x50/v2.  Every other shape is rejected.
+ */
+static inline bool
+t2_aks_reply_envelope_layout(t2_aks_wire_u32 request_version,
+			     t2_aks_wire_u32 reply_header_size,
+			     t2_aks_wire_u32 reply_version,
+			     size_t *digest_header_size, size_t *body_offset)
+{
+	size_t digest_size;
+
+	if (request_version == T2_AKS_HEADER_VERSION_1 &&
+	    reply_version == T2_AKS_HEADER_VERSION_1 &&
+	    (reply_header_size == T2_AKS_HEADER_V1_SIZE ||
+	     reply_header_size == T2_AKS_HEADER_V2_SIZE))
+		digest_size = T2_AKS_HEADER_V1_SIZE;
+	else if (request_version == T2_AKS_HEADER_VERSION_2 &&
+		 reply_version == T2_AKS_HEADER_VERSION_2 &&
+		 reply_header_size == T2_AKS_HEADER_V2_SIZE)
+		digest_size = T2_AKS_HEADER_V2_SIZE;
+	else
+		return false;
+	if (digest_header_size)
+		*digest_header_size = digest_size;
+	if (body_offset)
+		*body_offset = 4 + (size_t)reply_header_size;
+	return true;
+}
+
 static inline bool
 t2_aks_capabilities_request_allowed(const t2_aks_wire_u8 *request,
 				    size_t length)

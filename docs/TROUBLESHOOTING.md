@@ -289,6 +289,37 @@ Do not force-unload the module or unbind its PCI device. SEP retains registered
 DMA addresses while the transport is resident. Keep the installed build and
 running-driver details in a bug report if the mismatch is unexpected.
 
+### Replacing the transport after an incomplete first setup
+
+`--prepare-transport-update` requires a healthy or validated completed
+installation. If first setup stopped before it completed, for example because
+the transport failed AppleKeyStore capability negotiation, preparation stops
+with:
+
+```text
+Transport replacement requires a healthy or validated completed installation and matching installed module.
+```
+
+Replace the transport by removing the incomplete installation instead:
+
+```bash
+sudo ./uninstall.sh
+# Restart.
+git pull --ff-only
+./install-omarchy.sh
+```
+
+`uninstall.sh` disables the transport for the next boot and removes its DKMS
+module. It leaves the resident transport loaded until the restart and keeps
+`/var/lib/t2-touchid`. After the restart no T2Touch transport is resident, so
+the installer can build and load the new one. If the running kernel lacks the
+applesmc boot-state publisher, the installer stages it again and requests one
+more restart; restart and rerun `./install-omarchy.sh`.
+
+Do not delete `/var/lib/t2-touchid` to start over. If first run reported an
+ambiguous or outcome-unknown operation, its journal is recovery evidence;
+report the problem before reinstalling.
+
 ## Existing macOS Touch ID state blocks first run
 
 The Linux-native installer creates authority only on blank state. It refuses
