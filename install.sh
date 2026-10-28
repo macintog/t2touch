@@ -2,6 +2,35 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 
+usage="Usage: sudo ./install.sh [--prepare-transport-update|--prepare-native-recovery] [--this-mac-does-not-run-macos]"
+prepare_update=0
+prepare_native_recovery=0
+macos_override=0
+for arg in "$@"; do
+  case $arg in
+    --prepare-transport-update|--prepare-native-recovery)
+      (( ! prepare_update && ! prepare_native_recovery )) || { echo "$usage" >&2; exit 2; }
+      if [[ $arg == --prepare-transport-update ]]; then
+        prepare_update=1
+      else
+        prepare_native_recovery=1
+      fi ;;
+    --this-mac-does-not-run-macos)
+      (( ! macos_override )) || { echo "$usage" >&2; exit 2; }
+      macos_override=1 ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+done
+
+source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
+# Before any check that could hide it, and before this run changes anything.
+# The Omarchy wrapper has already taken the typed override confirmation.
+# shellcheck source=tools/installer-macos-guard.sh
+source "$source_dir/tools/installer-macos-guard.sh"
+macos_override_confirmed=0
+[[ ${T2TOUCH_OMARCHY_WRAPPER:-0} != 1 ]] || macos_override_confirmed=1
+refuse_if_macos_possible "$macos_override" "$macos_override_confirmed" || exit 1
+
 if [[ $EUID -ne 0 ]]; then
   echo "Run with sudo: sudo ./install.sh" >&2
   exit 1
@@ -15,17 +44,8 @@ if [[ ! $SUDO_USER =~ ^[a-z_][a-z0-9_-]*$ ]]; then
   exit 1
 fi
 
-source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 running_kernel=$(uname -r)
 
-prepare_update=0
-prepare_native_recovery=0
-case "${1:-}" in
-  '') [[ $# -eq 0 ]] || exit 2 ;;
-  --prepare-transport-update) [[ $# -eq 1 ]] || exit 2; prepare_update=1 ;;
-  --prepare-native-recovery) [[ $# -eq 1 ]] || exit 2; prepare_native_recovery=1 ;;
-  *) echo "Usage: sudo ./install.sh [--prepare-transport-update|--prepare-native-recovery]" >&2; exit 2 ;;
-esac
 # shellcheck source=tools/installer-kernel.sh
 source "$source_dir/tools/installer-kernel.sh"
 # shellcheck source=tools/installer-services.sh

@@ -6,6 +6,47 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.1.2 - 2026-10-28
+
+On our test Mac, after T2Touch had run in Linux, macOS removed the account's
+Touch ID fingerprints and replaced its keybag and login keychain. The old login
+keychain, where macOS keeps saved passwords, no longer opens with the
+account's password. The installers now stop before they change anything when
+they find storage that suggests the Mac might also run macOS.
+
+### Added
+
+- Both `install-omarchy.sh` and `install.sh` now look for Apple storage first.
+  They list every disk and partition with `lsblk`, which doesn't need root. If
+  any has an APFS, HFS+ or Core Storage partition type or filesystem, or the
+  disks or a partition's type can't be read, the installer explains the risk
+  above, says what it found, points to
+  [Macs that also run macOS](README.md#macs-that-also-run-macos) and stops
+  before installing packages, building, or changing files, services or PAM
+  settings. The override prompt explains the risk too. This covers first
+  installs, upgrades and both `--prepare-*` steps.
+- `--this-mac-does-not-run-macos` lets a Mac that runs only Linux install with
+  leftover Apple storage, such as a partition from a removed macOS or an
+  external Apple-formatted disk. When the installer finds Apple storage, it
+  then asks you to type `this Mac does not run macOS`. Add the flag to every
+  run, including reruns.
+
+### Upgrade and limitations
+
+- The check reads partition and filesystem types; it doesn't look inside them
+  for macOS. It can't see a disk that isn't connected while the installer
+  runs.
+- It doesn't stop or remove an installation that's already there. On a Mac
+  where macOS might be present, the installer now refuses to upgrade it as
+  well.
+- Run directly, `sudo ./install.sh` checks only after `sudo` has
+  authenticated. If T2Touch is already installed, that `sudo` prompt can use
+  Touch ID. `./install-omarchy.sh` checks before it runs `sudo`.
+- Tested on a MacBookPro16,1 with macOS on an APFS partition: each installer
+  stopped at the check with that partition named. Packages, PAM files, units,
+  modules and installed files were unchanged afterwards. On a Linux machine
+  with no Apple storage, the check passed with no output.
+
 ## 0.1.1 - 2026-10-28
 
 This release accepts the mixed AppleKeyStore reply header that some

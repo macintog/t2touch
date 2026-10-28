@@ -11,14 +11,30 @@ command -v omarchy >/dev/null || {
   exit 1
 }
 
-case "${1:-}" in
-  '') [[ $# -eq 0 ]] || exit 2 ;;
-  --prepare-transport-update) [[ $# -eq 1 ]] || exit 2 ;;
-  --prepare-native-recovery) [[ $# -eq 1 ]] || exit 2 ;;
-  *) echo "Usage: ./install-omarchy.sh [--prepare-transport-update|--prepare-native-recovery]" >&2; exit 2 ;;
-esac
+usage="Usage: ./install-omarchy.sh [--prepare-transport-update|--prepare-native-recovery] [--this-mac-does-not-run-macos]"
+mode=
+macos_override=0
+for arg in "$@"; do
+  case $arg in
+    --prepare-transport-update|--prepare-native-recovery)
+      [[ -z $mode ]] || { echo "$usage" >&2; exit 2; }
+      mode=$arg ;;
+    --this-mac-does-not-run-macos)
+      (( ! macos_override )) || { echo "$usage" >&2; exit 2; }
+      macos_override=1 ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+done
 
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
+# shellcheck source=tools/installer-macos-guard.sh
+source "$source_dir/tools/installer-macos-guard.sh"
+refuse_if_macos_possible "$macos_override" 0 || exit 1
+install_args=(${mode:+"$mode"})
+# Hand the flag on only with the statement typed here, so install.sh's own
+# scan never skips the question.
+(( ! macos_guard_statement_taken )) || install_args+=(--this-mac-does-not-run-macos)
+
 running_kernel=$(uname -r)
 mapfile -t kernel_packages < <(
   pacman -Qoq "/usr/lib/modules/$running_kernel" 2>/dev/null |
@@ -36,8 +52,8 @@ if ! pacman -Si "$headers_package" >/dev/null 2>&1 &&
 fi
 
 omarchy pkg add base-devel dkms fprintd python "$headers_package"
-sudo env T2TOUCH_OMARCHY_WRAPPER=1 "$source_dir/install.sh" "$@"
-[[ ${1:-} != --prepare-native-recovery ]] || exit 0
+sudo env T2TOUCH_OMARCHY_WRAPPER=1 "$source_dir/install.sh" "${install_args[@]}"
+[[ $mode != --prepare-native-recovery ]] || exit 0
 
 # UWSM reads this on the next graphical login. Resolve devices on that machine
 # at that login; DRM card numbers and PCI addresses are not portable.

@@ -5,7 +5,11 @@ Linux `fprintd` interface.
 
 **Don't install or enable T2Touch on a Mac that also runs macOS.** On our
 test Mac, after T2Touch had run, macOS removed the account's Touch ID
-fingerprints and replaced its keybag and login keychain.
+fingerprints and replaced its keybag and login keychain. The old login
+keychain, where macOS keeps saved passwords, no longer opens with the
+account's password. The installer stops when it finds storage that suggests
+the Mac might also run macOS; see
+[Macs that also run macOS](#macs-that-also-run-macos).
 
 This is an early proof of concept. Keep password authentication enabled and
 available. Full end-to-end validation covers the `MacBookPro16,1` reference model;
@@ -22,6 +26,35 @@ before attempting recovery on an installation you rely on.
 MacBookPro16,2 with bridgeOS 23P2048 additionally requires explicit creation
 version 4 selection. See the [setup and hardware validation report](docs/MACBOOKPRO16_2.md)
 before installing on that firmware.
+
+## Macs that also run macOS
+
+On our test Mac, after T2Touch had run in Linux, macOS removed the account's
+Touch ID fingerprints and replaced its keybag and login keychain. The old login
+keychain, where macOS keeps saved passwords, no longer opens with the
+account's password. Until the cause is known, T2Touch is for Macs that run
+only Linux.
+
+Since 0.1.2, both installers look for Apple storage before they change
+anything. They list every disk and partition with `lsblk`, which doesn't need
+root. If any is APFS, HFS+ or Core Storage, or the disks or a partition's type
+can't be read, the installer stops. It explains the risk first, then says what
+it found. It installs no packages and changes no files, services or PAM
+settings.
+
+A Mac that runs only Linux can still have Apple storage: a partition left from
+a removed macOS, or an external Apple-formatted disk. If this Mac can't start
+macOS from any disk, add `--this-mac-does-not-run-macos` and type
+`this Mac does not run macOS` when asked:
+
+```bash
+./install-omarchy.sh --this-mac-does-not-run-macos
+```
+
+Add the flag to every run, including the reruns the installer asks for.
+
+The check doesn't stop or remove an installation that's already there. On a
+Mac where macOS might be present, the installer refuses to upgrade it as well.
 
 ## Try it on Omarchy
 
