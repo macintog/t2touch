@@ -9,7 +9,10 @@ fingerprints and replaced its keybag and login keychain. The old login
 keychain, where macOS keeps saved passwords, no longer opens with the
 account's password. The installer stops when it finds storage that suggests
 the Mac might also run macOS; see
-[Macs that also run macOS](#macs-that-also-run-macos).
+[Macs that also run macOS](#macs-that-also-run-macos). If T2Touch is already
+installed on a Mac that also runs macOS, read
+[the safety notice](https://github.com/macintog/t2touch/issues/16) before you
+uninstall it or switch operating systems.
 
 This is an early proof of concept. Keep password authentication enabled and
 available. Full end-to-end validation covers the `MacBookPro16,1` reference model;
