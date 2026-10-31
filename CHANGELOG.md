@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Changed
+
+- Report the messages of the project's own exception chain in the enrollment
+  worker's `enrollment stopped` line as a JSON `detail=` list, alongside the
+  existing class and reason fields. Only messages raised by `t2_*` modules are
+  included, so the line still carries no identifiers or raw bridge replies.
+  Without it, a Catacomb persistence failure logged only
+  `classes=...>CatacombBridgeError reason=unclassified`, which cannot be told
+  apart from the other bridge checks when reporting an issue.
+
 ## 0.1.2 - 2026-10-28
 
 On our test Mac, after T2Touch had run in Linux, macOS removed the account's
