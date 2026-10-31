@@ -962,5 +962,303 @@ class EnrollmentReconciliationTests(unittest.TestCase):
                 )
 
 
+    def create_lost_first_identity(self, directory: str) -> tuple[Path, str, dict]:
+        """A bootstrap enrollment whose master save stopped at its prepare request.
+
+        This is the journal shape observed on MacBookPro16,3 / bridgeOS 24P6005:
+        the user Catacomb was confirmed and staged, then the master prepare
+        reply failed validation before any host commit.
+        """
+        value = baseline()
+        value.update(
+            {
+                "baseline_version": 2,
+                "identity_records": [],
+                "capacity": {"used": 0, "maximum": 5},
+                "sep_catacomb": {
+                    "present": False,
+                    "uuid": str(uuid.UUID(int=0)),
+                    "hash": None,
+                },
+                "host_components": [],
+                "master_enrollment_count": 0,
+                "backup_references": [],
+            }
+        )
+        generation = value["connection_generation"]
+        path = Path(directory) / "operation.jsonl"
+        operation_id, _record = mutation_journal.create(path, "enroll", value)
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "ENROLL_START_INTENT",
+            {
+                "apple_uid": 501,
+                "protocol_version": 2,
+                "connection_generation": generation,
+                "request_length": 68,
+                "request_sha256": "a" * 64,
+            },
+        )
+        enrollment_journal.append_checked(
+            path, operation_id, "ENROLL_START_OBSERVED", {"status": 0}
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "E2_TERMINAL_RESULT_WITNESSED",
+            {
+                "connection_generation": generation,
+                "event_sequence": 1,
+                "envelope_type": enrollment_journal.SERVICE_ENROLLMENT_RESULT,
+                "event_version": 2,
+                "payload_length": 40,
+                "event_sha256": "b" * 64,
+                "embedded_user_matches": True,
+            },
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "E2_WITNESS_IDENTITY_READBACK_OBSERVED",
+            {
+                "connection_generation": generation,
+                "user_id": 501,
+                "identity_uuid": str(uuid.UUID(int=8)),
+                "source": "stable-readback",
+                "single_identity_added": True,
+                "host_unchanged": True,
+                "sep_catacomb_advanced": True,
+                "per_user_global_equal": True,
+                "mapping_generation": value["mapping_generation"],
+            },
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_PERSISTENCE_PLAN",
+            {
+                "connection_generation": generation,
+                "batches": [
+                    [
+                        {"name": "user_000001f5.cat", "descriptor_sha256": "1" * 64},
+                        {"name": "master.cat", "descriptor_sha256": "2" * 64},
+                    ],
+                    [{"name": "biolockout.cat", "descriptor_sha256": "3" * 64}],
+                ],
+            },
+        )
+        user = _component_ref(0, 0, "user_000001f5.cat", "1" * 64)
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_PREPARE_INTENT", user
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_PREPARED",
+            {**user, "status": 0, "expected_blob_length": 15902},
+        )
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_COMPLETE_INTENT", user
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_SECURE_BLOB_CAPTURED",
+            {
+                **user,
+                "status": 0,
+                "blob_length": 15902,
+                "secure_blob_sha256": "4" * 64,
+            },
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_HOST_STAGED",
+            {**user, "secure_blob_sha256": "4" * 64, "final_file_sha256": "7" * 64},
+        )
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_CONFIRM_INTENT", user
+        )
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_CONFIRMED", {**user, "status": 0}
+        )
+        master = _component_ref(0, 1, "master.cat", "2" * 64)
+        enrollment_journal.append_checked(
+            path, operation_id, "CATACOMB_PREPARE_INTENT", master
+        )
+        enrollment_journal.append_checked(
+            path,
+            operation_id,
+            "CATACOMB_PERSISTENCE_OUTCOME_UNKNOWN",
+            {
+                **master,
+                "stage": "prepare",
+                "reason": "transport-error",
+                "sep_mutation_possible": True,
+                "host_commit_possible": False,
+            },
+        )
+        return path, operation_id, value
+
+    def cold_bootstrap_snapshots(self, value: dict) -> tuple[dict, dict]:
+        """Empty host store and the SEP surface after a cold bridgeOS restart."""
+        host = {
+            "account_uuid": value["account_uuid"],
+            "bag_uuid": value["bag_uuid"],
+            "identity_records": [],
+            "host_components": [],
+            "master_enrollment_count": 0,
+        }
+        live = {
+            "double_collection_equal": True,
+            "connection_generation": str(uuid.UUID(int=99)),
+            "apple_uid": 501,
+            "biometric_protocol_version": 2,
+            "per_user_identity_records": [],
+            "global_identity_records": [],
+            "maximum_capacity": 5,
+            "configured_user_free_capacity": 5,
+            "catacomb": {
+                "present": False,
+                "uuid": str(uuid.UUID(int=0)),
+                "hash": "0" * 64,
+            },
+        }
+        return host, live
+
+    def test_lost_first_identity_reconciles_as_no_change_after_cold_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, operation_id, value = self.create_lost_first_identity(directory)
+            before = enrollment_journal.read(path)
+            self.assertIs(before.phase, enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN)
+            self.assertIsNotNone(before.terminal_identity_uuid)
+            host, live = self.cold_bootstrap_snapshots(value)
+            result = reconciliation.append_reconciled(
+                path,
+                operation_id,
+                host=host,
+                live=live,
+                mapping_generation=value["mapping_generation"],
+            )
+            records = mutation_journal.read(path)
+        self.assertEqual(result.phase, enrollment_journal.EnrollmentPhase.RECONCILED)
+        self.assertIsNone(result.terminal_identity_uuid)
+        self.assertEqual(
+            records[-1]["milestone"], "E3_RECOVERY_NO_CHANGE_RECONCILED"
+        )
+        self.assertFalse(records[-1]["evidence"]["identity_present"])
+
+    def test_lost_first_identity_is_not_reconciled_while_sep_differs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, operation_id, value = self.create_lost_first_identity(directory)
+            host, live = self.cold_bootstrap_snapshots(value)
+            # Warm bridgeOS: the identity and its Catacomb are still there.
+            live["per_user_identity_records"] = [
+                {"user_id": 501, "identity_uuid": str(uuid.UUID(int=8))}
+            ]
+            live["global_identity_records"] = [
+                {
+                    "user_id": 501,
+                    "identity_uuid": str(uuid.UUID(int=8)),
+                    "group_type": 1,
+                    "group_uuid": str(uuid.UUID(int=0)),
+                }
+            ]
+            live["configured_user_free_capacity"] = 4
+            live["catacomb"] = {
+                "present": True,
+                "uuid": str(uuid.UUID(int=9)),
+                "hash": "3" * 64,
+            }
+            with self.assertRaisesRegex(
+                reconciliation.EnrollmentReconciliationError, "inventories diverge"
+            ):
+                reconciliation.append_reconciled(
+                    path,
+                    operation_id,
+                    host=host,
+                    live=live,
+                    mapping_generation=value["mapping_generation"],
+                )
+            # Absent Catacomb but a surviving identity is not the baseline.
+            host, live = self.cold_bootstrap_snapshots(value)
+            live["per_user_identity_records"] = [
+                {"user_id": 501, "identity_uuid": str(uuid.UUID(int=8))}
+            ]
+            live["global_identity_records"] = [
+                {
+                    "user_id": 501,
+                    "identity_uuid": str(uuid.UUID(int=8)),
+                    "group_type": 1,
+                    "group_uuid": str(uuid.UUID(int=0)),
+                }
+            ]
+            with self.assertRaisesRegex(
+                reconciliation.EnrollmentReconciliationError, "inventories diverge"
+            ):
+                reconciliation.append_reconciled(
+                    path,
+                    operation_id,
+                    host=host,
+                    live=live,
+                    mapping_generation=value["mapping_generation"],
+                )
+            # A zero Catacomb UUID that claims presence is still rejected.
+            host, live = self.cold_bootstrap_snapshots(value)
+            live["catacomb"]["present"] = True
+            with self.assertRaisesRegex(
+                reconciliation.EnrollmentReconciliationError, "Catacomb UUID is invalid"
+            ):
+                reconciliation.append_reconciled(
+                    path,
+                    operation_id,
+                    host=host,
+                    live=live,
+                    mapping_generation=value["mapping_generation"],
+                )
+            self.assertIs(
+                enrollment_journal.read(path).phase,
+                enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN,
+            )
+
+    def test_no_change_recovery_keeps_witnessed_identity_after_possible_commit(self):
+        """A vanished identity is only forgotten when nothing could have been committed."""
+        with tempfile.TemporaryDirectory() as directory:
+            path, operation_id, value = self.create_lost_first_identity(directory)
+            records = mutation_journal.read(path)
+            # Rewrite the failure as a host-commit ambiguity of the same component.
+            failure = dict(records[-1]["evidence"])
+            failure.update({"stage": "host-commit", "host_commit_possible": True})
+            prefix = records[:-1]
+            rewritten = Path(directory) / "rewritten.jsonl"
+            rewritten_id, _record = mutation_journal.create(rewritten, "enroll", value)
+            # Replay the recorded chain onto the fresh file to keep the hash chain valid.
+            for record in prefix[1:]:
+                enrollment_journal.append_checked(
+                    rewritten, rewritten_id, record["milestone"], record["evidence"]
+                )
+            enrollment_journal.append_checked(
+                rewritten, rewritten_id, "CATACOMB_PERSISTENCE_OUTCOME_UNKNOWN", failure
+            )
+            host, live = self.cold_bootstrap_snapshots(value)
+            with self.assertRaisesRegex(
+                enrollment_journal.EnrollmentJournalError,
+                "vanished without an uncommitted persistence failure",
+            ):
+                reconciliation.append_reconciled(
+                    rewritten,
+                    rewritten_id,
+                    host=host,
+                    live=live,
+                    mapping_generation=value["mapping_generation"],
+                )
+            self.assertIs(
+                enrollment_journal.read(rewritten).phase,
+                enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

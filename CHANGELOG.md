@@ -6,6 +6,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Let `recover-outcome` close a first enrollment whose master Catacomb save
+  stopped at its prepare request after a cold bridgeOS restart removed the
+  never-committed identity. The E3 classifier now admits a bootstrap baseline
+  that returned to the absent-Catacomb surface, the journal forgets a witnessed
+  identity only when its persistence failure left nothing on the host, and the
+  staged `user_<UID>.cat` is discarded only once the live inventory already
+  shows the empty baseline. Previously the bootstrap Catacomb UUID rule
+  rejected that surface, so the journal stayed `outcome-unknown` and blocked
+  every further enrollment with no supported way out.
+
 ### Changed
 
 - Report the messages of the project's own exception chain in the enrollment
