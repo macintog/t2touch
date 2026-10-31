@@ -194,6 +194,86 @@ class PostRebootReconcilerTests(unittest.TestCase):
                         self.assertEqual(failure["child_exit_status"], 17)
                         runner.assert_called_once()
 
+    def test_external_reconciliation_skips_retained_no_change_enrollments(self):
+        mapping_set = SimpleNamespace(
+            mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)
+        )
+        registry = native_reconciler.t2_mutation_registry
+        no_change = registry.MutationEntry("enroll", "reconciled", False, False)
+        aborted = registry.MutationEntry("enroll", "aborted-before-start", False, False)
+        cases = {
+            "reconciled-no-change": ((no_change,), True),
+            "two-no-change": ((no_change, aborted), True),
+            "reconciled-awaiting-reboot": ((registry.MutationEntry("enroll", "reconciled", False, True),), False),
+            "outcome-unknown": ((registry.MutationEntry("enroll", "outcome-unknown", True, False),), False),
+            "verified-without-manifest": ((registry.MutationEntry("enroll", "addition-verified", False, False),), False),
+            "complete-delete": ((registry.MutationEntry("delete-one", "reconciled", False, False),), False),
+            "mixed": ((no_change, registry.MutationEntry("rename", "reconciled", False, False)), False),
+            "unreadable": (registry.MutationRegistryError("mutation journal is invalid"), False),
+        }
+        for name, (entries, skipped) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                users = root / "users"
+                mutations = root / "mutations"
+                catacomb = root / "catacomb"
+                for directory in (users / "1000", mutations, catacomb):
+                    directory.mkdir(parents=True)
+                (mutations / f"{uuid.UUID(int=1)}.jsonl").touch()
+                runner = mock.Mock(return_value=SimpleNamespace(returncode=17))
+                scan = mock.Mock(side_effect=entries) if isinstance(entries, Exception) else mock.Mock(return_value=entries)
+                with (
+                    mock.patch.object(native_reconciler.t2_user_mapping, "load", return_value=mapping_set),
+                    mock.patch.object(native_reconciler.t2_user_authority, "USERS_ROOT", users),
+                    mock.patch.object(native_reconciler, "MUTATION_ROOT", mutations),
+                    mock.patch.object(native_reconciler, "CATACOMB_ROOT", catacomb),
+                    mock.patch.object(registry, "scan", scan),
+                ):
+                    if skipped:
+                        result = native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+                        self.assertEqual(result.state, "no-pending-mutation")
+                        self.assertFalse(result.journal_updated)
+                        runner.assert_not_called()
+                    else:
+                        with self.assertRaises(post_reboot_diagnostic.PostRebootStageError):
+                            native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+                        runner.assert_called_once()
+                scan.assert_called_once_with(mutations)
+
+    def test_retained_no_change_enrollment_still_defers_to_other_retained_state(self):
+        mapping_set = SimpleNamespace(
+            mappings=(SimpleNamespace(enabled=True, linux_uid=1000),)
+        )
+        registry = native_reconciler.t2_mutation_registry
+        no_change = (registry.MutationEntry("enroll", "reconciled", False, False),)
+        for retained in ("manifest", "catacomb", "journal"):
+            with self.subTest(retained=retained), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                users = root / "users"
+                user = users / "1000"
+                mutations = root / "mutations"
+                catacomb = root / "catacomb"
+                for directory in (user, mutations, catacomb):
+                    directory.mkdir(parents=True)
+                (mutations / f"{uuid.UUID(int=1)}.jsonl").touch()
+                if retained == "manifest":
+                    (user / "authority.json").write_text("invalid")
+                elif retained == "catacomb":
+                    (catacomb / "prepare").mkdir()
+                else:
+                    (user / "retained.jsonl").touch()
+                runner = mock.Mock(return_value=SimpleNamespace(returncode=17))
+                with (
+                    mock.patch.object(native_reconciler.t2_user_mapping, "load", return_value=mapping_set),
+                    mock.patch.object(native_reconciler.t2_user_authority, "USERS_ROOT", users),
+                    mock.patch.object(native_reconciler, "MUTATION_ROOT", mutations),
+                    mock.patch.object(native_reconciler, "CATACOMB_ROOT", catacomb),
+                    mock.patch.object(registry, "scan", return_value=no_change),
+                ):
+                    with self.assertRaises(post_reboot_diagnostic.PostRebootStageError):
+                        native_reconciler.reconcile_external_deletion_if_needed(runner=runner)
+                    runner.assert_called_once()
+
     def test_failure_diagnostic_is_bounded_and_redacted(self):
         private = OSError(errno.EIO, "/private/identifier/payload")
         failure = post_reboot_diagnostic.staged(

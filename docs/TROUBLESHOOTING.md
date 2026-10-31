@@ -394,6 +394,14 @@ reports the identity or a Catacomb, so a warm restart changes nothing and the
 staged file stays in place. Enrollment is unblocked once `status` reports the
 mutation as complete.
 
+The closed journal stays under `/var/lib/t2-touchid/mutations/`. Because the
+first enrollment never published the per-user authority,
+`t2-touchid-post-reboot.service` used to treat that retained journal as state
+needing external-deletion reconciliation, a child command that cannot run
+without the authority, so fprintd failed its dependency at every start with
+`reason: null`. The post-reboot reconciler now recognises a complete no-change
+enrollment journal as part of the initial state and lets fprintd start.
+
 ## Deletion failed and enrollment is now blocked
 
 A deletion error can mean SEP removed the fingerprint but local persistence did

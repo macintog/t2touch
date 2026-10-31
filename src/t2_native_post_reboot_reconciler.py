@@ -28,6 +28,14 @@ ROOT_UID = 0
 SOURCE_ROOT = Path(__file__).resolve().parent
 MUTATION_ROOT = t2_post_reboot_reconciler.MUTATION_ROOT
 CATACOMB_ROOT = Path("/var/lib/t2-touchid/catacomb")
+# Enrollment phases whose journals prove the SEP identity set did not change.
+_NO_CHANGE_ENROLLMENT_PHASES = frozenset(
+    {
+        t2_enrollment_journal.EnrollmentPhase.BASELINE.value,
+        t2_enrollment_journal.EnrollmentPhase.ABORTED_BEFORE_START.value,
+        t2_enrollment_journal.EnrollmentPhase.RECONCILED.value,
+    }
+)
 
 
 class NativePostRebootReconcilerError(RuntimeError):
@@ -329,6 +337,29 @@ def _verify_management(
     return document
 
 
+def _retains_only_no_change_enrollments(root: Path) -> bool:
+    """True when every retained journal is an enrollment that changed nothing.
+
+    A reconciled enrollment whose identity never existed (or never survived)
+    is complete evidence that the SEP returned to its baseline.  Any other
+    kind, an unfinished or post-reboot-pending entry, or an unreadable journal
+    still requires reconciliation.
+    """
+    if not any(root.iterdir()):
+        return True
+    try:
+        entries = t2_mutation_registry.scan(root)
+    except t2_mutation_registry.MutationRegistryError:
+        return False
+    return all(
+        entry.kind == "enroll"
+        and entry.phase in _NO_CHANGE_ENROLLMENT_PHASES
+        and not entry.blocks_new_mutation
+        and not entry.post_reboot_pending
+        for entry in entries
+    )
+
+
 def reconcile_external_deletion_if_needed(
     *, runner: Callable[..., object] = subprocess.run
 ) -> NativePostRebootReconcilerResult:
@@ -348,11 +379,15 @@ def reconcile_external_deletion_if_needed(
     # A newly activated account has no enrollment authority or Catacomb yet.
     # External deletion reconciliation requires an earlier enrollment; making
     # it a prerequisite here prevents fprintd from accepting the first one.
-    # Only the empty initial state is a no-op. Retained mutation/Catacomb
+    # Only the initial state is a no-op: no manifest, no Catacomb bytes, no
+    # per-user history, and no mutation journal other than enrollments proven
+    # to have changed nothing.  Without an authority the child below cannot
+    # open a management lease, so a retained no-change journal would otherwise
+    # stop fprintd forever before the first fingerprint.  Retained Catacomb
     # evidence or an existing (even dangling) manifest still needs validation.
     if (
         not os.path.lexists(user_root / "authority.json")
-        and not any(MUTATION_ROOT.iterdir())
+        and _retains_only_no_change_enrollments(MUTATION_ROOT)
         and not any(CATACOMB_ROOT.iterdir())
         and not any(user_root.glob("*.jsonl"))
     ):
