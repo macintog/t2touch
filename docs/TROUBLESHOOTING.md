@@ -399,8 +399,10 @@ first enrollment never published the per-user authority,
 `t2-touchid-post-reboot.service` used to treat that retained journal as state
 needing external-deletion reconciliation, a child command that cannot run
 without the authority, so fprintd failed its dependency at every start with
-`reason: null`. The post-reboot reconciler now recognises a complete no-change
-enrollment journal as part of the initial state and lets fprintd start.
+`reason: null`. fprintd's first-enrollment bootstrap and the enrollment worker
+likewise required an empty mutation directory, so `t2-touchid-enroll` ended at
+"Enrollment stopped" with no reason. Those checks now recognise a complete
+no-change enrollment journal as part of the initial state.
 
 ## Deletion failed and enrollment is now blocked
 

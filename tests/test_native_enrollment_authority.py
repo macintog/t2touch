@@ -30,6 +30,101 @@ def identifier(number: int) -> str:
 
 
 class NativeEnrollmentAuthorityTests(unittest.TestCase):
+    def test_post_reboot_candidate_skips_retained_no_change_journals(self) -> None:
+        journal = native_enroll.t2_enrollment_journal
+        mapping_set = SimpleNamespace(generation="gen")
+        selected = SimpleNamespace(
+            linux_uid=1000, apple_uid=501, account_uuid="acct", bag_uuid="bag"
+        )
+        baseline = {
+            "baseline_version": 2,
+            "caller_linux_uid": 1000,
+            "target_linux_uid": 1000,
+            "apple_uid": 501,
+            "account_uuid": "acct",
+            "bag_uuid": "bag",
+            "mapping_generation": "gen",
+        }
+        histories = {
+            "a.jsonl": SimpleNamespace(
+                phase=journal.EnrollmentPhase.RECONCILED,
+                terminal_identity_uuid=None,
+                baseline=baseline,
+            ),
+            "b.jsonl": SimpleNamespace(
+                phase=journal.EnrollmentPhase.RECONCILED,
+                terminal_identity_uuid=identifier(7),
+                baseline=baseline,
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in histories:
+                (root / name).touch()
+            with (
+                mock.patch.object(native_enroll, "MUTATION_ROOT", root),
+                mock.patch.object(
+                    journal, "read", side_effect=lambda path: histories[path.name]
+                ),
+            ):
+                path, history = native_enroll._pending_post_reboot_journal(
+                    mapping_set, selected
+                )
+                self.assertEqual(path.name, "b.jsonl")
+                self.assertIs(history, histories["b.jsonl"])
+                histories["a.jsonl"].terminal_identity_uuid = identifier(3)
+                with self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError, "exactly one reconciled"
+                ):
+                    native_enroll._pending_post_reboot_journal(mapping_set, selected)
+
+    def test_fresh_enrollment_state_keeps_only_no_change_journals(self) -> None:
+        cases = {
+            "empty": ((), (), (), None, False),
+            "no-change-journal": ((), ("a.jsonl",), (), True, False),
+            "other-journal": ((), ("a.jsonl",), (), False, True),
+            "catacomb-bytes": (("prepare",), ("a.jsonl",), (), None, True),
+            "activation": ((), (), ("x",), None, True),
+        }
+        for name, (catacomb, mutations, activation, verdict, rejects) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                roots = {
+                    "CATACOMB_ROOT": root / "catacomb",
+                    "MUTATION_ROOT": root / "mutations",
+                    "ACTIVATION_ROOT": root / "activation",
+                }
+                for path in roots.values():
+                    path.mkdir()
+                for entry in catacomb:
+                    (roots["CATACOMB_ROOT"] / entry).mkdir()
+                for entry in mutations:
+                    (roots["MUTATION_ROOT"] / entry).touch()
+                for entry in activation:
+                    (roots["ACTIVATION_ROOT"] / entry).touch()
+                retains = mock.Mock(return_value=verdict)
+                with (
+                    mock.patch.object(native_enroll, "STATE_ROOT", root),
+                    mock.patch.multiple(native_enroll, **roots),
+                    mock.patch.object(native_enroll, "_private"),
+                    mock.patch.object(
+                        native_enroll.t2_mutation_registry,
+                        "retains_only_no_change_enrollments",
+                        retains,
+                    ),
+                ):
+                    if rejects:
+                        with self.assertRaisesRegex(
+                            native_enroll.NativeEnrollmentError, "not empty"
+                        ):
+                            native_enroll._require_fresh_enrollment_state()
+                    else:
+                        native_enroll._require_fresh_enrollment_state()
+                if verdict is None:
+                    retains.assert_not_called()
+                else:
+                    retains.assert_called_once_with(roots["MUTATION_ROOT"])
+
     def test_native_addition_uses_high_water_candidate_from_exact_inventory(self) -> None:
         selected = SimpleNamespace(apple_uid=501)
         store = mock.Mock()

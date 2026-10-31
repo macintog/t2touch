@@ -8,15 +8,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Let fprintd start again after `recover-outcome` closes a first enrollment
-  that changed nothing. The post-reboot reconciler treated any retained
-  mutation journal as evidence requiring external-deletion reconciliation,
-  but that child command needs the per-user enrollment authority, which does
-  not exist before the first fingerprint is kept. The startup no-op now also
-  covers retained enrollment journals that are complete and proved no SEP
-  change, while any other journal kind, an unfinished or post-reboot-pending
-  entry, Catacomb bytes, per-user history or an authority manifest still go
-  through reconciliation.
+- Let fprintd start and the first fingerprint enroll again after
+  `recover-outcome` closes a first enrollment that changed nothing. Every
+  pre-first-enrollment path treated any retained mutation journal as state
+  awaiting reconciliation: the post-reboot reconciler ran external-deletion
+  reconciliation, whose child needs the per-user enrollment authority that
+  does not exist yet, so fprintd failed its dependency at every start; and
+  fprintd's bootstrap projection, the enrollment worker and legacy first-run
+  required an empty mutation directory, so `EnrollStart` failed and the
+  desktop enrollment showed "Enrollment stopped" with no reason. Retained
+  enrollment journals that are complete and proved no SEP change (baseline,
+  aborted before start, or reconciled without an identity) now count as the
+  initial state in those checks and in the post-reboot and authority
+  publication candidate selectors. Any other journal kind, an unfinished or
+  post-reboot-pending entry, Catacomb bytes, per-user history or an authority
+  manifest still go through reconciliation.
 - Let `recover-outcome` close a first enrollment whose master Catacomb save
   stopped at its prepare request after a cold bridgeOS restart removed the
   never-committed identity. The E3 classifier now admits a bootstrap baseline

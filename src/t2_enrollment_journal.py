@@ -40,6 +40,22 @@ class EnrollmentPhase(Enum):
     OUTCOME_UNKNOWN = "outcome-unknown"
 
 
+def is_no_change_history(history: "EnrollmentHistory") -> bool:
+    """True when an enrollment journal proves the SEP identity set did not change.
+
+    A baseline-only or aborted-before-start journal never issued a command.  A
+    reconciled journal without a terminal identity closed as a no-change
+    recovery, so nothing it describes survives on the SEP or the host.
+    """
+    return history.phase in {
+        EnrollmentPhase.BASELINE,
+        EnrollmentPhase.ABORTED_BEFORE_START,
+    } or (
+        history.phase is EnrollmentPhase.RECONCILED
+        and history.terminal_identity_uuid is None
+    )
+
+
 @dataclass(frozen=True, repr=False)
 class EnrollmentHistory:
     operation_id: str

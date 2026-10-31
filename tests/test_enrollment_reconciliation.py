@@ -1134,6 +1134,7 @@ class EnrollmentReconciliationTests(unittest.TestCase):
             before = enrollment_journal.read(path)
             self.assertIs(before.phase, enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN)
             self.assertIsNotNone(before.terminal_identity_uuid)
+            self.assertFalse(enrollment_journal.is_no_change_history(before))
             host, live = self.cold_bootstrap_snapshots(value)
             result = reconciliation.append_reconciled(
                 path,
@@ -1145,6 +1146,9 @@ class EnrollmentReconciliationTests(unittest.TestCase):
             records = mutation_journal.read(path)
         self.assertEqual(result.phase, enrollment_journal.EnrollmentPhase.RECONCILED)
         self.assertIsNone(result.terminal_identity_uuid)
+        # The closed journal is retained initial-state evidence for every
+        # pre-first-enrollment check and candidate selector.
+        self.assertTrue(enrollment_journal.is_no_change_history(result))
         self.assertEqual(
             records[-1]["milestone"], "E3_RECOVERY_NO_CHANGE_RECONCILED"
         )

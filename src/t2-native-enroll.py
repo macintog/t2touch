@@ -329,10 +329,19 @@ def _require_fresh_enrollment_state() -> None:
     for path in (CATACOMB_ROOT, MUTATION_ROOT, ACTIVATION_ROOT):
         _private(path, directory=True)
         with os.scandir(path) as entries:
-            if any(True for _entry in entries):
-                raise NativeEnrollmentError(
-                    "native first-enrollment state is not empty; reconcile retained state"
-                )
+            if not any(True for _entry in entries):
+                continue
+        # Enrollment journals that completed without changing the SEP identity
+        # set (for example one closed by recover-outcome) are retained evidence
+        # of the initial state, not state awaiting reconciliation.
+        if (
+            path == MUTATION_ROOT
+            and t2_mutation_registry.retains_only_no_change_enrollments(path)
+        ):
+            continue
+        raise NativeEnrollmentError(
+            "native first-enrollment state is not empty; reconcile retained state"
+        )
 
 
 def _require_private_runtime_root() -> None:
@@ -1574,6 +1583,8 @@ def _pending_post_reboot_journal(
                 raise NativeEnrollmentError("native mutation directory is not canonical")
             path = MUTATION_ROOT / entry.name
             history = t2_enrollment_journal.read(path)
+            if t2_enrollment_journal.is_no_change_history(history):
+                continue
             if history.phase is t2_enrollment_journal.EnrollmentPhase.RECONCILED:
                 candidates.append((path, history))
             else:
@@ -1630,11 +1641,7 @@ def _pending_authority_publication_journal(
             candidates.append((path, history))
         elif (
             history.baseline.get("baseline_version") != 2
-            or history.phase
-            not in {
-                t2_enrollment_journal.EnrollmentPhase.BASELINE,
-                t2_enrollment_journal.EnrollmentPhase.ABORTED_BEFORE_START,
-            }
+            or not t2_enrollment_journal.is_no_change_history(history)
         ):
             later_mutation = True
     if later_mutation or len(candidates) != 1:
