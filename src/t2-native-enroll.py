@@ -1956,8 +1956,8 @@ def _run_outcome_unknown_reconciliation(
                 live = t2_bridge_inventory.collect_stable_private_inventory(
                     lease, selected.apple_uid
                 )
-                local_prepare_discarded = (
-                    _discard_cancelled_biolockout_prepare(store, history)
+                local_prepare_discarded = _discard_recoverable_prepare(
+                    store, history, live
                 )
                 host = t2_enrollment_finalizer.read_local_host_snapshot(
                     store, history.baseline
@@ -1989,18 +1989,29 @@ def _run_outcome_unknown_reconciliation(
         os.close(lock_descriptor)
 
 
-def _discard_cancelled_biolockout_prepare(
+def _discard_recoverable_prepare(
     store: t2_catacomb_store.CatacombStore,
     history: t2_enrollment_journal.EnrollmentHistory,
+    live: dict[str, object],
 ) -> bool:
-    """Remove the empty rollback side left by an ambiguous cancel save.
+    """Remove a journal-bound rollback-side transaction before E3 read-back.
 
-    Mesa cancellation is already terminal and identity-free at this point.
-    The BioLockout save request is a read/export operation, but a lost reply
-    can leave the host transaction directory open before any component bytes
-    exist.  Never replay that request.  Admit only the exact cancelled,
-    BioLockout-only, pre-host-stage shape and let the fresh stable inventory
-    plus normal E3 classifier prove that the identity set stayed unchanged.
+    Two exact shapes are admitted; anything else is left for the maintainer.
+
+    Cancelled BioLockout save: Mesa cancellation is already terminal and
+    identity-free at this point.  The BioLockout save request is a read/export
+    operation, but a lost reply can leave the host transaction directory open
+    before any component bytes exist.  Never replay that request.  Admit only
+    the cancelled, BioLockout-only, pre-host-stage shape and let the fresh
+    stable inventory plus normal E3 classifier prove that the identity set
+    stayed unchanged.
+
+    Lost first identity: the user Catacomb was staged and confirmed, the
+    master save stopped at its prepare request with nothing committed on the
+    host, and a later cold bridgeOS restart removed the never-persisted
+    identity.  The fresh inventory must already show the empty baseline
+    surface before the staged user file is discarded, because while the SEP
+    still holds the identity that file is the only durable copy of it.
     """
     prepare = CATACOMB_ROOT / "prepare"
     commit = CATACOMB_ROOT / "commit"
@@ -2009,6 +2020,29 @@ def _discard_cancelled_biolockout_prepare(
     if not prepare_pending and not commit_pending:
         return False
     persistence = history.persistence
+    user_name = f"user_{history.baseline['apple_uid']:08x}.cat"
+    staged = dict(persistence.staged_files)
+    lost_first_identity = (
+        history.phase is t2_enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN
+        and history.terminal_identity_uuid is not None
+        and persistence.phase
+        is t2_enrollment_persistence_journal.PersistencePhase.OUTCOME_UNKNOWN
+        and persistence.outcome_unknown_stage == "prepare"
+        and persistence.outcome_unknown_host_commit_possible is False
+        and persistence.batch_index == 0
+        and persistence.component_index == 1
+        and len(persistence.batches) >= 1
+        and [name for name, _digest in persistence.batches[0]]
+        == [user_name, "master.cat"]
+        and set(staged) == {user_name}
+        and live.get("per_user_identity_records") == []
+        and live.get("global_identity_records") == []
+        and isinstance(live.get("catacomb"), dict)
+        and live["catacomb"].get("present") is False
+    )
+    if lost_first_identity and prepare_pending and not commit_pending:
+        store.discard_prepare({user_name}, staged)
+        return True
     exact_cancel_save = (
         history.phase is t2_enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN
         and history.terminal_identity_uuid is None

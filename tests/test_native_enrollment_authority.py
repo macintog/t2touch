@@ -135,7 +135,7 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             ),
             mock.patch.object(
                 native_enroll,
-                "_discard_cancelled_biolockout_prepare",
+                "_discard_recoverable_prepare",
                 return_value=False,
             ),
             mock.patch.object(
@@ -188,6 +188,7 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             terminal_identity_uuid=None,
             terminal_status=66,
             persistence=persistence,
+            baseline={"apple_uid": 501},
         )
         store = SimpleNamespace(discard_empty_prepare=mock.Mock())
         with mock.patch.object(
@@ -195,12 +196,160 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             "lexists",
             side_effect=lambda path: Path(path).name == "prepare",
         ):
-            discarded = native_enroll._discard_cancelled_biolockout_prepare(
-                store, history
+            discarded = native_enroll._discard_recoverable_prepare(
+                store, history, {}
             )
 
         self.assertTrue(discarded)
         store.discard_empty_prepare.assert_called_once_with()
+
+    def _lost_first_identity_history(self, **overrides: object) -> SimpleNamespace:
+        """A first enrollment whose master save stopped at its prepare request."""
+
+        persistence = SimpleNamespace(
+            phase=(
+                native_enroll.t2_enrollment_persistence_journal.PersistencePhase.OUTCOME_UNKNOWN
+            ),
+            outcome_unknown_stage="prepare",
+            outcome_unknown_host_commit_possible=False,
+            batch_index=0,
+            component_index=1,
+            staged_files=(("user_000001f5.cat", "7" * 64),),
+            batches=(
+                (("user_000001f5.cat", "1" * 64), ("master.cat", "2" * 64)),
+                (("biolockout.cat", "3" * 64),),
+            ),
+        )
+        for key, value in overrides.items():
+            setattr(persistence, key, value)
+        return SimpleNamespace(
+            phase=native_enroll.t2_enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN,
+            terminal_identity_uuid=identifier(8),
+            terminal_status=None,
+            persistence=persistence,
+            baseline={"apple_uid": 501},
+        )
+
+    @staticmethod
+    def _cold_live() -> dict[str, object]:
+        return {
+            "per_user_identity_records": [],
+            "global_identity_records": [],
+            "catacomb": {"present": False, "uuid": identifier(0), "hash": "0" * 64},
+        }
+
+    def test_lost_first_identity_discards_staged_user_only_on_empty_surface(
+        self,
+    ) -> None:
+        """The staged user file goes only after the SEP shows the baseline again."""
+
+        history = self._lost_first_identity_history()
+        store = SimpleNamespace(
+            discard_prepare=mock.Mock(), discard_empty_prepare=mock.Mock()
+        )
+        with mock.patch.object(
+            native_enroll.os.path,
+            "lexists",
+            side_effect=lambda path: Path(path).name == "prepare",
+        ):
+            discarded = native_enroll._discard_recoverable_prepare(
+                store, history, self._cold_live()
+            )
+
+        self.assertTrue(discarded)
+        store.discard_prepare.assert_called_once_with(
+            {"user_000001f5.cat"}, {"user_000001f5.cat": "7" * 64}
+        )
+        store.discard_empty_prepare.assert_not_called()
+
+    def test_lost_first_identity_keeps_staged_user_while_sep_holds_identity(
+        self,
+    ) -> None:
+        """A warm bridgeOS still holds the identity; the staged file is its only copy."""
+
+        history = self._lost_first_identity_history()
+        store = SimpleNamespace(
+            discard_prepare=mock.Mock(), discard_empty_prepare=mock.Mock()
+        )
+        warm_variants = [
+            {
+                **self._cold_live(),
+                "per_user_identity_records": [
+                    {"user_id": 501, "identity_uuid": identifier(8)}
+                ],
+            },
+            {
+                **self._cold_live(),
+                "catacomb": {"present": True, "uuid": identifier(9), "hash": "3" * 64},
+            },
+            {},
+        ]
+        for live in warm_variants:
+            with (
+                self.subTest(live=live),
+                mock.patch.object(
+                    native_enroll.os.path,
+                    "lexists",
+                    side_effect=lambda path: Path(path).name == "prepare",
+                ),
+                self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError,
+                    "unsupported local Catacomb transaction",
+                ),
+            ):
+                native_enroll._discard_recoverable_prepare(store, history, live)
+        store.discard_prepare.assert_not_called()
+        store.discard_empty_prepare.assert_not_called()
+
+    def test_lost_first_identity_requires_the_exact_persistence_shape(self) -> None:
+        """Any other stage, component, or staged set is left for manual review."""
+
+        store = SimpleNamespace(
+            discard_prepare=mock.Mock(), discard_empty_prepare=mock.Mock()
+        )
+        variants = {
+            "complete stage": {"outcome_unknown_stage": "complete"},
+            "host commit possible": {"outcome_unknown_host_commit_possible": True},
+            "user component": {"component_index": 0},
+            "nothing staged": {"staged_files": ()},
+            "master staged too": {
+                "staged_files": (
+                    ("user_000001f5.cat", "7" * 64),
+                    ("master.cat", "8" * 64),
+                )
+            },
+            "other user staged": {"staged_files": (("user_000001f6.cat", "7" * 64),)},
+        }
+        for label, overrides in variants.items():
+            history = self._lost_first_identity_history(**overrides)
+            with (
+                self.subTest(label),
+                mock.patch.object(
+                    native_enroll.os.path,
+                    "lexists",
+                    side_effect=lambda path: Path(path).name == "prepare",
+                ),
+                self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError,
+                    "unsupported local Catacomb transaction",
+                ),
+            ):
+                native_enroll._discard_recoverable_prepare(
+                    store, history, self._cold_live()
+                )
+        history = self._lost_first_identity_history()
+        with (
+            mock.patch.object(native_enroll.os.path, "lexists", return_value=True),
+            self.assertRaisesRegex(
+                native_enroll.NativeEnrollmentError,
+                "unsupported local Catacomb transaction",
+            ),
+        ):
+            native_enroll._discard_recoverable_prepare(
+                store, history, self._cold_live()
+            )
+        store.discard_prepare.assert_not_called()
+        store.discard_empty_prepare.assert_not_called()
 
     def test_exact_interrupted_authority_temp_is_resumed(self) -> None:
         """Only byte-identical publication state may cross the atomic rename."""
