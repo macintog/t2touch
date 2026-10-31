@@ -23,9 +23,11 @@ The request does not authorize creating or deleting an identity.
 After this recovery, a separate first-enrollment startup gate could still stop
 fprintd: automatic external-deletion reconciliation required an enrollment
 authority before the first fingerprint could be enrolled. Reconciliation now
-returns a no-op only when the account has no authority manifest, mutation
-history, Catacomb state, or retained enrollment journals. Existing or dangling
-authority manifests and retained state still go through reconciliation. The
+returns a no-op only when the account has no authority manifest, Catacomb
+state, or retained per-user history, and when every retained mutation journal
+is an enrollment that completed without changing the SEP identity set (for
+example one closed by `recover-outcome`). Existing or dangling authority
+manifests and any other retained state still go through reconciliation. The
 external-deletion diagnostic stage is also registered so a child failure keeps
 its bounded stage and exit status instead of being masked by `ValueError`.
 

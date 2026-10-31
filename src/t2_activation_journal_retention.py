@@ -83,6 +83,28 @@ def _is_proved_terminal(path: Path) -> bool:
     return history.phase in DELETABLE_PHASES
 
 
+def retains_only_resolved(root: Path = DEFAULT_ROOT) -> bool:
+    """True when every entry is a private activation journal in a resolved phase.
+
+    Such journals are the retained record of keybag activations that already
+    reached ready, stopped, or a recovered phase; the pre-first-enrollment
+    checks may keep them.  Anything else, including an entry that is not a
+    private journal, still requires attention.
+    """
+    _private_directory(root)
+    try:
+        names = os.listdir(root)
+    except OSError as error:
+        raise ActivationJournalRetentionError(
+            "activation journal directory is unreadable"
+        ) from error
+    return all(
+        _private_journal(root / name) is not None
+        and _is_proved_terminal(root / name)
+        for name in names
+    )
+
+
 def prune(
     root: Path = DEFAULT_ROOT,
     *,

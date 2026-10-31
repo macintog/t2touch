@@ -15,7 +15,7 @@ After first installation, log out and sign back in before enrolling.
 | `t2-touchid-status [--json]` | Show service availability and your redacted fingerprint inventory. |
 | `t2-touchid-list [--json]` | List the same validated inventory. |
 | `t2-touchid-count` | Print the number of enrolled fingerprints. |
-| `t2-touchid-verify` | Test an enrolled fingerprint through fprintd. |
+| `t2-touchid-verify` | Test an enrolled fingerprint through fprintd, on the same screen as enrollment when run from a terminal. |
 | `t2-touchid-delete N` | Obtain fresh PolicyKit authorization, then delete one fingerprint. |
 | `t2-touchid-purge [--yes] [--resume]` | Confirm and authorize journaled deletion of the full inventory, or resume that operation. |
 

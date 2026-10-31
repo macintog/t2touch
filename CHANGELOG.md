@@ -6,6 +6,57 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Let fprintd start and the first fingerprint enroll again after
+  `recover-outcome` closes a first enrollment that changed nothing. Every
+  pre-first-enrollment path treated any retained mutation journal as state
+  awaiting reconciliation: the post-reboot reconciler ran external-deletion
+  reconciliation, whose child needs the per-user enrollment authority that
+  does not exist yet, so fprintd failed its dependency at every start; and
+  fprintd's bootstrap projection, the enrollment worker and legacy first-run
+  required an empty mutation directory, so `EnrollStart` failed and the
+  desktop enrollment showed "Enrollment stopped" with no reason. Retained
+  enrollment journals that are complete and proved no SEP change (baseline,
+  aborted before start, or reconciled without an identity) now count as the
+  initial state in those checks and in the post-reboot and authority
+  publication candidate selectors, as do keybag activation journals that
+  reached a resolved phase (the failed enrollment's own activation record
+  otherwise blocked every later first enrollment the same way). Any other journal kind, an unfinished or
+  post-reboot-pending entry, Catacomb bytes, per-user history or an authority
+  manifest still go through reconciliation.
+- Let `recover-outcome` close a first enrollment whose master Catacomb save
+  stopped at its prepare request after a cold bridgeOS restart removed the
+  never-committed identity. The E3 classifier now admits a bootstrap baseline
+  that returned to the absent-Catacomb surface, the journal forgets a witnessed
+  identity only when its persistence failure left nothing on the host, and the
+  staged `user_<UID>.cat` is discarded only once the live inventory already
+  shows the empty baseline. Previously the bootstrap Catacomb UUID rule
+  rejected that surface, so the journal stayed `outcome-unknown` and blocked
+  every further enrollment with no supported way out.
+
+### Changed
+
+- Open `t2-touchid-verify` on the project's own screen when it runs from a
+  terminal, so it says when to touch the sensor and reports the match or
+  non-match in the same layout as enrollment. The stock `fprintd-verify`
+  client printed only "Verify started!" and waited silently. Without a
+  terminal, or without the screen installed, the stock client still runs.
+- Show why the desktop enrollment or verification screen stopped when the
+  failure happened on the client side, such as an `EnrollStart` D-Bus error,
+  and repeat that reason on stderr after the screen closes. fprintd's D-Bus
+  error texts are fixed and identifier-free; only printable ASCII is kept and
+  the text is bounded. Previously such a failure showed only "Enrollment
+  stopped · No fingerprint was saved." with no way to tell it apart from a
+  sensor-side stop.
+- Report the messages of the project's own exception chain in the enrollment
+  worker's `enrollment stopped` line as a JSON `detail=` list, alongside the
+  existing class and reason fields. Only messages raised by `t2_*` modules are
+  included, so the line still carries no identifiers or raw bridge replies.
+  Without it, a Catacomb persistence failure logged only
+  `classes=...>CatacombBridgeError reason=unclassified`, which cannot be told
+  apart from the other bridge checks when reporting an issue.
+
 ## 0.1.2 - 2026-10-28
 
 On our test Mac, after T2Touch had run in Linux, macOS removed the account's

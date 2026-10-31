@@ -193,6 +193,10 @@ def verify(user: str) -> int:
     require_current_user(user)
     if not service_ready():
         raise T2TouchError("Touch ID is not ready; run sudo t2-touchid-doctor")
+    if ENROLL.is_file() and sys.stdout.isatty():
+        # The project's own screen says when to touch; the stock client only
+        # prints "Verify started!" and waits silently.
+        os.execv(str(ENROLL), [str(ENROLL), "verify"])
     return subprocess.run(
         ["/usr/bin/fprintd-verify", "-f", "any", user],
         check=False,
