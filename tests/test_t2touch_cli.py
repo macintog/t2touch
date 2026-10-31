@@ -45,6 +45,39 @@ class T2TouchCLITests(unittest.TestCase):
             self.assertEqual(t2touch.main([], command="enroll"), 1)
             execute.assert_not_called()
 
+    def test_verify_opens_the_project_screen_on_a_terminal(self):
+        with (
+            mock.patch.object(t2touch, "configured_user", return_value="mapped"),
+            mock.patch.object(t2touch, "require_current_user"),
+            mock.patch.object(t2touch, "service_ready", return_value=True),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(t2touch.sys.stdout, "isatty", return_value=True),
+            mock.patch.object(t2touch.os, "execv", side_effect=RuntimeError("exec")) as execute,
+            self.assertRaisesRegex(RuntimeError, "exec"),
+        ):
+            t2touch.main([], command="verify")
+        execute.assert_called_once_with(str(t2touch.ENROLL), [str(t2touch.ENROLL), "verify"])
+        # Without a terminal (or without the screen installed) the stock
+        # client still runs, so scripts keep its exit status and output.
+        for installed, tty in ((True, False), (False, True)):
+            with (
+                self.subTest(installed=installed, tty=tty),
+                mock.patch.object(t2touch, "configured_user", return_value="mapped"),
+                mock.patch.object(t2touch, "require_current_user"),
+                mock.patch.object(t2touch, "service_ready", return_value=True),
+                mock.patch.object(Path, "is_file", return_value=installed),
+                mock.patch.object(t2touch.sys.stdout, "isatty", return_value=tty),
+                mock.patch.object(t2touch.os, "execv") as execute,
+                mock.patch.object(
+                    t2touch.subprocess, "run", return_value=mock.Mock(returncode=3)
+                ) as run,
+            ):
+                self.assertEqual(t2touch.main([], command="verify"), 3)
+                execute.assert_not_called()
+                run.assert_called_once_with(
+                    ["/usr/bin/fprintd-verify", "-f", "any", "mapped"], check=False
+                )
+
     def test_root_only_configuration_uses_the_calling_account(self):
         with (
             mock.patch.object(Path, "read_text", side_effect=PermissionError),

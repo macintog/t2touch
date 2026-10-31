@@ -37,6 +37,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Open `t2-touchid-verify` on the project's own screen when it runs from a
+  terminal, so it says when to touch the sensor and reports the match or
+  non-match in the same layout as enrollment. The stock `fprintd-verify`
+  client printed only "Verify started!" and waited silently. Without a
+  terminal, or without the screen installed, the stock client still runs.
 - Show why the desktop enrollment or verification screen stopped when the
   failure happened on the client side, such as an `EnrollStart` D-Bus error,
   and repeat that reason on stderr after the screen closes. fprintd's D-Bus
