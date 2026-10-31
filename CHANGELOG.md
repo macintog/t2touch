@@ -35,6 +35,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Show why the desktop enrollment or verification screen stopped when the
+  failure happened on the client side, such as an `EnrollStart` D-Bus error,
+  and repeat that reason on stderr after the screen closes. fprintd's D-Bus
+  error texts are fixed and identifier-free; only printable ASCII is kept and
+  the text is bounded. Previously such a failure showed only "Enrollment
+  stopped · No fingerprint was saved." with no way to tell it apart from a
+  sensor-side stop.
 - Report the messages of the project's own exception chain in the enrollment
   worker's `enrollment stopped` line as a JSON `detail=` list, alongside the
   existing class and reason fields. Only messages raised by `t2_*` modules are
