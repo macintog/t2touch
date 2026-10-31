@@ -61,6 +61,7 @@ import t2_linux_account
 import t2_mesa_enrollment_preparation
 import t2_native_state_restore
 import t2_mutation_journal
+import t2_activation_journal_retention
 import t2_mutation_registry
 import t2_native_caller_authorization
 import t2_native_mutation_authority
@@ -332,13 +333,23 @@ def _require_fresh_enrollment_state() -> None:
             if not any(True for _entry in entries):
                 continue
         # Enrollment journals that completed without changing the SEP identity
-        # set (for example one closed by recover-outcome) are retained evidence
-        # of the initial state, not state awaiting reconciliation.
+        # set (for example one closed by recover-outcome) and keybag activation
+        # journals that reached a resolved phase are retained evidence of the
+        # initial state, not state awaiting reconciliation.
         if (
             path == MUTATION_ROOT
             and t2_mutation_registry.retains_only_no_change_enrollments(path)
         ):
             continue
+        if path == ACTIVATION_ROOT:
+            try:
+                resolved = t2_activation_journal_retention.retains_only_resolved(
+                    path
+                )
+            except t2_activation_journal_retention.ActivationJournalRetentionError:
+                resolved = False
+            if resolved:
+                continue
         raise NativeEnrollmentError(
             "native first-enrollment state is not empty; reconcile retained state"
         )

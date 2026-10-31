@@ -84,7 +84,8 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             "no-change-journal": ((), ("a.jsonl",), (), True, False),
             "other-journal": ((), ("a.jsonl",), (), False, True),
             "catacomb-bytes": (("prepare",), ("a.jsonl",), (), None, True),
-            "activation": ((), (), ("x",), None, True),
+            "activation-resolved": ((), (), ("x",), None, False),
+            "activation-pending": ((), (), ("x",), None, True),
         }
         for name, (catacomb, mutations, activation, verdict, rejects) in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
@@ -103,6 +104,7 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                 for entry in activation:
                     (roots["ACTIVATION_ROOT"] / entry).touch()
                 retains = mock.Mock(return_value=verdict)
+                resolved = mock.Mock(return_value=name == "activation-resolved")
                 with (
                     mock.patch.object(native_enroll, "STATE_ROOT", root),
                     mock.patch.multiple(native_enroll, **roots),
@@ -111,6 +113,11 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                         native_enroll.t2_mutation_registry,
                         "retains_only_no_change_enrollments",
                         retains,
+                    ),
+                    mock.patch.object(
+                        native_enroll.t2_activation_journal_retention,
+                        "retains_only_resolved",
+                        resolved,
                     ),
                 ):
                     if rejects:
@@ -124,6 +131,10 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
                     retains.assert_not_called()
                 else:
                     retains.assert_called_once_with(roots["MUTATION_ROOT"])
+                if activation:
+                    resolved.assert_called_once_with(roots["ACTIVATION_ROOT"])
+                else:
+                    resolved.assert_not_called()
 
     def test_native_addition_uses_high_water_candidate_from_exact_inventory(self) -> None:
         selected = SimpleNamespace(apple_uid=501)

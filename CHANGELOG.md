@@ -20,7 +20,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enrollment journals that are complete and proved no SEP change (baseline,
   aborted before start, or reconciled without an identity) now count as the
   initial state in those checks and in the post-reboot and authority
-  publication candidate selectors. Any other journal kind, an unfinished or
+  publication candidate selectors, as do keybag activation journals that
+  reached a resolved phase (the failed enrollment's own activation record
+  otherwise blocked every later first enrollment the same way). Any other journal kind, an unfinished or
   post-reboot-pending entry, Catacomb bytes, per-user history or an authority
   manifest still go through reconciliation.
 - Let `recover-outcome` close a first enrollment whose master Catacomb save
