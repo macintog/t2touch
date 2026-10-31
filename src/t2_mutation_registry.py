@@ -224,3 +224,35 @@ def blocks_new_mutation(root: Path, *, excluding_kind: str | None = None) -> boo
         and (excluding_kind is None or entry.kind != excluding_kind)
         for entry in scan(root)
     )
+
+
+# Enrollment phases whose journals prove the SEP identity set did not change.
+NO_CHANGE_ENROLLMENT_PHASES = frozenset(
+    {
+        t2_enrollment_journal.EnrollmentPhase.BASELINE.value,
+        t2_enrollment_journal.EnrollmentPhase.ABORTED_BEFORE_START.value,
+        t2_enrollment_journal.EnrollmentPhase.RECONCILED.value,
+    }
+)
+
+
+def retains_only_no_change_enrollments(root: Path) -> bool:
+    """True when every retained journal is an enrollment that changed nothing.
+
+    A reconciled enrollment whose identity never existed (or never survived)
+    is complete evidence that the SEP returned to its baseline, so the paths
+    that require the initial pre-enrollment state may keep such journals.  Any
+    other kind, an unfinished or post-reboot-pending entry, or an unreadable
+    journal still requires reconciliation.
+    """
+    try:
+        entries = scan(root)
+    except MutationRegistryError:
+        return False
+    return all(
+        entry.kind == "enroll"
+        and entry.phase in NO_CHANGE_ENROLLMENT_PHASES
+        and not entry.blocks_new_mutation
+        and not entry.post_reboot_pending
+        for entry in entries
+    )

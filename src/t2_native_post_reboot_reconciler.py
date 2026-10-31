@@ -28,8 +28,6 @@ ROOT_UID = 0
 SOURCE_ROOT = Path(__file__).resolve().parent
 MUTATION_ROOT = t2_post_reboot_reconciler.MUTATION_ROOT
 CATACOMB_ROOT = Path("/var/lib/t2-touchid/catacomb")
-
-
 class NativePostRebootReconcilerError(RuntimeError):
     pass
 
@@ -168,11 +166,7 @@ def _pending_native_candidate() -> object | None:
                 candidates.append((path, history))
             elif (
                 history.baseline.get("baseline_version") != 2
-                or history.phase
-                not in {
-                    t2_enrollment_journal.EnrollmentPhase.BASELINE,
-                    t2_enrollment_journal.EnrollmentPhase.ABORTED_BEFORE_START,
-                }
+                or not t2_enrollment_journal.is_no_change_history(history)
             ):
                 later_mutation = True
         if interrupted_deletes:
@@ -348,11 +342,18 @@ def reconcile_external_deletion_if_needed(
     # A newly activated account has no enrollment authority or Catacomb yet.
     # External deletion reconciliation requires an earlier enrollment; making
     # it a prerequisite here prevents fprintd from accepting the first one.
-    # Only the empty initial state is a no-op. Retained mutation/Catacomb
+    # Only the initial state is a no-op: no manifest, no Catacomb bytes, no
+    # per-user history, and no mutation journal other than enrollments proven
+    # to have changed nothing.  Without an authority the child below cannot
+    # open a management lease, so a retained no-change journal would otherwise
+    # stop fprintd forever before the first fingerprint.  Retained Catacomb
     # evidence or an existing (even dangling) manifest still needs validation.
     if (
         not os.path.lexists(user_root / "authority.json")
-        and not any(MUTATION_ROOT.iterdir())
+        and (
+            not any(MUTATION_ROOT.iterdir())
+            or t2_mutation_registry.retains_only_no_change_enrollments(MUTATION_ROOT)
+        )
         and not any(CATACOMB_ROOT.iterdir())
         and not any(user_root.glob("*.jsonl"))
     ):
