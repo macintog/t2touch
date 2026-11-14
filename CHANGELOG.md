@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- Read-only pre-authority inventory (`t2-touchid-inventory --preclient` and
+  `bridge-xpc-probe.py --preclient-inventory`). It admits only the exact
+  successful empty-list sentinel and exact absent-Catacomb metadata, reports
+  `authority: unknown`, never creates or adopts authority, and fails closed on
+  other shapes. This lets a pre-enrollment compatibility check run without
+  weakening the full-inventory guard or duplicating the private parser.
+
 ## 0.1.2 - 2026-10-28
 
 On our test Mac, after T2Touch had run in Linux, macOS removed the account's

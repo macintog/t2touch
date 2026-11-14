@@ -1083,6 +1083,239 @@ def summarize_full_inventory(
     return public, private
 
 
+def _preclient_status_output(reply: object, name: str) -> tuple[int, object]:
+    """Return one bounded command status and its opaque output."""
+    if type(reply) is not list or len(reply) != 2:
+        raise ValueError(f"{name} reply is malformed")
+    status, output = reply
+    if (
+        type(status) is not int
+        or isinstance(status, bool)
+        or not -(2**31) <= status < 2**32
+    ):
+        raise ValueError(f"{name} reply status is malformed")
+    return status, output
+
+
+def _preclient_identity_records(
+    reply: object, name: str, record_size: int
+) -> tuple[bytes, ...]:
+    """Parse one identity list, admitting only the exact empty sentinel."""
+    status, output = _preclient_status_output(reply, name)
+    if status != 0:
+        raise ValueError(f"{name} query failed")
+    if is_biometric_nil_output(output):
+        return ()
+    if type(output) is not bytes or len(output) % record_size:
+        raise ValueError(f"{name} records are malformed")
+    return tuple(
+        output[offset : offset + record_size]
+        for offset in range(0, len(output), record_size)
+    )
+
+
+def _preclient_catacomb_metadata(replies: dict) -> tuple[bool, bool]:
+    """Return (UUID present, component present) for the exact absent baseline."""
+    uuid_status, uuid_output = _preclient_status_output(
+        replies["catacomb_uuid"], "Catacomb UUID"
+    )
+    hash_status, hash_output = _preclient_status_output(
+        replies["catacomb_hash"], "Catacomb hash"
+    )
+    if (uuid_status, hash_status) == (22, 22):
+        if (
+            type(uuid_output) is not bytes
+            or len(uuid_output) != 16
+            or any(uuid_output)
+            or type(hash_output) is not bytes
+            or len(hash_output) != 33
+            or any(hash_output)
+        ):
+            raise ValueError("absent Catacomb metadata is malformed")
+        return False, False
+    if (uuid_status, hash_status) != (0, 0):
+        raise ValueError("Catacomb metadata status is neither absent nor present")
+    if (
+        type(uuid_output) is not bytes
+        or len(uuid_output) != 16
+        or not any(uuid_output)
+        or type(hash_output) is not bytes
+        or len(hash_output) != 33
+    ):
+        raise ValueError("present Catacomb metadata is malformed")
+    return True, bool(hash_output[0])
+
+
+def summarize_preclient_inventory(
+    first: dict, second: dict, macos_user_id: int
+) -> dict:
+    """Validate a read-only pre-authority surface without adopting state.
+
+    The full inventory is a post-install check: it requires protocol v2 and
+    present Catacomb metadata.  Before native first-run the same wire surface
+    is legitimately empty, so this contract admits only the exact successful
+    empty-list sentinel and the exact absent-Catacomb metadata.  It never
+    provisions, adopts, recovers, or mutates anything.
+    """
+    if type(first) is not dict or type(second) is not dict:
+        raise ValueError("pre-authority inventory snapshots are malformed")
+    if first != second:
+        raise ValueError("pre-authority inventory changed between collections")
+    replies = first.get("replies")
+    events = first.get("events")
+    if type(replies) is not dict or type(events) is not dict:
+        raise ValueError("pre-authority inventory snapshots are malformed")
+    required = {
+        "protocol",
+        "global_identities",
+        "maximum_capacity",
+        "per_user_identities",
+        "free_capacity",
+        "catacomb_uuid",
+        "catacomb_hash",
+        "catacomb_state",
+        "sks_lock_state",
+    }
+    if set(replies) != required or set(events) != required:
+        raise ValueError("pre-authority inventory is incomplete")
+    if any(type(value) is not list or value for value in events.values()):
+        raise ValueError("pre-authority inventory emitted an unexpected service event")
+
+    protocol_status, protocol_output = _preclient_status_output(
+        replies["protocol"], "biometric protocol"
+    )
+    explicit_v2 = (
+        protocol_status == 0
+        and type(protocol_output) is bytes
+        and len(protocol_output) == 4
+        and struct.unpack("<I", protocol_output)[0] == 2
+    )
+    known_rejection = protocol_status == -536870206 and protocol_output == bytes(4)
+    bounded_protocol_query = (
+        protocol_status == 0
+        and type(protocol_output) is bytes
+        and len(protocol_output) == 4
+    )
+    if not (explicit_v2 or known_rejection or bounded_protocol_query):
+        raise ValueError("biometric protocol reply is malformed")
+
+    per_user_records = _preclient_identity_records(
+        replies["per_user_identities"], "per-user identity", 20
+    )
+    global_records = _preclient_identity_records(
+        replies["global_identities"], "global identity", 40
+    )
+    if any(
+        struct.unpack_from("<I", record)[0] != macos_user_id
+        for record in per_user_records
+    ):
+        raise ValueError("per-user identity inventory contains another user")
+    configured_global = {
+        record[:20]
+        for record in global_records
+        if struct.unpack_from("<I", record)[0] == macos_user_id
+    }
+    if configured_global != set(per_user_records):
+        raise ValueError("per-user and global identity records disagree")
+
+    uuid_present, component_present = _preclient_catacomb_metadata(replies)
+    if not uuid_present and (per_user_records or global_records):
+        raise ValueError("absent Catacomb has identity records")
+
+    maximum_status, maximum_output = _preclient_status_output(
+        replies["maximum_capacity"], "maximum identity capacity"
+    )
+    free_status, free_output = _preclient_status_output(
+        replies["free_capacity"], "identity free capacity"
+    )
+    if (
+        maximum_status != 0
+        or free_status != 0
+        or type(maximum_output) is not bytes
+        or len(maximum_output) != 4
+        or type(free_output) is not bytes
+        or len(free_output) != 4
+    ):
+        raise ValueError("identity capacity reply is malformed")
+    maximum = struct.unpack("<I", maximum_output)[0]
+    free = struct.unpack("<I", free_output)[0]
+    if (
+        free > maximum
+        or len(per_user_records) > maximum
+        or len(global_records) > maximum
+    ):
+        raise ValueError("identity capacity is inconsistent")
+
+    state_status, state_output = _preclient_status_output(
+        replies["catacomb_state"], "Catacomb state"
+    )
+    if (
+        state_status != 0
+        or type(state_output) is not bytes
+        or len(state_output) not in (8, 16)
+    ):
+        raise ValueError("Catacomb state reply is malformed")
+    try:
+        states = t2_catacomb_protocol.parse_user_states(state_output)
+    except t2_catacomb_protocol.CatacombProtocolError as error:
+        raise ValueError("Catacomb state records are malformed") from error
+    master = t2_catacomb_protocol.CatacombComponent.master()
+    selected = t2_catacomb_protocol.CatacombComponent.user(macos_user_id)
+    master_records = [record for record in states if record.component == master]
+    selected_records = [record for record in states if record.component == selected]
+    if len(master_records) != 1:
+        raise ValueError("Catacomb state has no unique master component")
+    if len(selected_records) > 1:
+        raise ValueError("Catacomb state repeats the selected user component")
+    if per_user_records and not selected_records:
+        raise ValueError("per-user identities have no Catacomb component")
+
+    sks_status, sks_output = _preclient_status_output(
+        replies["sks_lock_state"], "SKS lock state"
+    )
+    if (
+        sks_status != 0
+        or type(sks_output) is not bytes
+        or len(sks_output) != 4
+    ):
+        raise ValueError("SKS lock state reply is malformed")
+
+    absent_baseline = not uuid_present and not component_present
+    if absent_baseline:
+        if per_user_records or global_records:
+            raise ValueError("absent baseline contains identity records")
+        if len(states) != 1 or selected_records:
+            raise ValueError("absent baseline is not the master-only state")
+        state = "absent-baseline"
+    else:
+        state = "present"
+
+    return {
+        "schema_version": 1,
+        "mode": "preclient-inventory",
+        "diagnostic_contract": "pre-authority-v1",
+        "state": state,
+        "biometric_protocol_version": 2,
+        "biometric_protocol_attestation": (
+            "command-1" if explicit_v2 else "v2-global-identity-command"
+        ),
+        "per_user_identity_count": len(per_user_records),
+        "global_identity_count": len(global_records),
+        "maximum_identity_capacity": maximum,
+        "configured_user_free_capacity": free,
+        "catacomb_uuid_present": uuid_present,
+        "catacomb_component_present": component_present,
+        "catacomb_master_state": master_records[0].state,
+        "selected_user_component_present": bool(selected_records),
+        "catacomb_state_word_count": len(state_output) // 4,
+        "sks_lock_state_raw": struct.unpack("<I", sks_output)[0],
+        "double_collection_equal": True,
+        "authority": "unknown",
+        "mutation_performed": False,
+        "identifiers_redacted": True,
+    }
+
+
 def read_catacomb_payloads(
     archive_path: str, macos_user_id: int = 501
 ) -> list[tuple[str, int, bytes]]:
@@ -1684,6 +1917,14 @@ def main() -> None:
         help="collect complete inventory snapshots A and B on one connection",
     )
     parser.add_argument(
+        "--preclient-inventory",
+        action="store_true",
+        help=(
+            "collect read-only pre-authority inventory without provisioning "
+            "or adopting state"
+        ),
+    )
+    parser.add_argument(
         "--private-inventory-output",
         metavar="PATH",
         help="write raw root-only inventory to a new file (never stdout)",
@@ -1776,6 +2017,28 @@ def main() -> None:
     ) > 1:
         parser.error(
             "named, resolved-name, and resolved-slot matching conflict"
+        )
+    if args.preclient_inventory and any(
+        (
+            args.full_inventory,
+            args.private_inventory_output is not None,
+            args.match_seconds is not None,
+            args.authorized_credential_set_match,
+            args.private_match_events_output is not None,
+            args.reset_sensor,
+            args.cancel_operation,
+            args.load_calibration,
+            args.load_catacomb_archive is not None,
+            args.load_native_catacomb_root is not None,
+            args.load_biolockout_archive is not None,
+            args.load_biolockout_record is not None,
+            args.save_biolockout_output is not None,
+            args.save_biolockout_after_match_output is not None,
+        )
+    ):
+        parser.error(
+            "--preclient-inventory is read-only and cannot be combined with "
+            "mutation, save, or match options"
         )
     if not 0 <= args.macos_user_id <= 0xFFFFFFFF:
         parser.error("--macos-user-id must fit an unsigned 32-bit integer")
@@ -2080,6 +2343,19 @@ def main() -> None:
             client_version = min(api_version, 2)
             result["bridge_client_version"] = client_version
             operations.append("read bridge version")
+        if args.preclient_inventory:
+            if not args.initialize:
+                raise ValueError("--preclient-inventory requires --initialize")
+            first_preclient = collect_full_inventory(sock, args.macos_user_id)
+            second_preclient = collect_full_inventory(sock, args.macos_user_id)
+            result.update(
+                summarize_preclient_inventory(
+                    first_preclient,
+                    second_preclient,
+                    args.macos_user_id,
+                )
+            )
+            operations.append("pre-authority inventory snapshots A/B")
         if args.full_inventory:
             if not args.initialize:
                 raise ValueError("--full-inventory requires --initialize")
