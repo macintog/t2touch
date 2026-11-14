@@ -779,5 +779,136 @@ class ReplyTests(unittest.TestCase):
         self.assertEqual(private["biometric_protocol_version"], 2)
 
 
+class PreclientInventoryTests(unittest.TestCase):
+    COMMANDS = (
+        "protocol",
+        "global_identities",
+        "maximum_capacity",
+        "per_user_identities",
+        "free_capacity",
+        "catacomb_uuid",
+        "catacomb_hash",
+        "catacomb_state",
+        "sks_lock_state",
+    )
+
+    def absent_baseline(self):
+        return {
+            "replies": {
+                "protocol": [-536870206, b"\0" * 4],
+                "global_identities": [0, wire.BIOMETRIC_NIL_OUTPUT_SENTINEL],
+                "maximum_capacity": [0, struct.pack("<I", 5)],
+                "per_user_identities": [0, wire.BIOMETRIC_NIL_OUTPUT_SENTINEL],
+                "free_capacity": [0, struct.pack("<I", 5)],
+                "catacomb_uuid": [22, bytes(16)],
+                "catacomb_hash": [22, bytes(33)],
+                "catacomb_state": [
+                    0,
+                    struct.pack("<II", 0xFFFFFFFF, 1),
+                ],
+                "sks_lock_state": [0, struct.pack("<I", 21)],
+            },
+            "events": {name: [] for name in self.COMMANDS},
+        }
+
+    def present_inventory(self):
+        identity = struct.pack("<I", 501) + uuid.UUID(int=1).bytes
+        group = identity + struct.pack("<I", 1) + uuid.UUID(int=0).bytes
+        return {
+            "replies": {
+                "protocol": [0, struct.pack("<I", 2)],
+                "global_identities": [0, group],
+                "maximum_capacity": [0, struct.pack("<I", 5)],
+                "per_user_identities": [0, identity],
+                "free_capacity": [0, struct.pack("<I", 2)],
+                "catacomb_uuid": [0, uuid.UUID(int=3).bytes],
+                "catacomb_hash": [0, b"\x01" + b"h" * 32],
+                "catacomb_state": [
+                    0,
+                    struct.pack("<IIII", 0xFFFFFFFF, 3, 501, 3),
+                ],
+                "sks_lock_state": [0, struct.pack("<I", 552)],
+            },
+            "events": {name: [] for name in self.COMMANDS},
+        }
+
+    def test_absent_baseline_is_accepted_without_identifiers(self):
+        snapshot = self.absent_baseline()
+        result = MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+        self.assertEqual(result["state"], "absent-baseline")
+        self.assertEqual(result["biometric_protocol_version"], 2)
+        self.assertEqual(
+            result["biometric_protocol_attestation"],
+            "v2-global-identity-command",
+        )
+        self.assertEqual(result["per_user_identity_count"], 0)
+        self.assertEqual(result["global_identity_count"], 0)
+        self.assertFalse(result["catacomb_uuid_present"])
+        self.assertFalse(result["catacomb_component_present"])
+        self.assertFalse(result["selected_user_component_present"])
+        self.assertEqual(result["catacomb_master_state"], 1)
+        self.assertEqual(result["catacomb_state_word_count"], 2)
+        self.assertEqual(result["authority"], "unknown")
+        self.assertIs(result["mutation_performed"], False)
+        self.assertIs(result["identifiers_redacted"], True)
+        self.assertNotIn(wire.BIOMETRIC_NIL_OUTPUT_SENTINEL, str(result))
+
+    def test_present_state_is_reported_without_identifier_disclosure(self):
+        snapshot = self.present_inventory()
+        result = MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+        self.assertEqual(result["state"], "present")
+        self.assertEqual(result["per_user_identity_count"], 1)
+        self.assertEqual(result["global_identity_count"], 1)
+        self.assertTrue(result["catacomb_uuid_present"])
+        self.assertTrue(result["catacomb_component_present"])
+        self.assertTrue(result["selected_user_component_present"])
+        self.assertEqual(result["catacomb_master_state"], 3)
+        self.assertEqual(result["catacomb_state_word_count"], 4)
+        self.assertEqual(result["sks_lock_state_raw"], 552)
+        self.assertNotIn(str(uuid.UUID(int=1)), str(result))
+        self.assertNotIn(str(uuid.UUID(int=3)), str(result))
+
+    def test_absent_baseline_rejects_nonzero_metadata(self):
+        snapshot = self.absent_baseline()
+        snapshot["replies"]["catacomb_uuid"] = [
+            22,
+            uuid.UUID(int=4).bytes,
+        ]
+        with self.assertRaisesRegex(ValueError, "absent Catacomb"):
+            MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+
+    def test_absent_baseline_rejects_identity_records(self):
+        snapshot = self.absent_baseline()
+        identity = struct.pack("<I", 501) + uuid.UUID(int=1).bytes
+        snapshot["replies"]["per_user_identities"] = [0, identity]
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+
+    def test_malformed_protocol_query_fails_closed(self):
+        snapshot = self.absent_baseline()
+        snapshot["replies"]["protocol"] = [0, b""]
+        with self.assertRaisesRegex(ValueError, "biometric protocol"):
+            MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+
+    def test_unstable_snapshot_is_rejected(self):
+        first = self.absent_baseline()
+        second = self.absent_baseline()
+        second["replies"]["catacomb_hash"] = [22, b"\x01" + bytes(32)]
+        with self.assertRaisesRegex(ValueError, "changed between collections"):
+            MODULE.summarize_preclient_inventory(first, second, 501)
+
+    def test_unexpected_service_event_is_rejected(self):
+        snapshot = self.absent_baseline()
+        snapshot["events"]["protocol"] = [object()]
+        with self.assertRaisesRegex(ValueError, "unexpected service event"):
+            MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+
+    def test_free_capacity_above_maximum_is_rejected(self):
+        snapshot = self.absent_baseline()
+        snapshot["replies"]["free_capacity"] = [0, struct.pack("<I", 6)]
+        with self.assertRaisesRegex(ValueError, "capacity is inconsistent"):
+            MODULE.summarize_preclient_inventory(snapshot, snapshot, 501)
+
+
 if __name__ == "__main__":
     unittest.main()

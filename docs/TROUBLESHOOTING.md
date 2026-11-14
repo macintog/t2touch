@@ -353,6 +353,29 @@ This validates the complete imported Linux-native authority and binds its
 unchanged history to the current local account. It does not apply to macOS
 state, which still has no supported end-user migration command.
 
+## Checking state before native first-run
+
+`t2-touchid-inventory` normally needs a completed native authority and a
+present Catacomb. Before native first-run, use the read-only pre-authority
+mode:
+
+```sh
+sudo t2-touchid-inventory --preclient --json
+```
+
+It reports `state: absent-baseline` or `state: present`, with
+`authority: unknown` and `mutation_performed: false`. It never creates,
+adopts, recovers, or enrolls authority. The absent baseline is admitted only
+from the exact successful empty-list sentinel and exact-sized all-zero
+Catacomb metadata at status 22; any other shape fails closed. Protocol v2 is
+attested by a successful v2-only identity command, not by biometric command 1,
+which some T2 firmware rejects with `kIOReturnBadArgument`.
+
+Use this to answer whether the pre-authority surface is safe to precede native
+first-run. It does not replace native first-run, and it does not make a present
+Catacomb adoptable. The underlying research probe exposes the same contract as
+`bridge-xpc-probe.py --initialize --preclient-inventory`.
+
 ## Fingerprint inventory or enrollment is unavailable
 
 An empty inventory is normal before first enrollment and after deleting the

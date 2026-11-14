@@ -47,6 +47,33 @@ def stable_probe(identity_count=2):
     }
 
 
+def preclient_probe(**overrides):
+    value = {
+        "schema_version": 1,
+        "mode": "preclient-inventory",
+        "diagnostic_contract": "pre-authority-v1",
+        "state": "absent-baseline",
+        "biometric_protocol_version": 2,
+        "biometric_protocol_attestation": "v2-global-identity-command",
+        "per_user_identity_count": 0,
+        "global_identity_count": 0,
+        "maximum_identity_capacity": 5,
+        "configured_user_free_capacity": 5,
+        "catacomb_uuid_present": False,
+        "catacomb_component_present": False,
+        "catacomb_master_state": 1,
+        "selected_user_component_present": False,
+        "catacomb_state_word_count": 2,
+        "sks_lock_state_raw": 21,
+        "double_collection_equal": True,
+        "authority": "unknown",
+        "mutation_performed": False,
+        "identifiers_redacted": True,
+    }
+    value.update(overrides)
+    return value
+
+
 class InventoryTests(unittest.TestCase):
     def test_summarizes_without_biometric_identifiers(self):
         probe = stable_probe()
@@ -79,6 +106,54 @@ class InventoryTests(unittest.TestCase):
             probe = stable_probe(1)
             probe["identity_inventory_repeat_equal"] = False
             MODULE.summarize_probe(probe, 501)
+
+    def test_preclient_absent_baseline_is_reported(self):
+        result = MODULE.summarize_preclient_probe(preclient_probe())
+        self.assertEqual(result["state"], "absent-baseline")
+        self.assertEqual(result["mode"], "preclient-inventory")
+        self.assertEqual(result["diagnostic_contract"], "pre-authority-v1")
+        self.assertEqual(result["per_user_identity_count"], 0)
+        self.assertFalse(result["catacomb_uuid_present"])
+        self.assertEqual(result["authority"], "unknown")
+        self.assertIs(result["mutation_performed"], False)
+
+    def test_preclient_requires_unknown_authority(self):
+        with self.assertRaisesRegex(MODULE.InventoryError, "claims authority"):
+            MODULE.summarize_preclient_probe(
+                preclient_probe(authority="linux-native")
+            )
+
+    def test_preclient_rejects_mutation(self):
+        with self.assertRaisesRegex(MODULE.InventoryError, "mutation"):
+            MODULE.summarize_preclient_probe(
+                preclient_probe(mutation_performed=True)
+            )
+
+    def test_preclient_rejects_live_absent_baseline(self):
+        with self.assertRaisesRegex(MODULE.InventoryError, "live state"):
+            MODULE.summarize_preclient_probe(
+                preclient_probe(per_user_identity_count=1)
+            )
+
+    def test_preclient_present_state_is_reported(self):
+        result = MODULE.summarize_preclient_probe(
+            preclient_probe(
+                state="present",
+                per_user_identity_count=1,
+                global_identity_count=1,
+                configured_user_free_capacity=4,
+                catacomb_uuid_present=True,
+                catacomb_component_present=True,
+                selected_user_component_present=True,
+            )
+        )
+        self.assertEqual(result["state"], "present")
+        self.assertEqual(result["per_user_identity_count"], 1)
+        self.assertTrue(result["catacomb_component_present"])
+
+    def test_preclient_rejects_unknown_state(self):
+        with self.assertRaisesRegex(MODULE.InventoryError, "state is unknown"):
+            MODULE.summarize_preclient_probe(preclient_probe(state="unknown"))
 
 
 if __name__ == "__main__":

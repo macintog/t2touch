@@ -118,9 +118,112 @@ def summarize_probe(probe: Any, expected_uid: int) -> dict[str, Any]:
     return result
 
 
+def summarize_preclient_probe(probe: Any) -> dict[str, Any]:
+    if not isinstance(probe, dict):
+        raise InventoryError("pre-authority probe returned a non-object result")
+    if probe.get("schema_version") != 1:
+        raise InventoryError("pre-authority schema version is not supported")
+    if probe.get("mode") != "preclient-inventory":
+        raise InventoryError("probe did not return a pre-authority inventory")
+    if probe.get("diagnostic_contract") != "pre-authority-v1":
+        raise InventoryError("pre-authority diagnostic contract is not supported")
+    if probe.get("mutation_performed") is not False:
+        raise InventoryError("pre-authority probe reports a mutation")
+    if probe.get("authority") != "unknown":
+        raise InventoryError("pre-authority probe claims authority")
+    if probe.get("identifiers_redacted") is not True:
+        raise InventoryError("pre-authority probe did not redact identifiers")
+    if probe.get("double_collection_equal") is not True:
+        raise InventoryError("pre-authority inventory changed during collection")
+    state = probe.get("state")
+    if state not in {"absent-baseline", "present"}:
+        raise InventoryError("pre-authority state is unknown")
+    if (
+        probe.get("biometric_protocol_version") != 2
+        or probe.get("biometric_protocol_attestation")
+        not in {"command-1", "v2-global-identity-command"}
+    ):
+        raise InventoryError("biometric protocol v2 is not attested")
+    for field in (
+        "per_user_identity_count",
+        "global_identity_count",
+        "maximum_identity_capacity",
+        "configured_user_free_capacity",
+        "catacomb_master_state",
+        "catacomb_state_word_count",
+        "sks_lock_state_raw",
+    ):
+        value = probe.get(field)
+        if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
+            raise InventoryError(f"pre-authority {field} is invalid")
+    maximum = probe["maximum_identity_capacity"]
+    free = probe["configured_user_free_capacity"]
+    per_user = probe["per_user_identity_count"]
+    global_count = probe["global_identity_count"]
+    if free > maximum or per_user > maximum or global_count > maximum:
+        raise InventoryError("pre-authority identity counts exceed capacity")
+    for field in (
+        "catacomb_uuid_present",
+        "catacomb_component_present",
+        "selected_user_component_present",
+    ):
+        if type(probe.get(field)) is not bool:
+            raise InventoryError(f"pre-authority {field} is invalid")
+    if state == "absent-baseline" and (
+        per_user
+        or global_count
+        or probe["catacomb_uuid_present"]
+        or probe["catacomb_component_present"]
+        or probe["selected_user_component_present"]
+    ):
+        raise InventoryError("absent baseline contains live state")
+    if state == "present" and not (
+        per_user
+        or global_count
+        or probe["catacomb_uuid_present"]
+        or probe["catacomb_component_present"]
+        or probe["selected_user_component_present"]
+    ):
+        raise InventoryError("present state has no matching evidence")
+    return {
+        "schema_version": 1,
+        "mode": "preclient-inventory",
+        "diagnostic_contract": "pre-authority-v1",
+        "state": state,
+        "biometric_protocol_version": 2,
+        "biometric_protocol_attestation": probe[
+            "biometric_protocol_attestation"
+        ],
+        "per_user_identity_count": per_user,
+        "global_identity_count": global_count,
+        "maximum_identity_capacity": maximum,
+        "configured_user_free_capacity": free,
+        "catacomb_uuid_present": probe["catacomb_uuid_present"],
+        "catacomb_component_present": probe["catacomb_component_present"],
+        "catacomb_master_state": probe["catacomb_master_state"],
+        "selected_user_component_present": probe[
+            "selected_user_component_present"
+        ],
+        "catacomb_state_word_count": probe["catacomb_state_word_count"],
+        "sks_lock_state_raw": probe["sks_lock_state_raw"],
+        "double_collection_equal": True,
+        "authority": "unknown",
+        "mutation_performed": False,
+        "identifiers_redacted": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit compact JSON")
+    parser.add_argument(
+        "--preclient",
+        action="store_true",
+        help=(
+            "read-only pre-authority inventory; never provisions or adopts "
+            "authority"
+        ),
+    )
     args = parser.parse_args()
     try:
         config = read_assignments(CONFIG)
@@ -138,6 +241,9 @@ def main() -> int:
         probe = project / "src/bridge-xpc-probe.py"
         if not python.is_file() or not probe.is_file() or not host or not interface:
             raise InventoryError("Touch ID installation is incomplete")
+        probe_mode = (
+            "--preclient-inventory" if args.preclient else "--full-inventory"
+        )
         completed = subprocess.run(
             [
                 "/usr/bin/flock",
@@ -153,7 +259,7 @@ def main() -> int:
                 "--port", port_text,
                 "--macos-user-id", str(uid),
                 "--initialize",
-                "--full-inventory",
+                probe_mode,
             ],
             check=False,
             capture_output=True,
@@ -164,7 +270,12 @@ def main() -> int:
         if completed.returncode:
             detail = completed.stderr.strip().splitlines()[-1:] or ["unknown error"]
             raise InventoryError(f"BridgeXPC probe failed: {detail[0]}")
-        result = summarize_probe(json.loads(completed.stdout), uid)
+        probe_result = json.loads(completed.stdout)
+        result = (
+            summarize_preclient_probe(probe_result)
+            if args.preclient
+            else summarize_probe(probe_result, uid)
+        )
     except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired, InventoryError) as error:
         parser.error(str(error))
     print(json.dumps(result, separators=(",", ":") if args.json else None, indent=None if args.json else 2, sort_keys=True))
