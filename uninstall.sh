@@ -67,6 +67,10 @@ if [[ -d $applesmc_dkms_state ]]; then
   dkms remove -m applesmc-t2touch -v 0.1.0 --all
 fi
 rm -rf -- "$applesmc_dkms_source"
+rm -f -- /etc/systemd/system/t2-smc-boot-state.service /usr/local/sbin/t2-smc-boot-state \
+  /etc/systemd/system/sysinit.target.wants/t2-smc-boot-state.service \
+  /etc/udev/rules.d/90-t2-smc-boot-state.rules
+udevadm control --reload 2>/dev/null || true
 # Apply the same ownership-checked retirement as upgrades. Unknown old copies
 # remain visible in the report; do not delete them in the generic loop below.
 python3 "$source_dir/tools/retire-path-tools.py" --apply

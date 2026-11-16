@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Start the one-shot T2 SEP boot-state publisher when the macsmc character
+# device appears (Linux 7.3+ T2 kernels). Absent on applesmc kernels.
+ACTION=="add", SUBSYSTEM=="misc", KERNEL=="smc", TAG+="systemd", ENV{SYSTEMD_WANTS}+="t2-smc-boot-state.service"

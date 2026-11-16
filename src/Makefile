@@ -8,7 +8,7 @@ LDHARDEN := -pie -Wl,-z,relro,-z,now,-z,noexecstack
 
 .PHONY: all module recovery-tools clean
 
-all: module t2-aks-tool t2-pam-fingerprint-prompt pam_t2touch_action_prompt.so t2-recovery-usb-observer
+all: module t2-aks-tool t2-pam-fingerprint-prompt pam_t2touch_action_prompt.so t2-recovery-usb-observer t2-smc-boot-state
 
 module:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
@@ -25,6 +25,9 @@ pam_t2touch_action_prompt.so: pam_t2touch_action_prompt.c
 t2-recovery-usb-observer: t2-recovery-usb-observer.c
 	$(CC) -O2 -Wall -Wextra -Werror $(HARDEN) $(LDHARDEN) -o t2-recovery-usb-observer t2-recovery-usb-observer.c
 
+t2-smc-boot-state: t2-smc-boot-state.c
+	$(CC) -O2 -Wall -Wextra -Werror $(HARDEN) $(LDHARDEN) -o t2-smc-boot-state t2-smc-boot-state.c
+
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
-	$(RM) t2-aks-tool t2-pam-fingerprint-prompt pam_t2touch_action_prompt.so t2-recovery-usb-observer
+	$(RM) t2-aks-tool t2-pam-fingerprint-prompt pam_t2touch_action_prompt.so t2-recovery-usb-observer t2-smc-boot-state

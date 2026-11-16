@@ -147,10 +147,11 @@ enable_applesmc_next_boot() {
 # the ACPI SMC identity; older driver layouts expose a platform device.
 # shellcheck disable=SC2120 # The optional root argument is for tests.
 applesmc_boot_result() {
-  local sys_root=${1:-/sys} path
+  local sys_root=${1:-/sys} run_root=${2:-/run} path
   local -a results=()
   for path in "$sys_root"/bus/acpi/devices/APP0001:*/t2_sep_boot_state \
-    "$sys_root"/bus/platform/devices/applesmc*/t2_sep_boot_state; do
+    "$sys_root"/bus/platform/devices/applesmc*/t2_sep_boot_state \
+    "$run_root"/t2touch/t2_sep_boot_state; do
     [[ -e $path ]] || continue
     [[ -r $path ]] || { printf '%s\n' unavailable; return; }
     local value
@@ -166,7 +167,41 @@ applesmc_boot_result() {
   fi
 }
 
+# Linux 7.3+ drives the T2 SMC through the macsmc MFD stack (macsmc-acpi bound
+# to APP0001, /dev/smc). applesmc cannot bind there, so the boot state is
+# published from userspace by t2-smc-boot-state.service instead.
+# shellcheck disable=SC2120 # The optional root arguments are for tests.
+macsmc_active() {
+  local sys_root=${1:-/sys} dev_root=${2:-/dev}
+  [[ -c $dev_root/smc ]] &&
+    compgen -G "$sys_root/bus/platform/drivers/macsmc-acpi/APP0001:*" >/dev/null
+}
+
+ensure_macsmc_publisher() {
+  install -o root -g root -m 0755 "$source_dir/src/t2-smc-boot-state" \
+    /usr/local/sbin/t2-smc-boot-state || return 1
+  install -o root -g root -m 0644 \
+    "$source_dir/systemd/system/t2-smc-boot-state.service" \
+    /etc/systemd/system/t2-smc-boot-state.service || return 1
+  # The applesmc options and softdep do not apply under macsmc, and the
+  # transport must not pull the in-tree applesmc in next to macsmc.
+  rm -f -- /etc/modprobe.d/t2-sep-boot-state.conf
+  # udev starts the unit when /dev/smc appears; misc devices are otherwise not
+  # visible to systemd, so a unit-level device dependency would time out.
+  install -o root -g root -m 0644 \
+    "$source_dir/udev/90-t2-smc-boot-state.rules" \
+    /etc/udev/rules.d/90-t2-smc-boot-state.rules || return 1
+  udevadm control --reload || return 1
+  # Earlier revisions enabled the unit into sysinit.target; drop that link.
+  rm -f -- /etc/systemd/system/sysinit.target.wants/t2-smc-boot-state.service
+  systemctl daemon-reload || return 1
+}
+
 ensure_applesmc_on_disk() {
+  if macsmc_active; then
+    ensure_macsmc_publisher || return 2
+    return 0
+  fi
   # A resident replacement can outlive DKMS removal. Restore the next-boot
   # module even if this session already published boot state successfully.
   if ! modinfo -k "$(uname -r)" -p applesmc 2>/dev/null |
@@ -207,7 +242,7 @@ check_applesmc_prerequisite() {
       ;;
     absent|disabled)
       ensure_applesmc_on_disk || return 2
-      enable_applesmc_next_boot || return 2
+      macsmc_active || enable_applesmc_next_boot || return 2
       echo "Restart when convenient, then rerun ./install-omarchy.sh." >&2
       emit_next_step "Restart when convenient, then rerun ./install-omarchy.sh."
       return 3
