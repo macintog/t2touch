@@ -38,7 +38,8 @@ rebuild_boot_images
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertEqual(result.stdout.strip(), expected)
 
-    def run_gate(self, result, disk=True, fail_stage=False, active_upgrade=False):
+    def run_gate(self, result, disk=True, fail_stage=False, active_upgrade=False,
+                 macsmc=False):
         return subprocess.run(
             ["bash", "-c", '''
 set -euo pipefail
@@ -47,14 +48,52 @@ applesmc_boot_result() { printf '%s\n' "$RESULT"; }
 modinfo() { [[ $DISK == yes ]] && printf 't2_sep_boot_state: publisher\n'; }
 stage_applesmc_prerequisite() { echo staged; [[ $FAIL_STAGE == no ]]; }
 enable_applesmc_next_boot() { echo boot-options; }
+macsmc_active() { [[ $MACSMC == yes ]]; }
+ensure_macsmc_publisher() { echo macsmc-publisher; [[ $FAIL_STAGE == no ]]; }
 check_applesmc_prerequisite "$ACTIVE_UPGRADE" || exit $?
 echo product-ready
 ''', "fixture", str(HELPER)],
             env={**os.environ, "RESULT": result, "DISK": "yes" if disk else "no",
                  "FAIL_STAGE": "yes" if fail_stage else "no",
-                 "ACTIVE_UPGRADE": "1" if active_upgrade else "0"},
+                 "ACTIVE_UPGRADE": "1" if active_upgrade else "0",
+                 "MACSMC": "yes" if macsmc else "no"},
             capture_output=True, text=True, check=False,
         )
+
+    def test_macsmc_absent_publisher_installs_service_then_stops(self):
+        result = self.run_gate("absent", disk=False, macsmc=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("macsmc-publisher", lines)
+        self.assertNotIn("staged", lines)
+        self.assertNotIn("boot-options", lines)
+        self.assertNotIn("product-ready", lines)
+
+    def test_macsmc_response_continues_without_applesmc_staging(self):
+        result = self.run_gate("response-received:1", disk=False, macsmc=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["macsmc-publisher", "product-ready"])
+
+    def test_macsmc_publisher_install_failure_cannot_report_ready(self):
+        result = self.run_gate("response-received:1", macsmc=True, fail_stage=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("product-ready", result.stdout)
+
+    def test_macsmc_detection_requires_device_and_bound_driver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def active():
+                return subprocess.run(
+                    ["bash", "-c", 'source "$1"; macsmc_active "$2/sys" "$2/dev"',
+                     "fixture", str(HELPER), directory],
+                    capture_output=True, text=True, check=False,
+                ).returncode == 0
+            self.assertFalse(active())
+            (root / "sys/bus/platform/drivers/macsmc-acpi/APP0001:00").mkdir(parents=True)
+            # A regular file is not a character device.
+            (root / "dev").mkdir()
+            (root / "dev/smc").write_text("")
+            self.assertFalse(active())
 
     def test_successful_live_and_disk_driver_need_no_staging(self):
         result = self.run_gate("response-received:1")
@@ -288,7 +327,7 @@ record_prepared_transport_update abcdef0123456789 ABCDEF0123456789
                      root / "bus/platform/devices/applesmc.0/t2_sep_boot_state"]
             def read():
                 result = subprocess.run(
-                    ["bash", "-c", 'source "$1"; applesmc_boot_result "$2"',
+                    ["bash", "-c", 'source "$1"; applesmc_boot_result "$2" "$2/run"',
                      "fixture", str(HELPER), directory],
                     capture_output=True, text=True, check=True,
                 )
@@ -301,6 +340,24 @@ record_prepared_transport_update abcdef0123456789 ABCDEF0123456789
             self.assertEqual(read(), "response-received:1")
             paths[1].parent.mkdir(parents=True)
             paths[1].write_text("response-received:1\n")
+            self.assertEqual(read(), "ambiguous")
+
+    def test_reads_macsmc_userspace_publisher_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result_file = Path(directory) / "run/t2touch/t2_sep_boot_state"
+            def read():
+                return subprocess.run(
+                    ["bash", "-c", 'source "$1"; applesmc_boot_result "$2" "$2/run"',
+                     "fixture", str(HELPER), directory],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            self.assertEqual(read(), "absent")
+            result_file.parent.mkdir(parents=True)
+            result_file.write_text("response-received:1\n")
+            self.assertEqual(read(), "response-received:1")
+            sysfs = Path(directory) / "bus/acpi/devices/APP0001:00/t2_sep_boot_state"
+            sysfs.parent.mkdir(parents=True)
+            sysfs.write_text("response-received:1\n")
             self.assertEqual(read(), "ambiguous")
 
     def test_update_preparation_records_recovery_before_retirement(self):

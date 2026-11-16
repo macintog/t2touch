@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Publish the typed T2 SEP boot state through macsmc (/dev/smc) on kernels
+# where applesmc is replaced by the macsmc MFD stack (Linux 7.3+). Started
+# once per boot by udev (90-t2-smc-boot-state.rules) when /dev/smc appears,
+# and ordered before the SEP transport.
+[Unit]
+Description=Apple T2 SEP boot-state publisher (macsmc)
+DefaultDependencies=no
+After=dev-smc.device systemd-tmpfiles-setup.service
+Before=t2-sep-transport.service t2-biometric-port-refresh.service
+ConditionPathExists=/dev/smc
+ConditionPathExists=!/run/t2touch/t2_sep_boot_state
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/t2-touchid.conf
+ExecStart=/usr/local/sbin/t2-smc-boot-state --publish
+TimeoutStartSec=60
+DevicePolicy=closed
+DeviceAllow=/dev/smc rw
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+# systemd creates /run/t2touch before namespacing and keeps the result file
+# after the oneshot exits; ReadWritePaths= would fail on a fresh /run.
+RuntimeDirectory=t2touch
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
