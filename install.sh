@@ -410,6 +410,9 @@ install -d -o root -g root -m 0700 \
   /var/lib/t2-touchid /var/lib/t2-touchid/users \
   /var/lib/t2-touchid/mutations /var/lib/t2-touchid/recovery-anchors \
   /var/lib/t2-touchid/external-reconciliation-backups
+# install -d applies -m only to the leaf; the parent must be root-private too.
+install -d -o root -g root -m 0700 /run/t2-touchid
+chmod 0700 /run/t2-touchid
 install -d -o root -g root -m 0700 /run/t2-touchid/workers
 install -o root -g root -m 0755 "$source_dir/src/"*.py "$target_dir/src/"
 install -o root -g root -m 0755 "$source_dir/src/t2_touchid_cli.py" /usr/local/bin/t2touch
