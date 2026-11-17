@@ -582,7 +582,9 @@ def _sleep_inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
     if process.poll() is not None:
         return False
     completed = subprocess.run(
-        [str(SYSTEMD_INHIBIT), "--list", "--json=short"],
+        ["/usr/bin/busctl", "--system", "--json=short", "call",
+         "org.freedesktop.login1", "/org/freedesktop/login1",
+         "org.freedesktop.login1.Manager", "ListInhibitors"],
         check=False,
         capture_output=True,
         timeout=2,
@@ -590,15 +592,25 @@ def _sleep_inhibitor_registered(process: subprocess.Popen[bytes]) -> bool:
     if completed.returncode:
         return False
     try:
-        records = json.loads(completed.stdout)
+        document = json.loads(completed.stdout)
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    return isinstance(records, list) and any(
-        isinstance(record, dict)
-        and record.get("pid") == process.pid
-        and record.get("who") == "t2-touchid-management"
-        and record.get("what") == "sleep"
-        and record.get("mode") == "block"
+    if (not isinstance(document, dict) or document.get("type") != "a(ssssuu)"
+            or not isinstance(document.get("data"), list)
+            or len(document["data"]) != 1
+            or not isinstance(document["data"][0], list)):
+        return False
+    records = document["data"][0]
+    # logind's signature is (what, who, why, mode, uid, pid). Query it
+    # directly: systemd-inhibit --list does not support JSON on Ubuntu.
+    return process.poll() is None and any(
+        isinstance(record, list) and len(record) == 6
+        and all(isinstance(value, str) for value in record[:4])
+        and all(type(value) is int and 0 <= value < (1 << 32) for value in record[4:])
+        and record[5] == process.pid
+        and record[1] == "t2-touchid-management"
+        and record[0] == "sleep"
+        and record[3] == "block"
         for record in records
     )
 
