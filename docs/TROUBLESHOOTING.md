@@ -368,6 +368,44 @@ The installed services own Bridge network preparation, discovery, authority
 activation, and reconciliation. Manual keybag-loading sequences from early
 research are not installation prerequisites.
 
+## First enrollment saved the user Catacomb but not the master
+
+On a Linux-only install the first enrollment creates the whole Catacomb
+generation. `t2-touchid-manage status` then shows `new_mutation_blocked: true`
+with every listed category at zero, and the enrollment journal ends with
+`CATACOMB_CONFIRMED` for `user_<UID>.cat` followed by
+`CATACOMB_PERSISTENCE_OUTCOME_UNKNOWN` for `master.cat` at
+`stage=prepare` with `host_commit_possible=False`. The worker's
+`enrollment stopped` line carries the failing bridge check in `detail=`.
+Locally, `/var/lib/t2-touchid/catacomb/prepare/` holds only the staged user
+file and no `commit/` directory exists.
+
+The SEP still holds the new identity, but nothing was committed on the host.
+While bridgeOS stays warm, that staged file is the only durable copy of the
+fingerprint; do not remove it, and do not rerun enrollment. No command finishes
+this save. Report the `detail=` text with the journal milestones.
+
+If you accept re-enrolling that finger, a cold bridgeOS restart returns the
+SEP to the pre-enrollment surface (no identities, no Catacomb, master at state
+1). After such a restart, `sudo t2-touchid-enroll recover-outcome` proves the
+SEP and host both equal the baseline, discards the staged user file, and
+closes the journal as a no-change recovery. It refuses while the SEP still
+reports the identity or a Catacomb, so a warm restart changes nothing and the
+staged file stays in place. Enrollment is unblocked once `status` reports the
+mutation as complete.
+
+The closed journal stays under `/var/lib/t2-touchid/mutations/`. Because the
+first enrollment never published the per-user authority,
+`t2-touchid-post-reboot.service` used to treat that retained journal as state
+needing external-deletion reconciliation, a child command that cannot run
+without the authority, so fprintd failed its dependency at every start with
+`reason: null`. fprintd's first-enrollment bootstrap and the enrollment worker
+likewise required empty mutation and activation directories, so
+`t2-touchid-enroll` ended at "Enrollment stopped" with no reason (the failed
+attempt's resolved keybag activation journal was enough). Those checks now
+recognise a complete no-change enrollment journal and resolved activation
+journals as part of the initial state.
+
 ## Deletion failed and enrollment is now blocked
 
 A deletion error can mean SEP removed the fingerprint but local persistence did

@@ -123,6 +123,35 @@ class FprintdEnrollmentTUITests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("38%", screen)
             self.assertIn(ui._reference_view()[0], screen)
 
+    async def test_client_failure_is_shown_on_the_stopped_screen(self):
+        class FailingUI(CompletedUI):
+            operation = "enroll"
+            terminal = None
+            terminal_detail = None
+
+            async def run(self) -> int:
+                self.completed.set()
+                raise MODULE.EnrollmentUIError(
+                    "fprintd EnrollStart failed: native first-enrollment state "
+                    "is not empty; reconcile retained state\x1b[2J\u00e9"
+                )
+
+        ui = FailingUI()
+        stop = asyncio.Event()
+        stop.set()
+        with mock.patch.object(MODULE.sys.stdout, "isatty", return_value=False):
+            self.assertEqual(await MODULE._present_until_closed(ui, stop), 1)
+        self.assertEqual(ui.terminal, "ENROLLMENT STOPPED")
+        self.assertEqual(
+            ui.terminal_detail,
+            "fprintd EnrollStart failed: native first-enrollment state "
+            "is not empty; reconcile retained state[2J",
+        )
+        self.assertEqual(
+            MODULE._public_error_detail(OSError("")), "OSError"
+        )
+        self.assertEqual(len(MODULE._public_error_detail(OSError("x" * 500))), 160)
+
     async def test_terminal_result_remains_present_until_window_closes(self):
         ui = CompletedUI()
         stop = asyncio.Event()

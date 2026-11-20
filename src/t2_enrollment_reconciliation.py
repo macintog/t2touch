@@ -547,7 +547,20 @@ def classify(
         raise EnrollmentReconciliationError("host component metadata changed")
     if bootstrap:
         baseline_catacomb_uuid = baseline["sep_catacomb"]["uuid"]
-        if uuid.UUID(baseline_catacomb_uuid).int == 0:
+        # A first enrollment that never committed a host component can be
+        # followed by a cold bridgeOS restart, after which the SEP again
+        # reports no Catacomb at all. That is the baseline surface, not a new
+        # generation, so it is admitted only when nothing else changed either.
+        returned_to_absent_baseline = (
+            not catacomb_present
+            and not live_after
+            and not added
+            and baseline["sep_catacomb"]["present"] is False
+            and catacomb["uuid"] == baseline_catacomb_uuid
+        )
+        if returned_to_absent_baseline:
+            invalid_bootstrap_uuid = False
+        elif uuid.UUID(baseline_catacomb_uuid).int == 0:
             invalid_bootstrap_uuid = (
                 uuid.UUID(catacomb["uuid"]).int == 0
                 or catacomb["uuid"] == baseline_catacomb_uuid

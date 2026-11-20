@@ -35,6 +35,34 @@ class MutationRegistryTests(unittest.TestCase):
             self.assertEqual(entry.phase, "baseline-reconciled")
             self.assertFalse(entry.blocks_new_mutation)
 
+    def test_retains_only_no_change_enrollments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            self.assertTrue(registry.retains_only_no_change_enrollments(root))
+            mutation.create(
+                root / "00000000-0000-0000-0000-000000000070.jsonl",
+                "enroll",
+                baseline(),
+                operation_id="00000000-0000-0000-0000-000000000070",
+            )
+            self.assertTrue(registry.retains_only_no_change_enrollments(root))
+            rename_path = root / "00000000-0000-0000-0000-000000000071.jsonl"
+            operation_id, _record = mutation.create(
+                rename_path,
+                "rename",
+                baseline(),
+                operation_id="00000000-0000-0000-0000-000000000071",
+            )
+            self.assertFalse(registry.retains_only_no_change_enrollments(root))
+            rename_path.unlink()
+            self.assertTrue(registry.retains_only_no_change_enrollments(root))
+            (root / "retained.jsonl").touch()
+            self.assertFalse(registry.retains_only_no_change_enrollments(root))
+            (root / "retained.jsonl").unlink()
+            root.chmod(0o755)
+            self.assertFalse(registry.retains_only_no_change_enrollments(root))
+
     def test_routes_completed_enrollment_and_pending_rename_without_ids(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

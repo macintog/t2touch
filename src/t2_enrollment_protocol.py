@@ -262,6 +262,13 @@ def parse_enrollment_result(event: ServiceEvent) -> EnrollmentIdentity:
     return EnrollmentIdentity(user_id, identity_uuid, group_type, group_uuid)
 
 
+def validate_statistics_payload(event: ServiceEvent) -> None:
+    if event.version != 1:
+        raise EnrollmentProtocolError("statistics telemetry version is unsupported")
+    if len(event.payload) < STATISTICS_MIN_PAYLOAD_SIZE:
+        raise EnrollmentProtocolError("statistics telemetry payload is truncated")
+
+
 def validate_status_payload(event: ServiceEvent) -> None:
     """Validate the optional message-status record without retaining its data."""
     if not event.payload:
@@ -386,8 +393,10 @@ class EnrollmentStateMachine:
         # these on the same callback stream during a normal match, and they do
         # not advance, complete, or select an enrollment identity.
         if event.envelope_type == SERVICE_STATISTICS and event.version == 1:
-            if len(event.payload) < STATISTICS_MIN_PAYLOAD_SIZE:
-                self._freeze("statistics telemetry payload is truncated")
+            try:
+                validate_statistics_payload(event)
+            except EnrollmentProtocolError as error:
+                self._freeze(str(error))
             return EnrollmentTransition(EnrollmentAction.IGNORE_TELEMETRY, self.state)
         # Exact macOS 15.7 / 24G830 accepts only version 1 for the sensor-
         # recovery-reason envelope. It logs the decoded ordinal, forwards it

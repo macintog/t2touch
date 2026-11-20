@@ -30,6 +30,112 @@ def identifier(number: int) -> str:
 
 
 class NativeEnrollmentAuthorityTests(unittest.TestCase):
+    def test_post_reboot_candidate_skips_retained_no_change_journals(self) -> None:
+        journal = native_enroll.t2_enrollment_journal
+        mapping_set = SimpleNamespace(generation="gen")
+        selected = SimpleNamespace(
+            linux_uid=1000, apple_uid=501, account_uuid="acct", bag_uuid="bag"
+        )
+        baseline = {
+            "baseline_version": 2,
+            "caller_linux_uid": 1000,
+            "target_linux_uid": 1000,
+            "apple_uid": 501,
+            "account_uuid": "acct",
+            "bag_uuid": "bag",
+            "mapping_generation": "gen",
+        }
+        histories = {
+            "a.jsonl": SimpleNamespace(
+                phase=journal.EnrollmentPhase.RECONCILED,
+                terminal_identity_uuid=None,
+                baseline=baseline,
+            ),
+            "b.jsonl": SimpleNamespace(
+                phase=journal.EnrollmentPhase.RECONCILED,
+                terminal_identity_uuid=identifier(7),
+                baseline=baseline,
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in histories:
+                (root / name).touch()
+            with (
+                mock.patch.object(native_enroll, "MUTATION_ROOT", root),
+                mock.patch.object(
+                    journal, "read", side_effect=lambda path: histories[path.name]
+                ),
+            ):
+                path, history = native_enroll._pending_post_reboot_journal(
+                    mapping_set, selected
+                )
+                self.assertEqual(path.name, "b.jsonl")
+                self.assertIs(history, histories["b.jsonl"])
+                histories["a.jsonl"].terminal_identity_uuid = identifier(3)
+                with self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError, "exactly one reconciled"
+                ):
+                    native_enroll._pending_post_reboot_journal(mapping_set, selected)
+
+    def test_fresh_enrollment_state_keeps_only_no_change_journals(self) -> None:
+        cases = {
+            "empty": ((), (), (), None, False),
+            "no-change-journal": ((), ("a.jsonl",), (), True, False),
+            "other-journal": ((), ("a.jsonl",), (), False, True),
+            "catacomb-bytes": (("prepare",), ("a.jsonl",), (), None, True),
+            "activation-resolved": ((), (), ("x",), None, False),
+            "activation-pending": ((), (), ("x",), None, True),
+        }
+        for name, (catacomb, mutations, activation, verdict, rejects) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                roots = {
+                    "CATACOMB_ROOT": root / "catacomb",
+                    "MUTATION_ROOT": root / "mutations",
+                    "ACTIVATION_ROOT": root / "activation",
+                }
+                for path in roots.values():
+                    path.mkdir()
+                for entry in catacomb:
+                    (roots["CATACOMB_ROOT"] / entry).mkdir()
+                for entry in mutations:
+                    (roots["MUTATION_ROOT"] / entry).touch()
+                for entry in activation:
+                    (roots["ACTIVATION_ROOT"] / entry).touch()
+                retains = mock.Mock(return_value=verdict)
+                resolved = mock.Mock(return_value=name == "activation-resolved")
+                with (
+                    mock.patch.object(native_enroll, "STATE_ROOT", root),
+                    mock.patch.multiple(native_enroll, **roots),
+                    mock.patch.object(native_enroll, "_private"),
+                    mock.patch.object(
+                        native_enroll.t2_mutation_registry,
+                        "retains_only_no_change_enrollments",
+                        retains,
+                    ),
+                    mock.patch.object(
+                        native_enroll.t2_activation_journal_retention,
+                        "retains_only_resolved",
+                        resolved,
+                    ),
+                ):
+                    if rejects:
+                        with self.assertRaisesRegex(
+                            native_enroll.NativeEnrollmentError, "not empty"
+                        ):
+                            native_enroll._require_fresh_enrollment_state()
+                    else:
+                        native_enroll._require_fresh_enrollment_state()
+                if verdict is None:
+                    retains.assert_not_called()
+                else:
+                    retains.assert_called_once_with(roots["MUTATION_ROOT"])
+                if activation:
+                    resolved.assert_called_once_with(roots["ACTIVATION_ROOT"])
+                else:
+                    resolved.assert_not_called()
+
     def test_native_addition_uses_high_water_candidate_from_exact_inventory(self) -> None:
         selected = SimpleNamespace(apple_uid=501)
         store = mock.Mock()
@@ -135,7 +241,7 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             ),
             mock.patch.object(
                 native_enroll,
-                "_discard_cancelled_biolockout_prepare",
+                "_discard_recoverable_prepare",
                 return_value=False,
             ),
             mock.patch.object(
@@ -188,6 +294,7 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             terminal_identity_uuid=None,
             terminal_status=66,
             persistence=persistence,
+            baseline={"apple_uid": 501},
         )
         store = SimpleNamespace(discard_empty_prepare=mock.Mock())
         with mock.patch.object(
@@ -195,12 +302,160 @@ class NativeEnrollmentAuthorityTests(unittest.TestCase):
             "lexists",
             side_effect=lambda path: Path(path).name == "prepare",
         ):
-            discarded = native_enroll._discard_cancelled_biolockout_prepare(
-                store, history
+            discarded = native_enroll._discard_recoverable_prepare(
+                store, history, {}
             )
 
         self.assertTrue(discarded)
         store.discard_empty_prepare.assert_called_once_with()
+
+    def _lost_first_identity_history(self, **overrides: object) -> SimpleNamespace:
+        """A first enrollment whose master save stopped at its prepare request."""
+
+        persistence = SimpleNamespace(
+            phase=(
+                native_enroll.t2_enrollment_persistence_journal.PersistencePhase.OUTCOME_UNKNOWN
+            ),
+            outcome_unknown_stage="prepare",
+            outcome_unknown_host_commit_possible=False,
+            batch_index=0,
+            component_index=1,
+            staged_files=(("user_000001f5.cat", "7" * 64),),
+            batches=(
+                (("user_000001f5.cat", "1" * 64), ("master.cat", "2" * 64)),
+                (("biolockout.cat", "3" * 64),),
+            ),
+        )
+        for key, value in overrides.items():
+            setattr(persistence, key, value)
+        return SimpleNamespace(
+            phase=native_enroll.t2_enrollment_journal.EnrollmentPhase.OUTCOME_UNKNOWN,
+            terminal_identity_uuid=identifier(8),
+            terminal_status=None,
+            persistence=persistence,
+            baseline={"apple_uid": 501},
+        )
+
+    @staticmethod
+    def _cold_live() -> dict[str, object]:
+        return {
+            "per_user_identity_records": [],
+            "global_identity_records": [],
+            "catacomb": {"present": False, "uuid": identifier(0), "hash": "0" * 64},
+        }
+
+    def test_lost_first_identity_discards_staged_user_only_on_empty_surface(
+        self,
+    ) -> None:
+        """The staged user file goes only after the SEP shows the baseline again."""
+
+        history = self._lost_first_identity_history()
+        store = SimpleNamespace(
+            discard_prepare=mock.Mock(), discard_empty_prepare=mock.Mock()
+        )
+        with mock.patch.object(
+            native_enroll.os.path,
+            "lexists",
+            side_effect=lambda path: Path(path).name == "prepare",
+        ):
+            discarded = native_enroll._discard_recoverable_prepare(
+                store, history, self._cold_live()
+            )
+
+        self.assertTrue(discarded)
+        store.discard_prepare.assert_called_once_with(
+            {"user_000001f5.cat"}, {"user_000001f5.cat": "7" * 64}
+        )
+        store.discard_empty_prepare.assert_not_called()
+
+    def test_lost_first_identity_keeps_staged_user_while_sep_holds_identity(
+        self,
+    ) -> None:
+        """A warm bridgeOS still holds the identity; the staged file is its only copy."""
+
+        history = self._lost_first_identity_history()
+        store = SimpleNamespace(
+            discard_prepare=mock.Mock(), discard_empty_prepare=mock.Mock()
+        )
+        warm_variants = [
+            {
+                **self._cold_live(),
+                "per_user_identity_records": [
+                    {"user_id": 501, "identity_uuid": identifier(8)}
+                ],
+            },
+            {
+                **self._cold_live(),
+                "catacomb": {"present": True, "uuid": identifier(9), "hash": "3" * 64},
+            },
+            {},
+        ]
+        for live in warm_variants:
+            with (
+                self.subTest(live=live),
+                mock.patch.object(
+                    native_enroll.os.path,
+                    "lexists",
+                    side_effect=lambda path: Path(path).name == "prepare",
+                ),
+                self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError,
+                    "unsupported local Catacomb transaction",
+                ),
+            ):
+                native_enroll._discard_recoverable_prepare(store, history, live)
+        store.discard_prepare.assert_not_called()
+        store.discard_empty_prepare.assert_not_called()
+
+    def test_lost_first_identity_requires_the_exact_persistence_shape(self) -> None:
+        """Any other stage, component, or staged set is left for manual review."""
+
+        store = SimpleNamespace(
+            discard_prepare=mock.Mock(), discard_empty_prepare=mock.Mock()
+        )
+        variants = {
+            "complete stage": {"outcome_unknown_stage": "complete"},
+            "host commit possible": {"outcome_unknown_host_commit_possible": True},
+            "user component": {"component_index": 0},
+            "nothing staged": {"staged_files": ()},
+            "master staged too": {
+                "staged_files": (
+                    ("user_000001f5.cat", "7" * 64),
+                    ("master.cat", "8" * 64),
+                )
+            },
+            "other user staged": {"staged_files": (("user_000001f6.cat", "7" * 64),)},
+        }
+        for label, overrides in variants.items():
+            history = self._lost_first_identity_history(**overrides)
+            with (
+                self.subTest(label),
+                mock.patch.object(
+                    native_enroll.os.path,
+                    "lexists",
+                    side_effect=lambda path: Path(path).name == "prepare",
+                ),
+                self.assertRaisesRegex(
+                    native_enroll.NativeEnrollmentError,
+                    "unsupported local Catacomb transaction",
+                ),
+            ):
+                native_enroll._discard_recoverable_prepare(
+                    store, history, self._cold_live()
+                )
+        history = self._lost_first_identity_history()
+        with (
+            mock.patch.object(native_enroll.os.path, "lexists", return_value=True),
+            self.assertRaisesRegex(
+                native_enroll.NativeEnrollmentError,
+                "unsupported local Catacomb transaction",
+            ),
+        ):
+            native_enroll._discard_recoverable_prepare(
+                store, history, self._cold_live()
+            )
+        store.discard_prepare.assert_not_called()
+        store.discard_empty_prepare.assert_not_called()
 
     def test_exact_interrupted_authority_temp_is_resumed(self) -> None:
         """Only byte-identical publication state may cross the atomic rename."""

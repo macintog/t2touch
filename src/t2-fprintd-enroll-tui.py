@@ -821,6 +821,16 @@ class EnrollmentUI:
         return self.operation_result or 1
 
 
+def _public_error_detail(error: BaseException) -> str:
+    """Keep only printable ASCII from a client-side failure, bounded in length."""
+    text = "".join(
+        character
+        for character in str(error)[:160]
+        if character.isascii() and character.isprintable()
+    )
+    return text or type(error).__name__
+
+
 async def _present_until_closed(
     ui: EnrollmentUI, stop: asyncio.Event
 ) -> int:
@@ -839,8 +849,15 @@ async def _present_until_closed(
             return 130
         try:
             result = await operation
-        except (EnrollmentUIError, OSError):
-            ui.terminal = "ENROLLMENT STOPPED"
+        except (EnrollmentUIError, OSError) as error:
+            ui.terminal = (
+                "VERIFICATION STOPPED"
+                if ui.operation == "verify"
+                else "ENROLLMENT STOPPED"
+            )
+            # fprintd's D-Bus errors carry fixed, identifier-free messages;
+            # without them the screen cannot say why nothing was saved.
+            ui.terminal_detail = _public_error_detail(error)
             ui.render(bell=True)
             result = 1
         if sys.stdout.isatty() and not stop.is_set():
@@ -934,7 +951,12 @@ def main() -> int:
         ),
         expect_no_match=args.expect_no_match,
     )
-    return asyncio.run(_preview_async(ui) if args.preview else _main_async(ui))
+    result = asyncio.run(_preview_async(ui) if args.preview else _main_async(ui))
+    if result not in (0, 130) and ui.terminal_detail:
+        # Repeat the stopped reason after the screen is closed so a captured
+        # terminal session keeps it; it is already identifier-free.
+        print(f"t2-fprintd-enroll-tui: {ui.terminal_detail}", file=sys.stderr)
+    return result
 
 
 if __name__ == "__main__":

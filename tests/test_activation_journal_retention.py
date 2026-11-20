@@ -293,6 +293,33 @@ class ActivationJournalRetentionTests(unittest.TestCase):
         self.assertLessEqual(len(list(self.root.glob("*.jsonl"))), 64)
         self.assertFalse(stale.exists())
 
+    def test_retains_only_resolved_accepts_terminal_journals_only(self):
+        self.assertTrue(retention.retains_only_resolved(self.root))
+        ready = self._ready_journal(self._path(1))
+        self.assertTrue(retention.retains_only_resolved(self.root))
+        pending = self._path(2)
+        self._create(pending, readiness.AliasEvidence(False, None, None, None, None))
+        self._append(
+            pending,
+            "USER_KEYBAG_LOAD_INTENT",
+            {
+                "runtime_generation": self.runtime,
+                "keybag_sha256": "b" * 64,
+                "mutation_possible": True,
+            },
+        )
+        os.chmod(pending, 0o600)
+        self.assertFalse(retention.retains_only_resolved(self.root))
+        pending.unlink()
+        self.assertTrue(retention.retains_only_resolved(self.root))
+        stray = self.root / "notes.txt"
+        stray.write_text("x")
+        os.chmod(stray, 0o600)
+        self.assertFalse(retention.retains_only_resolved(self.root))
+        stray.unlink()
+        os.chmod(ready, 0o644)
+        self.assertFalse(retention.retains_only_resolved(self.root))
+
     def test_prune_keeps_recent_in_progress_journals(self):
         for index in range(1, 71):
             path = self._path(index)

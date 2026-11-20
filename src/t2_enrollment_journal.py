@@ -40,6 +40,22 @@ class EnrollmentPhase(Enum):
     OUTCOME_UNKNOWN = "outcome-unknown"
 
 
+def is_no_change_history(history: "EnrollmentHistory") -> bool:
+    """True when an enrollment journal proves the SEP identity set did not change.
+
+    A baseline-only or aborted-before-start journal never issued a command.  A
+    reconciled journal without a terminal identity closed as a no-change
+    recovery, so nothing it describes survives on the SEP or the host.
+    """
+    return history.phase in {
+        EnrollmentPhase.BASELINE,
+        EnrollmentPhase.ABORTED_BEFORE_START,
+    } or (
+        history.phase is EnrollmentPhase.RECONCILED
+        and history.terminal_identity_uuid is None
+    )
+
+
 @dataclass(frozen=True, repr=False)
 class EnrollmentHistory:
     operation_id: str
@@ -748,6 +764,20 @@ def validate_history(records: list[dict[str, Any]]) -> EnrollmentHistory:
                 raise EnrollmentJournalError(
                     "outcome-unknown recovery observed a persistent identity delta"
                 )
+            elif terminal_identity_uuid is not None:
+                # E2 saw the identity, but the fresh-generation read-back now
+                # proves the SEP and host both equal the baseline: the identity
+                # was lost before any host commit (for example at a cold
+                # bridgeOS restart). Nothing remains to verify after reboot.
+                if (
+                    persistence.phase
+                    is not persistence_journal.PersistencePhase.OUTCOME_UNKNOWN
+                    or persistence._outcome_unknown_host_commit_possible is not False
+                ):
+                    raise EnrollmentJournalError(
+                        "witnessed identity vanished without an uncommitted persistence failure"
+                    )
+                terminal_identity_uuid = None
             reconciled_snapshot_sha256 = evidence["snapshot_sha256"]
             phase = EnrollmentPhase.RECONCILED
             continue
