@@ -150,7 +150,8 @@ applesmc_boot_result() {
   local sys_root=${1:-/sys} path
   local -a results=()
   for path in "$sys_root"/bus/acpi/devices/APP0001:*/t2_sep_boot_state \
-    "$sys_root"/bus/platform/devices/applesmc*/t2_sep_boot_state; do
+    "$sys_root"/bus/platform/devices/applesmc*/t2_sep_boot_state \
+    "$sys_root"/module/t2_sep_boot_state/parameters/result; do
     [[ -e $path ]] || continue
     [[ -r $path ]] || { printf '%s\n' unavailable; return; }
     local value
@@ -166,7 +167,57 @@ applesmc_boot_result() {
   fi
 }
 
+# Linux 7.3 and later drive the T2 SMC through the macsmc drivers
+# (macsmc-acpi bound to APP0001). applesmc cannot bind there, so the
+# t2_sep_boot_state kernel module publishes the boot state instead
+# (https://github.com/denisvmedia/t2-sep-boot-state). It runs the same
+# transaction through apple_smc_read() and apple_smc_write(). A userspace
+# publisher is not enough: t2linux 7.3.5 and later refuse writes to EFMV,
+# EFMS and EFBS through /dev/smc.
+# shellcheck disable=SC2120 # The optional root arguments are for tests.
+macsmc_active() {
+  local sys_root=${1:-/sys} dev_root=${2:-/dev}
+  [[ -c $dev_root/smc ]] &&
+    compgen -G "$sys_root/bus/platform/drivers/macsmc-acpi/APP0001:*" >/dev/null
+}
+
+write_macsmc_boot_options() {
+  local epoch_major=${1:-1} epoch_minor=${2:-0}
+  {
+    printf 'options t2_sep_boot_state publish=1 epoch_major=%s epoch_minor=%s\n' \
+      "$epoch_major" "$epoch_minor"
+    printf 'softdep t2_sep_transport pre: t2_sep_boot_state\n'
+  } >/etc/modprobe.d/t2-sep-boot-state.conf || return 1
+  chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf || return 1
+}
+
+ensure_macsmc_publisher() {
+  if ! modinfo -k "$(uname -r)" -n t2_sep_boot_state >/dev/null 2>&1; then
+    echo "The t2_sep_boot_state kernel module is not installed for $(uname -r)." >&2
+    echo "Install it from https://github.com/denisvmedia/t2-sep-boot-state (sudo make dkms-install), then rerun this installer." >&2
+    return 1
+  fi
+  # Keep the epoch that install.sh wrote earlier.
+  if ! grep -qs '^options t2_sep_boot_state ' /etc/modprobe.d/t2-sep-boot-state.conf; then
+    write_macsmc_boot_options || return 1
+  fi
+}
+
+load_macsmc_publisher() {
+  # A copy that was loaded without publish=1 has written nothing, and it can
+  # be unloaded. After a write the module refuses to unload. Use rmmod:
+  # "modprobe -r" also removes soft dependencies.
+  if [[ -d /sys/module/t2_sep_boot_state ]]; then
+    rmmod t2_sep_boot_state || return 1
+  fi
+  modprobe t2_sep_boot_state || return 1
+}
+
 ensure_applesmc_on_disk() {
+  if macsmc_active; then
+    ensure_macsmc_publisher || return 2
+    return 0
+  fi
   # A resident replacement can outlive DKMS removal. Restore the next-boot
   # module even if this session already published boot state successfully.
   if ! modinfo -k "$(uname -r)" -p applesmc 2>/dev/null |
@@ -176,7 +227,7 @@ ensure_applesmc_on_disk() {
 }
 
 check_applesmc_prerequisite() {
-  local allow_active_upgrade=${1:-0} result
+  local allow_active_upgrade=${1:-0} publisher_loaded=${2:-0} result
   if [[ $allow_active_upgrade != 0 && $allow_active_upgrade != 1 ]]; then
     echo "Internal error: active-upgrade allowance must be 0 or 1." >&2
     return 2
@@ -205,8 +256,22 @@ check_applesmc_prerequisite() {
       emit_next_step "A reboot is required before fresh setup can continue. Preserve diagnostics; do not retry the boot-policy transaction in this session."
       return 3
       ;;
-    absent|disabled)
+    absent|disabled|ready)
       ensure_applesmc_on_disk || return 2
+      if macsmc_active; then
+        # The module publishes when it loads, so no restart is needed. Load it
+        # once, then judge the result it reports.
+        if [[ $publisher_loaded == 1 ]]; then
+          echo "The t2_sep_boot_state module loaded without publishing the boot state ($result)." >&2
+          return 2
+        fi
+        load_macsmc_publisher || {
+          echo "The t2_sep_boot_state module did not load." >&2
+          return 2
+        }
+        check_applesmc_prerequisite "$allow_active_upgrade" 1
+        return
+      fi
       enable_applesmc_next_boot || return 2
       echo "Restart when convenient, then rerun ./install-omarchy.sh." >&2
       emit_next_step "Restart when convenient, then rerun ./install-omarchy.sh."
@@ -253,7 +318,7 @@ prepare_transport_update() {
   # next boot, and preserves the private account and fingerprint state.
   "$source_dir/uninstall.sh" || return 2
   ensure_applesmc_on_disk || return 2
-  enable_applesmc_next_boot || return 2
+  macsmc_active || enable_applesmc_next_boot || return 2
   echo "Transport update prepared. Restart, then rerun ./install-omarchy.sh." >&2
   emit_next_step "Restart, then rerun ./install-omarchy.sh."
   return 3

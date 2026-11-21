@@ -222,6 +222,30 @@ installer run stages the included `applesmc-t2touch` DKMS prerequisite and
 stops before changing biometric, PAM, or service state. Follow the installer’s
 restart or recovery instructions, then rerun `./install-omarchy.sh`. The installer never reboots the machine itself.
 
+### Linux 7.3 and later (`macsmc`)
+
+From Linux 7.3, T2 Linux kernels drive the SMC through the `macsmc` drivers,
+and `applesmc` is gone. There, the boot state is published by the
+[`t2_sep_boot_state`](https://github.com/denisvmedia/t2-sep-boot-state) kernel
+module. It runs the same transaction through the SMC functions that `macsmc`
+exports. A userspace publisher does not work on these kernels: T2 Linux
+7.3.5 and later refuse writes to `EFMV`, `EFMS` and `EFBS` through `/dev/smc`.
+
+Install the module first, then run the installer:
+
+```sh
+git clone https://github.com/denisvmedia/t2-sep-boot-state.git
+cd t2-sep-boot-state
+sudo make dkms-install
+```
+
+The installer detects `macsmc` (`/dev/smc` with `macsmc-acpi` bound to
+`APP0001`). It writes `/etc/modprobe.d/t2-sep-boot-state.conf`, so the module
+publishes whenever `t2_sep_transport` loads. On the first run it loads the
+module itself and reads its result from
+`/sys/module/t2_sep_boot_state/parameters/result`, so no restart is needed.
+The `applesmc` DKMS prerequisite is not used there.
+
 The installer exits `3` when a reboot is required before it can continue
 (staging the applesmc boot-state publisher, or `--prepare-transport-update`).
 That is an expected stop, not a build failure: a labelled `NEXT STEP` block is

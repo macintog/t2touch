@@ -596,12 +596,18 @@ if [[ $identity_replacement == 1 ]]; then
 fi
 printf '%s\n' "$module_options" >/etc/modprobe.d/t2-sep-transport.conf
 chmod 0644 /etc/modprobe.d/t2-sep-transport.conf
-{
-  printf 'options applesmc t2_sep_boot_state=1 t2_sep_epoch_major=%s t2_sep_epoch_minor=%s\n' \
-    "$sep_epoch_major" "$sep_epoch_minor"
-  printf 'softdep t2_sep_transport pre: applesmc\n'
-} >/etc/modprobe.d/t2-sep-boot-state.conf
-chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf
+if macsmc_active; then
+  # macsmc kernels (Linux 7.3+): the t2_sep_boot_state module publishes, and
+  # t2_sep_transport pulls it in.
+  write_macsmc_boot_options "$sep_epoch_major" "$sep_epoch_minor"
+else
+  {
+    printf 'options applesmc t2_sep_boot_state=1 t2_sep_epoch_major=%s t2_sep_epoch_minor=%s\n' \
+      "$sep_epoch_major" "$sep_epoch_minor"
+    printf 'softdep t2_sep_transport pre: applesmc\n'
+  } >/etc/modprobe.d/t2-sep-boot-state.conf
+  chmod 0644 /etc/modprobe.d/t2-sep-boot-state.conf
+fi
 
 install -d -o "$target_user" -g "$target_gid" -m 0755 "$target_home/.config/systemd/user"
 install -o "$target_user" -g "$target_gid" -m 0644 \
