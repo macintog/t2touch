@@ -43,6 +43,7 @@ rebuild_boot_images
             ["bash", "-c", '''
 set -euo pipefail
 source "$1"
+macsmc_active() { return 1; }
 applesmc_boot_result() { printf '%s\n' "$RESULT"; }
 modinfo() { [[ $DISK == yes ]] && printf 't2_sep_boot_state: publisher\n'; }
 stage_applesmc_prerequisite() { echo staged; [[ $FAIL_STAGE == no ]]; }
@@ -161,6 +162,7 @@ prepared_transport_update_matches "$3"
                         ["bash", "-c", r'''
 set -euo pipefail
 source "$1"
+macsmc_active() { return 1; }
 source_dir=$2
 transport_update_marker=$2/marker
 stat() { printf '%s\n' "$METADATA"; }
@@ -214,6 +216,7 @@ cat "$transport_update_marker"
             ["bash", "-c", r'''
 set -euo pipefail
 source "$1"
+macsmc_active() { return 1; }
 source_dir=$2
 record_prepared_transport_update() { echo record; }
 ensure_applesmc_on_disk() { echo applesmc; }
@@ -314,6 +317,7 @@ record_prepared_transport_update abcdef0123456789 ABCDEF0123456789
                         ["bash", "-c", '''
 set -euo pipefail
 source "$1"
+macsmc_active() { return 1; }
 source_dir=$2
 record_prepared_transport_update() { echo recorded; }
 ensure_applesmc_on_disk() { echo staged; }
@@ -593,3 +597,114 @@ python3() { [[ $completed == yes ]]; }
             result = self._run_t2_hardware_gate(root)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "accepted")
+
+
+class MacsmcPublisherTests(unittest.TestCase):
+    """Linux 7.3+: the t2_sep_boot_state module publishes under macsmc."""
+
+    def run_macsmc_gate(self, before, after, module_installed=True, load_fails=False):
+        # RESULT_FILE holds the boot-state result; the fake load writes AFTER.
+        with tempfile.TemporaryDirectory() as directory:
+            result_file = Path(directory) / "result"
+            result_file.write_text(before + "\n")
+            return subprocess.run(
+                ["bash", "-c", r'''
+set -euo pipefail
+source "$1"
+macsmc_active() { return 0; }
+applesmc_boot_result() { cat "$RESULT_FILE"; }
+modinfo() { [[ $MODULE_INSTALLED == yes ]]; }
+write_macsmc_boot_options() { echo options; : >"$OPTIONS_FILE"; }
+grep() { [[ -e $OPTIONS_FILE ]]; }
+load_macsmc_publisher() {
+  echo loaded
+  [[ $LOAD_FAILS == no ]] || return 1
+  printf '%s\n' "$AFTER" >"$RESULT_FILE"
+}
+stage_applesmc_prerequisite() { echo staged; }
+enable_applesmc_next_boot() { echo boot-options; }
+check_applesmc_prerequisite 0 || exit $?
+echo product-ready
+''', "fixture", str(HELPER)],
+                env={**os.environ, "RESULT_FILE": str(result_file), "AFTER": after,
+                     "OPTIONS_FILE": str(Path(directory) / "options"),
+                     "MODULE_INSTALLED": "yes" if module_installed else "no",
+                     "LOAD_FAILS": "yes" if load_fails else "no"},
+                capture_output=True, text=True, check=False,
+            )
+
+    def test_absent_publisher_loads_the_module_and_continues_without_restart(self):
+        for before in ("absent", "disabled", "ready"):
+            with self.subTest(before=before):
+                result = self.run_macsmc_gate(before, "response-received:1")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(),
+                                 ["options", "loaded", "product-ready"])
+
+    def test_module_that_publishes_nothing_stops_after_one_load(self):
+        result = self.run_macsmc_gate("absent", "disabled")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.count("loaded"), 1)
+        self.assertIn("loaded without publishing the boot state (disabled)", result.stderr)
+        self.assertNotIn("product-ready", result.stdout)
+
+    def test_failed_publication_after_load_never_continues(self):
+        for after in ("rejected", "failed", "commit-uncertain", "not-applicable"):
+            with self.subTest(after=after):
+                result = self.run_macsmc_gate("absent", after)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(after, result.stderr)
+                self.assertNotIn("product-ready", result.stdout)
+
+    def test_missing_module_names_the_remedy(self):
+        result = self.run_macsmc_gate("absent", "response-received:1", module_installed=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("t2_sep_boot_state kernel module is not installed", result.stderr)
+        self.assertIn("https://github.com/denisvmedia/t2-sep-boot-state", result.stderr)
+        self.assertNotIn("loaded", result.stdout)
+
+    def test_load_failure_stops(self):
+        result = self.run_macsmc_gate("absent", "response-received:1", load_fails=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("did not load", result.stderr)
+
+    def test_published_state_needs_no_load(self):
+        result = self.run_macsmc_gate("response-received:1", "unused")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["options", "product-ready"])
+
+    def test_reads_the_module_result_parameter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = Path(directory) / "module/t2_sep_boot_state/parameters/result"
+
+            def read():
+                return subprocess.run(
+                    ["bash", "-c", 'source "$1"; applesmc_boot_result "$2"',
+                     "fixture", str(HELPER), directory],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+
+            self.assertEqual(read(), "absent")
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text("response-received:1\n")
+            self.assertEqual(read(), "response-received:1")
+
+    def test_macsmc_detection_needs_the_smc_device_and_the_bound_driver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sys_root = Path(directory) / "sys"
+            dev_root = Path(directory) / "dev"
+            dev_root.mkdir()
+
+            def active():
+                return subprocess.run(
+                    ["bash", "-c", 'source "$1"; macsmc_active "$2" "$3"',
+                     "fixture", str(HELPER), str(sys_root), str(dev_root)],
+                    capture_output=True, text=True, check=False,
+                ).returncode == 0
+
+            self.assertFalse(active())
+            # A character device stands in for /dev/smc.
+            (dev_root / "smc").symlink_to("/dev/null")
+            self.assertFalse(active())
+            (sys_root / "bus/platform/drivers/macsmc-acpi/APP0001:00").mkdir(parents=True)
+            self.assertTrue(active())
